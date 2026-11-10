@@ -24,6 +24,7 @@ const ACCELERATION: f32 = 40.0;
 struct FrameProfile {
     sim_ms: f32,
     render_ms: f32,
+    drawn_instances: usize,
 }
 
 impl FrameProfile {
@@ -84,22 +85,54 @@ impl PerformanceStats {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PerformanceTier {
+    Healthy,
+    Warning,
+    Critical,
+}
+
+impl PerformanceTier {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+}
+
 impl App {
+    fn performance_tier(&self) -> PerformanceTier {
+        let total_ms = self.frame_profile.total_ms();
+        let target_ms = Time::frame_budget_ms() as f32;
+        if total_ms <= target_ms {
+            PerformanceTier::Healthy
+        } else if total_ms <= target_ms * 1.25 {
+            PerformanceTier::Warning
+        } else {
+            PerformanceTier::Critical
+        }
+    }
+
     fn performance_report(&self) -> String {
         let (avg_ms, worst_ms) = self.performance.snapshot();
         let total_ms = self.frame_profile.total_ms();
         let target_ms = Time::frame_budget_ms() as f32;
         let headroom_ms = target_ms - total_ms;
+        let tier = self.performance_tier();
 
         format!(
-            "sim={:.1}ms render={:.1}ms total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms",
+            "sim={:.1}ms render={:.1}ms drawn={} total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms tier={}",
             self.frame_profile.sim_ms,
             self.frame_profile.render_ms,
+            self.frame_profile.drawn_instances,
             total_ms,
             avg_ms,
             worst_ms,
             target_ms,
             headroom_ms,
+            tier.label(),
         )
     }
 }
@@ -154,6 +187,11 @@ impl App {
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
 
         let instances = self.instances();
+        let draw_budget = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.budgeted_instance_count(instances.len()))
+            .unwrap_or(0);
         let render_start = Instant::now();
         let rendered = if let Some(renderer) = &mut self.renderer {
             renderer.render(&instances)
@@ -162,16 +200,22 @@ impl App {
         };
         let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
 
-        self.frame_profile = FrameProfile { sim_ms, render_ms };
+        self.frame_profile = FrameProfile {
+            sim_ms,
+            render_ms,
+            drawn_instances: draw_budget,
+        };
         self.performance.add(self.frame_profile.total_ms());
 
         if self.frame_profile.over_budget() {
             let (avg_ms, worst_ms) = self.performance.snapshot();
+            let tier = self.performance_tier();
             log::warn!(
-                "frame budget exceeded: {} avg={:.2}ms worst={:.2}ms",
+                "frame budget exceeded: {} avg={:.2}ms worst={:.2}ms tier={}",
                 self.performance_report(),
                 avg_ms,
                 worst_ms,
+                tier.label(),
             );
         }
 
@@ -382,6 +426,7 @@ mod tests {
         let profile = FrameProfile {
             sim_ms: 4.0,
             render_ms: 5.0,
+            drawn_instances: 3,
         };
 
         assert!(profile.over_budget());
@@ -421,14 +466,35 @@ mod tests {
         app.frame_profile = FrameProfile {
             sim_ms: 3.0,
             render_ms: 4.0,
+            drawn_instances: 2,
         };
         app.performance.add(7.0);
         app.performance.add(9.0);
 
         let report = app.performance_report();
+        assert!(report.contains("drawn=2"));
         assert!(report.contains("total=7.0ms"));
         assert!(report.contains("target=8.0ms"));
         assert!(report.contains("headroom=1.0ms"));
+        assert!(report.contains("tier=healthy"));
+    }
+
+    #[test]
+    fn performance_tier_classifies_warning_and_critical_budget_slips() {
+        let mut app = App::new();
+        app.frame_profile = FrameProfile {
+            sim_ms: 8.0,
+            render_ms: 2.0,
+            drawn_instances: 4,
+        };
+        assert_eq!(app.performance_tier(), PerformanceTier::Warning);
+
+        app.frame_profile = FrameProfile {
+            sim_ms: 10.0,
+            render_ms: 10.0,
+            drawn_instances: 8,
+        };
+        assert_eq!(app.performance_tier(), PerformanceTier::Critical);
     }
 
     #[test]
