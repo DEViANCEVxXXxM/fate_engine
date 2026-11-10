@@ -84,6 +84,26 @@ impl PerformanceStats {
     }
 }
 
+impl App {
+    fn performance_report(&self) -> String {
+        let (avg_ms, worst_ms) = self.performance.snapshot();
+        let total_ms = self.frame_profile.total_ms();
+        let target_ms = Time::frame_budget_ms() as f32;
+        let headroom_ms = target_ms - total_ms;
+
+        format!(
+            "sim={:.1}ms render={:.1}ms total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms",
+            self.frame_profile.sim_ms,
+            self.frame_profile.render_ms,
+            total_ms,
+            avg_ms,
+            worst_ms,
+            target_ms,
+            headroom_ms,
+        )
+    }
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -148,11 +168,8 @@ impl App {
         if self.frame_profile.over_budget() {
             let (avg_ms, worst_ms) = self.performance.snapshot();
             log::warn!(
-                "frame budget exceeded: sim={:.2}ms render={:.2}ms total={:.2}ms target={:.2}ms avg={:.2}ms worst={:.2}ms",
-                self.frame_profile.sim_ms,
-                self.frame_profile.render_ms,
-                self.frame_profile.total_ms(),
-                Time::frame_budget_ms() as f32,
+                "frame budget exceeded: {} avg={:.2}ms worst={:.2}ms",
+                self.performance_report(),
                 avg_ms,
                 worst_ms,
             );
@@ -222,8 +239,25 @@ impl App {
     }
 
     fn instances(&self) -> Vec<Instance2d> {
+        let view_size = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.camera.view_size)
+            .unwrap_or(Vec2::new(20.0, 20.0));
+        let half = view_size * 0.5;
+        let center = self
+            .renderer
+            .as_ref()
+            .map(|renderer| renderer.camera.center)
+            .unwrap_or(Vec2::ZERO);
+
         let mut instances = Vec::new();
         for (entity, position) in self.world.positions.iter() {
+            let delta = position.0 - center;
+            if delta.x.abs() > half.x || delta.y.abs() > half.y {
+                continue;
+            }
+
             let rotation = self.world.rotations.get(entity).map_or(0.0, |r| r.0);
             instances.push(Instance2d {
                 position: position.0,
@@ -248,16 +282,12 @@ impl App {
             } else {
                 format!("{headroom:.1}ms")
             };
-            let (avg_ms, worst_ms) = self.performance.snapshot();
 
             window.set_title(&format!(
-                "fate - {:.0} fps - {} entities - sim {:.1}ms / render {:.1}ms / avg {:.1}ms / worst {:.1}ms / budget {}",
+                "fate - {:.0} fps - {} entities - {} / budget {}",
                 self.time.fps(),
                 self.world.entity_count(),
-                self.frame_profile.sim_ms,
-                self.frame_profile.render_ms,
-                avg_ms,
-                worst_ms,
+                self.performance_report(),
                 budget_text,
             ));
         }
@@ -383,5 +413,32 @@ mod tests {
         let (avg, worst) = stats.snapshot();
         assert!((avg - 6.0).abs() < 1e-5);
         assert!((worst - 8.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn performance_report_contains_budget_summary() {
+        let mut app = App::new();
+        app.frame_profile = FrameProfile { sim_ms: 3.0, render_ms: 4.0 };
+        app.performance.add(7.0);
+        app.performance.add(9.0);
+
+        let report = app.performance_report();
+        assert!(report.contains("total=7.0ms"));
+        assert!(report.contains("target=8.0ms"));
+        assert!(report.contains("headroom=1.0ms"));
+    }
+
+    #[test]
+    fn instances_only_include_entities_in_camera_view() {
+        let mut app = App::new();
+        let visible = app.world.spawn();
+        let hidden = app.world.spawn();
+        app.world.positions.insert(visible, Position(Vec2::new(1.0, 1.0)));
+        app.world.positions.insert(hidden, Position(Vec2::new(30.0, 30.0)));
+
+        let instances = app.instances();
+
+        assert_eq!(instances.len(), 2);
+        assert!(instances.iter().all(|instance| instance.position != Vec2::new(30.0, 30.0)));
     }
 }

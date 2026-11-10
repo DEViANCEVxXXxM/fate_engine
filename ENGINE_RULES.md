@@ -36,6 +36,7 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - The render subsystem is responsible only for drawing the world.
 - The camera transform must remain stable across window resize and reconfiguration.
 - Projection and camera matrices must remain finite even when the window is minimized, zero-sized, or temporarily reports a degenerate aspect ratio.
+- The render path must cull or skip entities outside the active camera frustum to preserve stable 120 FPS frame budgets.
 - Matrices must follow the project’s column-major convention.
 - The app shell may request redraws, but it must not directly manipulate gameplay state in the render path.
 
@@ -47,6 +48,7 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - The app must expose a frame-budget signal so the engine can detect whether the current frame was within the target budget.
 - Fixed-step and render work must be measured separately so frame pacing issues can be identified without guessing.
 - The engine must keep a rolling performance history to estimate average and worst-case frame time, not just the most recent sample.
+- The engine must expose a machine-readable performance summary for total, average, worst, target, and headroom values.
 - The engine must emit an explicit warning when the combined fixed-step and render time exceeds the 120 FPS frame budget.
 - If a renderer is missing, a frame must degrade gracefully without emitting undefined behavior.
 
