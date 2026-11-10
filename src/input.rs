@@ -1,94 +1,110 @@
 use std::collections::HashSet;
+use std::hash::Hash;
 
-use winit::keyboard::KeyCode;
-
-/// Per-frame keyboard/mouse state with an action mapping layer.
-///
-/// The engine reads actions (`Action::MoveLeft`, ...) instead of raw keys, so
-/// rebinding later is a data change, not a code change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Action {
-    MoveLeft,
-    MoveRight,
-    MoveUp,
-    MoveDown,
-    Boost,
+/// Platform-independent per-frame button state with a configurable action map.
+pub struct Input<Action, Button> {
+    pressed: HashSet<Button>,
+    just_pressed: HashSet<Button>,
+    just_released: HashSet<Button>,
+    just_pressed_actions: HashSet<Action>,
+    just_released_actions: HashSet<Action>,
+    bindings: Vec<(Action, Button)>,
 }
 
-#[derive(Default)]
-pub struct Input {
-    pressed: HashSet<KeyCode>,
-    just_pressed: HashSet<KeyCode>,
-    just_released: HashSet<KeyCode>,
-    bindings: Vec<(Action, KeyCode)>,
+impl<Action, Button> Default for Input<Action, Button> {
+    fn default() -> Self {
+        Self {
+            pressed: HashSet::new(),
+            just_pressed: HashSet::new(),
+            just_released: HashSet::new(),
+            just_pressed_actions: HashSet::new(),
+            just_released_actions: HashSet::new(),
+            bindings: Vec::new(),
+        }
+    }
 }
 
 #[allow(dead_code)]
-impl Input {
+impl<Action, Button> Input<Action, Button>
+where
+    Action: Copy + Eq + Hash,
+    Button: Copy + Eq + Hash,
+{
     pub fn new() -> Self {
-        let mut input = Self::default();
-        input.bind(Action::MoveLeft, KeyCode::KeyA);
-        input.bind(Action::MoveLeft, KeyCode::ArrowLeft);
-        input.bind(Action::MoveRight, KeyCode::KeyD);
-        input.bind(Action::MoveRight, KeyCode::ArrowRight);
-        input.bind(Action::MoveUp, KeyCode::KeyW);
-        input.bind(Action::MoveUp, KeyCode::ArrowUp);
-        input.bind(Action::MoveDown, KeyCode::KeyS);
-        input.bind(Action::MoveDown, KeyCode::ArrowDown);
-        input.bind(Action::Boost, KeyCode::ShiftLeft);
-        input
+        Self::default()
     }
 
-    pub fn bind(&mut self, action: Action, key: KeyCode) {
-        self.bindings.push((action, key));
+    pub fn bind(&mut self, action: Action, button: Button) {
+        self.bindings.push((action, button));
     }
 
-    pub fn press(&mut self, key: KeyCode) {
-        if self.pressed.insert(key) {
-            self.just_pressed.insert(key);
+    pub fn press(&mut self, button: Button) {
+        if self.pressed.contains(&button) {
+            return;
         }
+        let newly_pressed_actions: Vec<_> = self
+            .bound_actions(button)
+            .into_iter()
+            .filter(|action| !self.action_down(*action))
+            .collect();
+        self.pressed.insert(button);
+        self.just_pressed.insert(button);
+        self.just_pressed_actions.extend(newly_pressed_actions);
     }
 
-    pub fn release(&mut self, key: KeyCode) {
-        if self.pressed.remove(&key) {
-            self.just_released.insert(key);
+    pub fn release(&mut self, button: Button) {
+        if !self.pressed.contains(&button) {
+            return;
         }
+        let affected_actions = self.bound_actions(button);
+        self.pressed.remove(&button);
+        self.just_released.insert(button);
+        let newly_released_actions: Vec<_> = affected_actions
+            .into_iter()
+            .filter(|action| !self.action_down(*action))
+            .collect();
+        self.just_released_actions.extend(newly_released_actions);
     }
 
-    pub fn key_down(&self, key: KeyCode) -> bool {
-        self.pressed.contains(&key)
+    pub fn button_down(&self, button: Button) -> bool {
+        self.pressed.contains(&button)
     }
 
-    pub fn key_just_pressed(&self, key: KeyCode) -> bool {
-        self.just_pressed.contains(&key)
+    pub fn button_just_pressed(&self, button: Button) -> bool {
+        self.just_pressed.contains(&button)
     }
 
-    pub fn key_just_released(&self, key: KeyCode) -> bool {
-        self.just_released.contains(&key)
+    pub fn button_just_released(&self, button: Button) -> bool {
+        self.just_released.contains(&button)
     }
 
     pub fn action_down(&self, action: Action) -> bool {
         self.bindings
             .iter()
-            .any(|(bound, key)| *bound == action && self.pressed.contains(key))
+            .any(|(bound, button)| *bound == action && self.pressed.contains(button))
     }
 
     pub fn action_just_pressed(&self, action: Action) -> bool {
-        self.bindings
-            .iter()
-            .any(|(bound, key)| *bound == action && self.just_pressed.contains(key))
+        self.just_pressed_actions.contains(&action)
     }
 
     pub fn action_just_released(&self, action: Action) -> bool {
+        self.just_released_actions.contains(&action)
+    }
+
+    fn bound_actions(&self, button: Button) -> Vec<Action> {
         self.bindings
             .iter()
-            .any(|(bound, key)| *bound == action && self.just_released.contains(key))
+            .filter_map(|(action, bound_button)| (*bound_button == button).then_some(*action))
+            .collect()
     }
 
     /// Call once at the end of every frame, after systems have read the input.
     pub fn end_frame(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
+        self.just_pressed_actions.clear();
+        self.just_released_actions.clear();
     }
 }
 
@@ -96,35 +112,66 @@ impl Input {
 mod tests {
     use super::*;
 
-    #[test]
-    fn key_press_and_release_transitions_are_tracked() {
-        let mut input = Input::new();
-
-        input.press(KeyCode::KeyA);
-        assert!(input.key_down(KeyCode::KeyA));
-        assert!(input.key_just_pressed(KeyCode::KeyA));
-        assert!(input.action_down(Action::MoveLeft));
-        assert!(input.action_just_pressed(Action::MoveLeft));
-
-        input.end_frame();
-        assert!(!input.key_just_pressed(KeyCode::KeyA));
-        assert!(!input.action_just_pressed(Action::MoveLeft));
-
-        input.release(KeyCode::KeyA);
-        assert!(!input.key_down(KeyCode::KeyA));
-        assert!(input.key_just_released(KeyCode::KeyA));
-        assert!(input.action_just_released(Action::MoveLeft));
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    enum Action {
+        ActionA,
+        ActionB,
     }
 
     #[test]
-    fn repeated_end_frame_clears_edge_state() {
+    fn button_and_action_transitions_are_tracked() {
         let mut input = Input::new();
-        input.press(KeyCode::KeyD);
-        assert!(input.action_just_pressed(Action::MoveRight));
+        input.bind(Action::ActionA, 1_u8);
+        input.bind(Action::ActionB, 2_u8);
+
+        input.press(1);
+        assert!(input.button_down(1));
+        assert!(input.button_just_pressed(1));
+        assert!(input.action_down(Action::ActionA));
+        assert!(input.action_just_pressed(Action::ActionA));
+
+        input.end_frame();
+        assert!(!input.button_just_pressed(1));
+        assert!(!input.action_just_pressed(Action::ActionA));
+
+        input.release(1);
+        assert!(!input.button_down(1));
+        assert!(input.button_just_released(1));
+        assert!(input.action_just_released(Action::ActionA));
+    }
+
+    #[test]
+    fn edge_state_is_cleared_once_per_frame() {
+        let mut input = Input::new();
+        input.bind(Action::ActionB, 2_u8);
+        input.press(2);
+        assert!(input.action_just_pressed(Action::ActionB));
 
         input.end_frame();
         input.end_frame();
-        assert!(!input.action_just_pressed(Action::MoveRight));
-        assert!(!input.key_just_pressed(KeyCode::KeyD));
+        assert!(!input.action_just_pressed(Action::ActionB));
+        assert!(!input.button_just_pressed(2));
+    }
+
+    #[test]
+    fn action_edges_follow_aggregate_state_across_multiple_buttons() {
+        let mut input = Input::new();
+        input.bind(Action::ActionA, 1_u8);
+        input.bind(Action::ActionA, 2_u8);
+
+        input.press(1);
+        assert!(input.action_just_pressed(Action::ActionA));
+        input.end_frame();
+
+        input.press(2);
+        assert!(input.action_down(Action::ActionA));
+        assert!(!input.action_just_pressed(Action::ActionA));
+        input.release(1);
+        assert!(input.action_down(Action::ActionA));
+        assert!(!input.action_just_released(Action::ActionA));
+
+        input.release(2);
+        assert!(!input.action_down(Action::ActionA));
+        assert!(input.action_just_released(Action::ActionA));
     }
 }

@@ -1,7 +1,5 @@
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};
 
-use super::Vec2;
-
 const FRACTIONAL_BITS: u32 = 32;
 const SCALE: i64 = 1_i64 << FRACTIONAL_BITS;
 
@@ -149,10 +147,6 @@ impl FixedVec2 {
         } else {
             self / length
         }
-    }
-
-    pub fn to_vec2(self) -> Vec2 {
-        Vec2::new(self.x.to_f32(), self.y.to_f32())
     }
 }
 

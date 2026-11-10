@@ -1,7 +1,7 @@
 use super::world::World;
 use crate::math::{Fixed, FixedVec2};
 
-/// Integrate position from velocity: `p += v * dt`.
+/// Integrate fixed-point position from velocity: `p += v * dt`.
 ///
 /// Positions and velocities live in separate columns, so destructuring the
 /// `World` gives two disjoint borrows and the loop stays a plain `for`.

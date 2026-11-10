@@ -38,6 +38,7 @@ impl Mat4 {
     }
 
     /// `self * rhs`, i.e. `rhs` is applied first.
+    #[allow(clippy::should_implement_trait)]
     pub fn mul(self, rhs: Self) -> Self {
         let mut out = [0.0; 16];
         for col in 0..4 {
@@ -75,6 +76,26 @@ impl Mat4 {
             -s, c, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.0, //
             0.0, 0.0, 0.0, 1.0, //
+        ])
+    }
+
+    pub fn rotation_x(radians: f32) -> Self {
+        let (s, c) = radians.sin_cos();
+        Self::from_cols_array([
+            1.0, 0.0, 0.0, 0.0, //
+            0.0, c, s, 0.0, //
+            0.0, -s, c, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
+        ])
+    }
+
+    pub fn rotation_y(radians: f32) -> Self {
+        let (s, c) = radians.sin_cos();
+        Self::from_cols_array([
+            c, 0.0, -s, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            s, 0.0, c, 0.0, //
+            0.0, 0.0, 0.0, 1.0,
         ])
     }
 
@@ -189,6 +210,15 @@ mod tests {
         // Column 0 is the transformed X axis: it should become +Y.
         assert!((r.m[0] - 0.0).abs() < 1e-5);
         assert!((r.m[1] - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn rotations_x_and_y_use_right_handed_axes() {
+        let rotation_x = Mat4::rotation_x(std::f32::consts::FRAC_PI_2);
+        assert!((rotation_x.m[6] - 1.0).abs() < 1e-5);
+
+        let rotation_y = Mat4::rotation_y(std::f32::consts::FRAC_PI_2);
+        assert!((rotation_y.m[2] + 1.0).abs() < 1e-5);
     }
 
     #[test]

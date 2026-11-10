@@ -1,4 +1,4 @@
-use crate::time::Time;
+use fate_engine::time::Time;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct FrameProfile {

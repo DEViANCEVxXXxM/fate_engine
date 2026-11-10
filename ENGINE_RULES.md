@@ -2,17 +2,30 @@
 
 This document defines the core rules for the Phase 1 engine milestone. These are engineering constraints, not gameplay design goals.
 
+## 0. Engine scope and reuse
+
+- The 3D cooperative FPS is the first validation workload, not a hardcoded engine genre.
+- Keep game-specific rules, content, and progression outside reusable engine mechanisms.
+- Treat backend, transport, tick-rate, and data-layout choices as replaceable or configurable when a real consumer needs it; do not generalize without evidence.
+- The current 120 Hz simulation rate and fixed-point implementation are Phase 1 defaults, not universal requirements for every game built on the engine.
+- Keep the runnable demo/game, its scene setup, and its configuration under `projects/demo`; it should consume engine crates through path dependencies rather than live in the engine library.
+- Reusable crates must not own demo-specific entities, stress-scene setup, or presentation behavior.
+
 ## 1. Deterministic fixed-step simulation
 
-- The simulation tick is fixed at 120 Hz unless a later milestone explicitly changes it.
+- The current Phase 1 simulation default is 120 Hz; consumers must not treat that rate as a universal engine invariant.
 - The same world state and the same input sequence must produce the same result on repeated runs.
-- Gameplay state and simulation math use deterministic fixed-point values; float conversion is limited to the renderer boundary.
+- The Phase 1 deterministic gameplay path uses fixed-point math; this is a current implementation choice, not a requirement for every engine consumer.
 - Replay snapshots use a versioned canonical little-endian encoding with validated restore; schema changes require a format-version bump.
 - State hashes are diagnostic, non-cryptographic checksums and must not be used as network authentication.
+- Procedural simulation randomness must use the seedable deterministic generator, whose state is part of the canonical snapshot.
 - Replay tapes validate command ranges and compare a state checksum after every tick, reporting the first divergence.
+- Rollback input history has an explicit non-zero capacity; reconciliation and predicted-input corrections are transactional and fail if required commands are no longer retained.
 - The fixed-step loop must remain stable when the frame delta is large or when the app is briefly paused.
 - The simulation core advances only through fixed ticks and explicit `SimulationInput` snapshots; it must not read platform input or wall-clock time.
 - Wall-clock accumulation and conversion of platform key state into simulation commands belong to the app/platform boundary.
+- Deterministic simulation, ECS, fixed-point math, replay, and rollback live in the dependency-free `fate_sim` crate; windowing and rendering remain in the app project. Demo-specific scene population stays in `projects/demo`.
+- CPU simulation benchmarks run in a separate headless tool and must not be presented as full-frame or GPU measurements.
 
 ## 2. Frame and time rules
 
@@ -30,11 +43,12 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 
 ## 4. Input semantics
 
-- `key_down` means the key is currently held.
-- `key_just_pressed` means it transitioned to down this frame.
-- `key_just_released` means it transitioned to up this frame.
-- The same rules apply to actions built on top of the keyboard bindings.
+- `button_down` means the button is currently held.
+- `button_just_pressed` means it transitioned to down this frame.
+- `button_just_released` means it transitioned to up this frame.
+- The same rules apply to actions built on top of button bindings.
 - Edge-state must be cleared once per frame via `end_frame()`.
+- Reusable input tracking must not define game-specific actions or depend on a particular window/input backend; projects map platform buttons to their own actions at the app boundary.
 
 ## 5. Rendering and camera rules
 
@@ -71,10 +85,10 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 
 ## 8. Quality gate
 
-The Phase 1 gate is considered complete only when the project passes:
+The Phase 1 gate is considered complete only when the workspace passes:
 
-- `cargo test`
-- `cargo fmt`
-- `cargo clippy --all-targets -- -D warnings`
+- `cargo test --workspace`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets -- -D warnings`
 
 These checks are the minimum engineering baseline for further engine work.

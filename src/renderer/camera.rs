@@ -6,6 +6,13 @@ const MIN_ASPECT: f32 = 0.25;
 const MAX_ASPECT: f32 = 4.0;
 const MIN_ZOOM: f32 = 0.25;
 const MAX_ZOOM: f32 = 8.0;
+const MIN_FOV_Y: f32 = 10.0_f32.to_radians();
+const MAX_FOV_Y: f32 = 120.0_f32.to_radians();
+const MIN_NEAR: f32 = 0.01;
+const MAX_NEAR: f32 = 1_000.0;
+const MIN_CLIP_GAP: f32 = 0.01;
+const MAX_FAR: f32 = 100_000.0;
+const MAX_PITCH: f32 = 89.0_f32.to_radians();
 
 /// 2D camera: a world-space size plus a center position.
 ///
@@ -75,6 +82,88 @@ impl Camera2d {
     }
 }
 
+/// Perspective camera using +Y as world up and -Z as its forward direction
+/// when yaw and pitch are zero.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug)]
+pub struct Camera3d {
+    pub position: Vec3,
+    /// Horizontal rotation in radians.
+    pub yaw: f32,
+    /// Vertical rotation in radians.
+    pub pitch: f32,
+    pub fov_y_radians: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+impl Default for Camera3d {
+    fn default() -> Self {
+        Self {
+            position: Vec3::new(0.0, 1.6, 5.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_radians: 75.0_f32.to_radians(),
+            near: 0.1,
+            far: 1_000.0,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl Camera3d {
+    fn finite_or(value: f32, fallback: f32) -> f32 {
+        if value.is_finite() { value } else { fallback }
+    }
+
+    fn safe_position(&self) -> Vec3 {
+        Vec3::new(
+            Self::finite_or(self.position.x, 0.0),
+            Self::finite_or(self.position.y, 0.0),
+            Self::finite_or(self.position.z, 0.0),
+        )
+    }
+
+    fn safe_yaw(&self) -> f32 {
+        Self::finite_or(self.yaw, 0.0).rem_euclid(std::f32::consts::TAU)
+    }
+
+    fn safe_pitch(&self) -> f32 {
+        Self::finite_or(self.pitch, 0.0).clamp(-MAX_PITCH, MAX_PITCH)
+    }
+
+    fn safe_fov_y(&self) -> f32 {
+        Self::finite_or(self.fov_y_radians, 75.0_f32.to_radians()).clamp(MIN_FOV_Y, MAX_FOV_Y)
+    }
+
+    fn safe_clip_planes(&self) -> (f32, f32) {
+        let near = Self::finite_or(self.near, 0.1).clamp(MIN_NEAR, MAX_NEAR);
+        let far = Self::finite_or(self.far, 1_000.0).clamp(near + MIN_CLIP_GAP, MAX_FAR);
+        (near, far)
+    }
+
+    fn safe_aspect(aspect: f32) -> f32 {
+        Self::finite_or(aspect, 1.0)
+            .abs()
+            .clamp(MIN_ASPECT, MAX_ASPECT)
+    }
+
+    pub fn forward(&self) -> Vec3 {
+        let yaw = self.safe_yaw();
+        let pitch = self.safe_pitch();
+        let cos_pitch = pitch.cos();
+        Vec3::new(yaw.sin() * cos_pitch, pitch.sin(), -yaw.cos() * cos_pitch).normalize()
+    }
+
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        let position = self.safe_position();
+        let view = Mat4::look_at(position, position + self.forward(), Vec3::Y);
+        let (near, far) = self.safe_clip_planes();
+        let projection = Mat4::perspective(self.safe_fov_y(), Self::safe_aspect(aspect), near, far);
+        projection.mul(view)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +217,66 @@ mod tests {
                 .iter()
                 .all(|value| value.is_finite())
         );
+    }
+
+    #[test]
+    fn default_3d_camera_faces_negative_z() {
+        let camera = Camera3d::default();
+        assert!((camera.forward() - Vec3::new(0.0, 0.0, -1.0)).length() < 1e-5);
+
+        let view_projection = camera.view_projection(16.0 / 9.0);
+        assert!(view_projection.m.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn camera_3d_yaw_and_pitch_rotate_forward_direction() {
+        let camera = Camera3d {
+            yaw: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        assert!((camera.forward() - Vec3::X).length() < 1e-5);
+
+        let camera = Camera3d {
+            pitch: std::f32::consts::FRAC_PI_4,
+            ..Default::default()
+        };
+        assert!((camera.forward().y - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+    }
+
+    #[test]
+    fn camera_3d_sanitizes_invalid_projection_inputs() {
+        let camera = Camera3d {
+            position: Vec3::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY),
+            yaw: f32::NAN,
+            pitch: f32::INFINITY,
+            fov_y_radians: 0.0,
+            near: f32::NAN,
+            far: 0.0,
+        };
+
+        for aspect in [0.0, f32::NAN, f32::INFINITY, 100.0] {
+            let view_projection = camera.view_projection(aspect);
+            assert!(view_projection.m.iter().all(|value| value.is_finite()));
+        }
+        assert!((camera.forward().length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn camera_3d_projection_maps_depth_to_wgpu_zero_one_range() {
+        let camera = Camera3d {
+            position: Vec3::ZERO,
+            near: 0.1,
+            far: 100.0,
+            ..Default::default()
+        };
+        let view_projection = camera.view_projection(1.0);
+        let projected_depth = |distance: f32| {
+            let clip_z = view_projection.m[10] * -distance + view_projection.m[14];
+            let clip_w = view_projection.m[11] * -distance;
+            clip_z / clip_w
+        };
+
+        assert!(projected_depth(camera.near).abs() < 1e-5);
+        assert!((projected_depth(camera.far) - 1.0).abs() < 1e-5);
     }
 }

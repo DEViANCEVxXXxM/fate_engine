@@ -1,12 +1,18 @@
 [package]
-name = "fate"
+name = "fate_engine"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["crates/fate_sim", "crates/fate_sim_bench", "projects/demo"]
+default-members = ["projects/demo"]
+resolver = "3"
+
 [dependencies]
 bytemuck = "1.25.2"
-env_logger = "0.11.11"
 log = "0.4.35"
-pollster = "1.0.1"
 wgpu = "30.0.1"
 winit = "0.30.13"
+
+[dev-dependencies]
+pollster = "1.0.1"

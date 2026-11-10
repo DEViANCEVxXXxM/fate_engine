@@ -3,17 +3,23 @@ use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{DeviceEvent, ElementState, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::input::{Action, Input};
-use crate::math::Vec2;
 use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
-use crate::renderer::{Instance2d, Renderer};
-use crate::simulation::{EngineCore, SIMULATION_HZ, SimulationInput};
-use crate::time::Time;
+use fate_engine::math::{Mat4, Vec2, Vec3};
+use fate_engine::renderer::{Camera3d, Draw3d, Instance2d, Mesh3d, Renderer, cube_mesh};
+use fate_engine::time::Time;
+use fate_sim::simulation::{SIMULATION_HZ, SimulationInput};
+
+use crate::demo_input::{self, Action, DemoInput};
+use crate::demo_simulation::DemoSimulation;
+const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
+const CAMERA_MOVE_SPEED: f32 = 4.0;
+const CAMERA_BOOST_SPEED: f32 = 8.0;
+const MAX_CAMERA_FRAME_DELTA: f32 = 0.05;
 
 impl App {
     fn draw_pressure(&self) -> f32 {
@@ -64,8 +70,13 @@ impl App {
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    core: EngineCore,
-    input: Input,
+    demo_mesh: Option<Mesh3d>,
+    three_d_mode: bool,
+    cursor_captured: bool,
+    focused: bool,
+    mouse_delta: (f64, f64),
+    core: DemoSimulation,
+    input: DemoInput,
     time: Time,
     frame_profile: FrameProfile,
     performance: PerformanceStats,
@@ -77,8 +88,13 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            core: EngineCore::new_demo(),
-            input: Input::new(),
+            demo_mesh: None,
+            three_d_mode: false,
+            cursor_captured: false,
+            focused: true,
+            mouse_delta: (0.0, 0.0),
+            core: DemoSimulation::new(),
+            input: demo_input::new(),
             time: Time::new(SIMULATION_HZ as f32),
             frame_profile: FrameProfile::default(),
             performance: PerformanceStats::default(),
@@ -96,18 +112,30 @@ impl App {
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
         self.input.end_frame();
         self.update_camera();
+        self.update_3d_camera(frame_dt);
 
-        let instances = self.instances();
-        let draw_budget = self
-            .renderer
-            .as_ref()
-            .map(|renderer| renderer.budgeted_instance_count(instances.len()))
-            .unwrap_or(0);
         let render_start = Instant::now();
-        let rendered = if let Some(renderer) = &mut self.renderer {
-            renderer.render(&instances)
+        let (rendered, draw_budget) = if self.three_d_mode {
+            if let (Some(renderer), Some(mesh)) = (&mut self.renderer, &self.demo_mesh) {
+                let draws = Self::three_d_demo_draws(mesh);
+                let count = renderer.budgeted_instance_count(draws.len());
+                (renderer.render_meshes(&draws), count)
+            } else {
+                (false, 0)
+            }
         } else {
-            false
+            let instances = self.instances();
+            let count = self
+                .renderer
+                .as_ref()
+                .map(|renderer| renderer.budgeted_instance_count(instances.len()))
+                .unwrap_or(0);
+            let rendered = if let Some(renderer) = &mut self.renderer {
+                renderer.render(&instances)
+            } else {
+                false
+            };
+            (rendered, count)
         };
         let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -142,6 +170,9 @@ impl App {
     }
 
     fn simulation_input(&self) -> SimulationInput {
+        if self.three_d_mode {
+            return SimulationInput::default();
+        }
         let axis = |positive, negative| {
             self.input.action_down(positive) as i8 - self.input.action_down(negative) as i8
         };
@@ -157,7 +188,7 @@ impl App {
             .world
             .positions
             .get(self.core.player)
-            .map(|position| position.0.to_vec2())
+            .map(|position| Vec2::new(position.0.x.to_f32(), position.0.y.to_f32()))
     }
 
     fn update_camera(&mut self) {
@@ -167,6 +198,155 @@ impl App {
         if let Some(renderer) = &mut self.renderer {
             renderer.camera.center = target;
         }
+    }
+
+    fn three_d_demo_draws(mesh: &Mesh3d) -> Vec<Draw3d<'_>> {
+        let mut draws = Vec::with_capacity(19);
+
+        let mut add_box = |position: Vec3, scale: Vec3, rotation: f32, tint: [f32; 3]| {
+            let model = Mat4::translation(position)
+                .mul(Mat4::rotation_y(rotation))
+                .mul(Mat4::rotation_x(rotation * 0.5))
+                .mul(Mat4::scale(scale));
+            draws.push(Draw3d { mesh, model, tint });
+        };
+
+        add_box(
+            Vec3::new(0.0, -0.15, -1.0),
+            Vec3::new(12.0, 0.3, 16.0),
+            0.0,
+            [0.22, 0.28, 0.38],
+        );
+        add_box(
+            Vec3::new(0.0, 1.5, -8.0),
+            Vec3::new(12.0, 3.0, 0.3),
+            0.0,
+            [0.30, 0.40, 0.55],
+        );
+        add_box(
+            Vec3::new(-6.0, 1.5, -1.0),
+            Vec3::new(0.3, 3.0, 14.0),
+            0.0,
+            [0.30, 0.40, 0.55],
+        );
+        add_box(
+            Vec3::new(6.0, 1.5, -1.0),
+            Vec3::new(0.3, 3.0, 14.0),
+            0.0,
+            [0.30, 0.40, 0.55],
+        );
+
+        for x in [-4.0, 4.0] {
+            for z in [-6.0, -2.0, 2.0] {
+                add_box(
+                    Vec3::new(x, 1.0, z),
+                    Vec3::new(0.8, 2.0, 0.8),
+                    0.0,
+                    [0.20, 0.62, 0.58],
+                );
+            }
+        }
+
+        let cube_colors = [
+            [0.95, 0.28, 0.22],
+            [0.98, 0.58, 0.18],
+            [0.95, 0.82, 0.22],
+            [0.34, 0.78, 0.34],
+            [0.18, 0.72, 0.78],
+            [0.22, 0.45, 0.95],
+            [0.55, 0.32, 0.90],
+            [0.90, 0.30, 0.62],
+            [0.88, 0.88, 0.92],
+        ];
+        for row in 0..3 {
+            for column in 0..3 {
+                let x = (column as f32 - 1.0) * 1.6;
+                let z = -(row as f32) * 1.6;
+                add_box(
+                    Vec3::new(x, 0.8, z),
+                    Vec3::new(0.9, 1.2, 0.9),
+                    (row + column) as f32 * 0.18,
+                    cube_colors[row * 3 + column],
+                );
+            }
+        }
+        draws
+    }
+
+    fn update_3d_camera(&mut self, dt: f32) {
+        let mouse_delta = std::mem::take(&mut self.mouse_delta);
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        if !self.three_d_mode {
+            return;
+        }
+
+        update_fps_camera(
+            &mut renderer.camera_3d,
+            FpsCameraInput {
+                forward: self.input.button_down(KeyCode::KeyW)
+                    || self.input.button_down(KeyCode::ArrowUp),
+                backward: self.input.button_down(KeyCode::KeyS)
+                    || self.input.button_down(KeyCode::ArrowDown),
+                left: self.input.button_down(KeyCode::KeyA)
+                    || self.input.button_down(KeyCode::ArrowLeft),
+                right: self.input.button_down(KeyCode::KeyD)
+                    || self.input.button_down(KeyCode::ArrowRight),
+                boost: self.input.action_down(Action::Boost),
+                mouse_delta,
+                dt,
+            },
+        );
+    }
+
+    fn capture_cursor(&mut self) -> bool {
+        let Some(window) = &self.window else {
+            return false;
+        };
+        let result = window
+            .set_cursor_grab(CursorGrabMode::Locked)
+            .or_else(|_| window.set_cursor_grab(CursorGrabMode::Confined));
+        match result {
+            Ok(()) => {
+                window.set_cursor_visible(false);
+                self.cursor_captured = true;
+                true
+            }
+            Err(error) => {
+                log::error!("failed to capture cursor for 3d camera: {error}");
+                self.cursor_captured = false;
+                false
+            }
+        }
+    }
+
+    fn release_cursor(&mut self) {
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(true);
+            if let Err(error) = window.set_cursor_grab(CursorGrabMode::None) {
+                log::warn!("failed to release cursor: {error}");
+            }
+        }
+        self.cursor_captured = false;
+        self.mouse_delta = (0.0, 0.0);
+    }
+
+    fn set_3d_mode(&mut self, enabled: bool) {
+        if enabled {
+            if self.demo_mesh.is_none() {
+                log::warn!("3d demo mesh is unavailable");
+                return;
+            }
+            self.three_d_mode = true;
+            if self.focused {
+                self.capture_cursor();
+            }
+        } else {
+            self.three_d_mode = false;
+            self.release_cursor();
+        }
+        self.mouse_delta = (0.0, 0.0);
     }
 
     fn handle_key(
@@ -181,13 +361,22 @@ impl App {
         };
 
         if code == KeyCode::Escape && state == ElementState::Pressed {
-            event_loop.exit();
+            if self.three_d_mode {
+                self.set_3d_mode(false);
+            } else {
+                event_loop.exit();
+            }
             return;
         }
 
         if code == KeyCode::F2 && state == ElementState::Pressed && !repeat {
             let enable_stress = !self.core.demo_stress_enabled();
             self.core.set_demo_stress(enable_stress);
+            return;
+        }
+
+        if code == KeyCode::F3 && state == ElementState::Pressed && !repeat {
+            self.set_3d_mode(!self.three_d_mode);
             return;
         }
 
@@ -212,7 +401,7 @@ impl App {
 
         let mut instances = Vec::new();
         for (entity, position) in self.core.world.positions.iter() {
-            let render_position = position.0.to_vec2();
+            let render_position = Vec2::new(position.0.x.to_f32(), position.0.y.to_f32());
             let delta = render_position - center;
             if delta.x.abs() > half.x || delta.y.abs() > half.y {
                 continue;
@@ -242,6 +431,11 @@ impl App {
 
         if let Some(window) = &self.window {
             let headroom = self.time.budget_headroom_ms();
+            let mode_text = if self.three_d_mode {
+                "3d mesh demo"
+            } else {
+                "2d simulation demo"
+            };
             let budget_text = if headroom >= 0.0 {
                 format!("+{headroom:.1}ms")
             } else {
@@ -249,7 +443,7 @@ impl App {
             };
 
             window.set_title(&format!(
-                "fate | WASD/arrows move, Shift boost, F2 stress {} | {:.0} fps - {} entities - {} / budget {}",
+                "fate | {mode_text} | WASD/arrows move, Shift boost, F2 stress {}, F3 3d | {:.0} fps - {} entities - {} / budget {}",
                 if self.core.demo_stress_enabled() { "on" } else { "off" },
                 self.time.fps(),
                 self.core.world.entity_count(),
@@ -278,9 +472,17 @@ impl ApplicationHandler for App {
 
         let renderer = pollster::block_on(Renderer::new(window.clone()))
             .expect("failed to initialize renderer");
+        let demo_mesh = match cube_mesh(&renderer.gpu.device) {
+            Ok(mesh) => Some(mesh),
+            Err(error) => {
+                log::error!("failed to create 3d demo mesh: {error}");
+                None
+            }
+        };
 
         self.window = Some(window);
         self.renderer = Some(renderer);
+        self.demo_mesh = demo_mesh;
     }
 
     fn window_event(
@@ -291,6 +493,14 @@ impl ApplicationHandler for App {
     ) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(focused) => {
+                self.focused = focused;
+                if focused && self.three_d_mode {
+                    self.capture_cursor();
+                } else if !focused {
+                    self.release_cursor();
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 self.handle_key(event_loop, event.physical_key, event.state, event.repeat);
             }
@@ -306,6 +516,21 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        if self.three_d_mode
+            && self.cursor_captured
+            && let DeviceEvent::MouseMotion { delta } = event
+        {
+            self.mouse_delta.0 += delta.0;
+            self.mouse_delta.1 += delta.1;
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let frame_budget = Duration::from_millis(Time::frame_budget_ms());
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame_budget));
@@ -313,6 +538,58 @@ impl ApplicationHandler for App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FpsCameraInput {
+    forward: bool,
+    backward: bool,
+    left: bool,
+    right: bool,
+    boost: bool,
+    mouse_delta: (f64, f64),
+    dt: f32,
+}
+
+fn update_fps_camera(camera: &mut Camera3d, input: FpsCameraInput) {
+    let dt = if input.dt.is_finite() {
+        input.dt.clamp(0.0, MAX_CAMERA_FRAME_DELTA)
+    } else {
+        0.0
+    };
+    if input.mouse_delta.0.is_finite() {
+        camera.yaw +=
+            (input.mouse_delta.0 as f32).clamp(-1_000.0, 1_000.0) * CAMERA_LOOK_SENSITIVITY;
+    }
+    if input.mouse_delta.1.is_finite() {
+        camera.pitch -=
+            (input.mouse_delta.1 as f32).clamp(-1_000.0, 1_000.0) * CAMERA_LOOK_SENSITIVITY;
+    }
+
+    let forward = camera.forward();
+    let horizontal_forward = Vec3::new(forward.x, 0.0, forward.z).normalize();
+    let right = Vec3::new(-horizontal_forward.z, 0.0, horizontal_forward.x);
+    let mut movement = Vec3::ZERO;
+    if input.forward {
+        movement += horizontal_forward;
+    }
+    if input.backward {
+        movement += -horizontal_forward;
+    }
+    if input.right {
+        movement += right;
+    }
+    if input.left {
+        movement += -right;
+    }
+    if movement.length_squared() > 0.0 {
+        let speed = if input.boost {
+            CAMERA_BOOST_SPEED
+        } else {
+            CAMERA_MOVE_SPEED
+        };
+        camera.position += movement.normalize() * (speed * dt);
     }
 }
 
@@ -329,9 +606,10 @@ pub async fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ecs::Position;
-    use crate::math::FixedVec2;
     use crate::performance::PerformanceStats;
+    use fate_engine::renderer::Camera3d;
+    use fate_sim::ecs::Position;
+    use fate_sim::math::{Fixed, FixedVec2};
 
     #[test]
     fn step_frame_without_renderer_is_skipped_cleanly() {
@@ -367,7 +645,10 @@ mod tests {
         app.input.press(winit::keyboard::KeyCode::KeyA);
         let _ = app.step_frame();
 
-        assert!(!app.input.key_just_pressed(winit::keyboard::KeyCode::KeyA));
+        assert!(
+            !app.input
+                .button_just_pressed(winit::keyboard::KeyCode::KeyA)
+        );
     }
 
     #[test]
@@ -492,7 +773,10 @@ mod tests {
         assert!(!rendered);
         assert!(app.core.world.entity_count() >= 1);
         assert!(app.frame_profile.total_ms() >= 0.0);
-        assert!(!app.input.key_just_pressed(winit::keyboard::KeyCode::KeyA));
+        assert!(
+            !app.input
+                .button_just_pressed(winit::keyboard::KeyCode::KeyA)
+        );
     }
 
     #[test]
@@ -512,19 +796,13 @@ mod tests {
         let mut app = App::new();
         let visible = app.core.world.spawn();
         let hidden = app.core.world.spawn();
-        app.core.world.positions.insert(
-            visible,
-            Position(FixedVec2::new(
-                crate::math::Fixed::ONE,
-                crate::math::Fixed::ONE,
-            )),
-        );
+        app.core
+            .world
+            .positions
+            .insert(visible, Position(FixedVec2::new(Fixed::ONE, Fixed::ONE)));
         app.core.world.positions.insert(
             hidden,
-            Position(FixedVec2::new(
-                crate::math::Fixed::from_int(30),
-                crate::math::Fixed::from_int(30),
-            )),
+            Position(FixedVec2::new(Fixed::from_int(30), Fixed::from_int(30))),
         );
 
         let instances = app.instances();
@@ -559,27 +837,24 @@ mod tests {
     fn player_camera_target_tracks_player_position() {
         let mut app = App::new();
         let player = app.core.player;
-        let target = FixedVec2::new(
-            crate::math::Fixed::from_int(4),
-            crate::math::Fixed::from_int(-3),
-        );
+        let target = FixedVec2::new(Fixed::from_int(4), Fixed::from_int(-3));
         app.core.world.positions.insert(player, Position(target));
 
-        assert_eq!(app.player_camera_target(), Some(target.to_vec2()));
+        assert_eq!(
+            app.player_camera_target(),
+            Some(Vec2::new(target.x.to_f32(), target.y.to_f32()))
+        );
     }
 
     #[test]
     fn player_is_visually_distinguished_from_demo_swarm() {
         let app = App::new();
         let instances = app.instances();
-        let player_position = app
-            .core
-            .world
-            .positions
-            .get(app.core.player)
-            .unwrap()
-            .0
-            .to_vec2();
+        let fixed_player_position = app.core.world.positions.get(app.core.player).unwrap().0;
+        let player_position = Vec2::new(
+            fixed_player_position.x.to_f32(),
+            fixed_player_position.y.to_f32(),
+        );
         let player_instance = instances
             .iter()
             .find(|instance| instance.position == player_position)
@@ -592,5 +867,110 @@ mod tests {
                 .filter(|instance| instance.position != player_position)
                 .all(|instance| instance.scale == 1.0)
         );
+    }
+
+    #[test]
+    fn fps_camera_moves_in_facing_direction_and_sprint_changes_speed() {
+        let mut camera = Camera3d::default();
+        update_fps_camera(
+            &mut camera,
+            FpsCameraInput {
+                forward: true,
+                backward: false,
+                left: false,
+                right: false,
+                boost: false,
+                mouse_delta: (0.0, 0.0),
+                dt: 0.5,
+            },
+        );
+        assert!((camera.position.z - 4.8).abs() < 1e-5);
+
+        let start = camera.position;
+        update_fps_camera(
+            &mut camera,
+            FpsCameraInput {
+                forward: true,
+                backward: false,
+                left: false,
+                right: false,
+                boost: true,
+                mouse_delta: (0.0, 0.0),
+                dt: 0.1,
+            },
+        );
+        assert!((start.z - camera.position.z - 0.4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn fps_camera_strafe_is_relative_to_yaw_without_changing_height() {
+        let mut camera = Camera3d {
+            yaw: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let initial_height = camera.position.y;
+        update_fps_camera(
+            &mut camera,
+            FpsCameraInput {
+                forward: false,
+                backward: false,
+                left: false,
+                right: true,
+                boost: false,
+                mouse_delta: (0.0, 0.0),
+                dt: 0.25,
+            },
+        );
+
+        assert!(camera.position.x < 0.0);
+        assert!((camera.position.y - initial_height).abs() < 1e-5);
+        assert!(camera.position.z.is_finite());
+    }
+
+    #[test]
+    fn fps_camera_look_and_diagonal_movement_are_applied_safely() {
+        let mut camera = Camera3d::default();
+        let initial_position = camera.position;
+        update_fps_camera(
+            &mut camera,
+            FpsCameraInput {
+                forward: true,
+                backward: false,
+                left: false,
+                right: true,
+                boost: false,
+                mouse_delta: (100.0, -50.0),
+                dt: 0.1,
+            },
+        );
+        assert!((camera.yaw - 0.25).abs() < 1e-5);
+        assert!((camera.pitch - 0.125).abs() < 1e-5);
+        assert!((camera.position - initial_position).length() - 0.4 < 1e-5);
+
+        update_fps_camera(
+            &mut camera,
+            FpsCameraInput {
+                forward: false,
+                backward: false,
+                left: false,
+                right: false,
+                boost: false,
+                mouse_delta: (f64::MAX, f64::NAN),
+                dt: f32::INFINITY,
+            },
+        );
+        assert!(camera.yaw.is_finite());
+        assert!(camera.pitch.is_finite());
+        assert!(camera.position.x.is_finite());
+        assert!(camera.position.z.is_finite());
+    }
+
+    #[test]
+    fn first_person_controls_do_not_feed_the_2d_simulation() {
+        let mut app = App::new();
+        app.three_d_mode = true;
+        app.input.press(KeyCode::KeyW);
+
+        assert_eq!(app.simulation_input(), SimulationInput::default());
     }
 }

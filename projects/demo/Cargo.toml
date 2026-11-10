@@ -1,0 +1,12 @@
+[package]
+name = "fate_demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+env_logger = "0.11.11"
+fate_engine = { path = "../.." }
+fate_sim = { path = "../../crates/fate_sim" }
+log = "0.4.35"
+pollster = "1.0.1"
+winit = "0.30.13"

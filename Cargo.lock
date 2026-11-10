@@ -476,15 +476,37 @@ dependencies = [
 ]
 
 [[package]]
-name = "fate"
+name = "fate_demo"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "fate_engine",
+ "fate_sim",
+ "log",
+ "pollster",
+ "winit",
+]
+
+[[package]]
+name = "fate_engine"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "env_logger",
  "log",
  "pollster",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "fate_sim"
+version = "0.1.0"
+
+[[package]]
+name = "fate_sim_bench"
+version = "0.1.0"
+dependencies = [
+ "fate_sim",
 ]
 
 [[package]]

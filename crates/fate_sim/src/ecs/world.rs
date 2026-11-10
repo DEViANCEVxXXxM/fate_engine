@@ -3,7 +3,7 @@ use crate::math::{Fixed, FixedVec2};
 pub type Entity = u32;
 const MAX_SNAPSHOT_ENTITIES: u32 = 1_000_000;
 
-/// A dense column of optional components, indexed by `Entity`.
+/// A dense column of optional simulation components, indexed by `Entity`.
 pub struct Column<T> {
     data: Vec<Option<T>>,
 }
@@ -81,7 +81,7 @@ pub struct Position(pub FixedVec2);
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Velocity(pub FixedVec2);
 
-/// Orientation in radians, for the 2D demo.
+/// 2D orientation in radians.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rotation(pub Fixed);
 

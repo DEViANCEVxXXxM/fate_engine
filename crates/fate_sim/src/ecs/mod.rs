@@ -1,4 +1,4 @@
-//! A small sparse-set-ish ECS.
+//! A small sparse-set-ish ECS in the headless simulation crate.
 //!
 //! Every entity index is valid in every component column, which keeps lookup
 //! O(1) and the code trivial to debug. This is deliberately not archetype

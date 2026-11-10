@@ -6,19 +6,38 @@
 
 ## Vision
 
-The engine is built around three load-bearing pillars:
+The first validation target is a 3D cooperative FPS, not the only game the
+engine should be able to host. Its needs guide priorities and benchmarks, while
+game rules stay outside the reusable engine core. The project should generalize
+proven primitives, not build speculative abstractions for every possible genre.
+
+Current architectural hypotheses include:
 
 - **Archetype-based ECS** with SoA layout and a parallel scheduler.
 - **Fixed deterministic FixedUpdate** on fixed-point math.
 - **Server-authoritative networking** with prediction and rollback.
 
-Rendering is planned via `ash` to retain direct control over Vulkan without an excessive abstraction layer. The transport layer is planned on `quinn`: QUIC provides stream multiplexing and built-in encryption.
+The design document evaluates `ash` for Vulkan and `quinn` for transport, but
+neither is a locked-in dependency: the current renderer uses `wgpu`, and both
+choices should be made from prototype evidence. Consumers should depend on
+engine-facing interfaces rather than backend-specific types.
 
-Game requirements — responsiveness, procedural generation, and co-op — are treated as constraints on budgets and subsystem boundaries. They must not leak into the core architecture.
+Game requirements — responsiveness, procedural generation, and co-op — guide
+budgets and subsystem boundaries. They must not become hardcoded game rules in
+the engine core.
 
 ## Current status
 
 The project is in early development.
+
+- The engine is a library crate at the repository root. The demo/game
+  application lives separately in [`projects/demo/`](projects/demo/) with its
+  own manifest, entry point, scenes, simulation setup, controls, and tests. It
+  depends on the engine library and `fate_sim`; demo-specific scene creation
+  does not live in either reusable crate.
+- The renderer provides both 2D and perspective indexed-mesh paths with depth
+  testing. The demo exercises them; see its
+  [project README](projects/demo/README.md) for run instructions and controls.
 
 - [ ] Archetype ECS
 - [ ] SoA component storage
@@ -31,25 +50,10 @@ The project is in early development.
 - [ ] Transport on `quinn`
 - [ ] Vertical slice: scene, input, simulation, rendering, networking
 
-## Running the current demo
-
-Run the windowed prototype with `cargo run`. The demo starts with a small moving
-swarm plus off-screen entities. The camera follows the larger player marker,
-making fixed-step movement, world bounds, camera culling, and frame telemetry
-visible together.
-
-- **W/A/S/D** or **arrow keys** — move the player.
-- **Left Shift** — boost movement.
-- **F2** — toggle the 192-visible-instance stress scene. It reaches 75% of the
-  draw budget and should report a warning tier while off-screen entities remain
-  culled.
-- **Escape** — close the demo.
-
-The window title reports frame timings, rolling averages/worst-case, draw
-pressure, budget headroom, and current policy tier.
-
 The simulation now advances only through explicit 120 Hz fixed ticks and
-platform-independent input snapshots. Gameplay components and simulation
+platform-independent input snapshots. Reusable input tracking is generic over
+button and action types; projects own their platform-specific bindings and
+action names. Gameplay components and simulation
 systems use signed Q32.32 fixed-point arithmetic; conversion to `f32` happens
 only when preparing renderer-facing transforms. A golden replay regression
 test applies a fixed command sequence and verifies exact fixed-point state.
@@ -64,7 +68,55 @@ per-tick state hash, serialize it, and replay it from an initial snapshot.
 Playback reports the first diverging tick; the replay format is diagnostic
 and is not authenticated.
 
+The simulation exposes a seedable deterministic random stream for
+reproducible procedural generation. Its state is included in snapshots, so
+restoring a snapshot also restores the exact future random sequence. The
+generator provides unbiased bounded unsigned, signed, and fixed-point ranges
+plus seeded Fisher–Yates shuffling. Demo scene generation is implemented in
+the demo project using these reusable simulation primitives.
+
+The replay module also provides a bounded `RollbackSession`: it accepts an
+authoritative snapshot, restores it, and reapplies buffered local inputs to
+the current tick. It can replace predicted commands at specific buffered
+ticks before replaying. Reconciliation fails without changing live state or
+input history if a correction is invalid or required history has expired.
+
+The deterministic core, ECS, fixed-point math, replay, and rollback code live
+in the `fate_sim` workspace crate. It has no graphics, windowing, or
+third-party dependencies and can be tested independently with
+`cargo test -p fate_sim`. The separate demo project depends on both `fate_sim`
+and the root `fate_engine` library.
+
+Run the standalone CPU-only benchmark without initializing a window or GPU:
+
+```powershell
+cargo run -p fate_sim_bench -- --ticks 10000
+```
+
+It warms up each scenario, then reports idle, player movement, and entity-load
+measurements at 64, 256, and 1,024 entities. Reports include average, median,
+p95, p99, and worst tick times against the exact 120 Hz simulation budget.
+For less noisy results, use `cargo run --release -p fate_sim_bench -- --ticks
+10000`. This is simulation-only timing, not a full-frame or GPU performance
+guarantee.
+
+## Working with the engine
+
+See the [engine guide](docs/engine-guide.md) for workspace setup, consuming the
+library, and using the current input, time, simulation, and rendering APIs.
+For a review of current capabilities and a prioritized backlog, see the
+[engine roadmap](docs/roadmap.md).
+
 ## Architectural principles
+
+### Reuse without over-generalizing
+
+- Keep reusable mechanisms in engine crates and game-specific rules in the
+  application/game layer.
+- Make consequential policies configurable or replaceable when real consumers
+  need variation (for example, simulation rate or renderer/network backend).
+- Avoid adding abstractions without a demonstrated second use case; verify
+  boundaries with a small alternative consumer or test where practical.
 
 ### ECS
 

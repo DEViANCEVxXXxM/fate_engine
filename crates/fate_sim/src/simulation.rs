@@ -1,11 +1,12 @@
+//! Fixed-tick gameplay simulation with no platform, wall-clock, or renderer dependency.
+
 use crate::ecs::{self, Position, Rotation, Spin, Velocity, World};
 use crate::math::{Fixed, FixedVec2};
-use std::collections::HashSet;
+use crate::rng::DeterministicRng;
 use std::fmt;
 
 pub const SIMULATION_HZ: u32 = 120;
-const STATE_FORMAT_VERSION: u16 = 2;
-const MAX_SNAPSHOT_ENTITIES: u32 = 1_000_000;
+const STATE_FORMAT_VERSION: u16 = 4;
 const FIXED_DELTA: Fixed = Fixed::from_ratio(1, SIMULATION_HZ as i64);
 const PLAYFIELD_HALF: FixedVec2 = FixedVec2::new(Fixed::from_int(9), Fixed::from_ratio(17, 2));
 
@@ -13,8 +14,7 @@ pub struct EngineCore {
     pub world: World,
     pub player: ecs::Entity,
     tick: u64,
-    demo_entities: Vec<ecs::Entity>,
-    demo_stress: bool,
+    rng: DeterministicRng,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,9 +29,7 @@ pub enum StateDecodeError {
     BadMagic,
     Truncated,
     UnsupportedVersion(u16),
-    InvalidBoolean,
     InvalidPlayer,
-    InvalidDemoEntities,
     InvalidWorldState(&'static str),
     TrailingBytes,
 }
@@ -47,11 +45,7 @@ impl fmt::Display for StateDecodeError {
                     "unsupported simulation snapshot version {version}"
                 )
             }
-            Self::InvalidBoolean => formatter.write_str("invalid boolean in simulation snapshot"),
             Self::InvalidPlayer => formatter.write_str("invalid player entity in snapshot"),
-            Self::InvalidDemoEntities => {
-                formatter.write_str("invalid demo entity list in simulation snapshot")
-            }
             Self::InvalidWorldState(reason) => {
                 write!(formatter, "invalid world state in snapshot: {reason}")
             }
@@ -62,12 +56,22 @@ impl fmt::Display for StateDecodeError {
 
 impl std::error::Error for StateDecodeError {}
 
+impl Default for EngineCore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[allow(dead_code)]
 pub type SimulationKernel = EngineCore;
 
 #[allow(dead_code)]
 impl EngineCore {
     pub fn new() -> Self {
+        Self::with_seed(0x4641_5445_5349_4d31)
+    }
+
+    pub fn with_seed(seed: u64) -> Self {
         let mut world = World::new();
         let player = world.spawn();
         world.positions.insert(player, Position(FixedVec2::ZERO));
@@ -82,23 +86,32 @@ impl EngineCore {
             world,
             player,
             tick: 0,
-            demo_entities: Vec::new(),
-            demo_stress: false,
+            rng: DeterministicRng::new(seed),
         }
-    }
-
-    pub fn new_demo() -> Self {
-        let mut core = Self::new();
-        core.set_demo_stress(false);
-        core
-    }
-
-    pub fn demo_stress_enabled(&self) -> bool {
-        self.demo_stress
     }
 
     pub fn tick(&self) -> u64 {
         self.tick
+    }
+
+    pub fn random_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
+
+    pub fn random_range_u32(&mut self, upper_exclusive: u32) -> u32 {
+        self.rng.range_u32(upper_exclusive)
+    }
+
+    pub fn random_range_i32(&mut self, min_inclusive: i32, max_exclusive: i32) -> i32 {
+        self.rng.range_i32(min_inclusive, max_exclusive)
+    }
+
+    pub fn random_range_fixed(&mut self, min_inclusive: Fixed, max_exclusive: Fixed) -> Fixed {
+        self.rng.range_fixed(min_inclusive, max_exclusive)
+    }
+
+    pub fn shuffle<T>(&mut self, values: &mut [T]) {
+        self.rng.shuffle(values);
     }
 
     /// Versioned canonical snapshot; all integers use little-endian encoding.
@@ -108,11 +121,7 @@ impl EngineCore {
         bytes.extend_from_slice(&STATE_FORMAT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&self.tick.to_le_bytes());
         bytes.extend_from_slice(&self.player.to_le_bytes());
-        bytes.push(self.demo_stress as u8);
-        bytes.extend_from_slice(&(self.demo_entities.len() as u32).to_le_bytes());
-        for entity in &self.demo_entities {
-            bytes.extend_from_slice(&entity.to_le_bytes());
-        }
+        bytes.extend_from_slice(&self.rng.state().to_le_bytes());
         self.world.encode_state(&mut bytes);
         bytes
     }
@@ -129,19 +138,7 @@ impl EngineCore {
 
         let tick = Self::read_u64(bytes, &mut offset)?;
         let player = Self::read_u32(bytes, &mut offset)?;
-        let demo_stress = match Self::read_u8(bytes, &mut offset)? {
-            0 => false,
-            1 => true,
-            _ => return Err(StateDecodeError::InvalidBoolean),
-        };
-        let demo_count = Self::read_u32(bytes, &mut offset)?;
-        if demo_count > MAX_SNAPSHOT_ENTITIES || demo_count as usize > bytes.len() / 4 {
-            return Err(StateDecodeError::InvalidDemoEntities);
-        }
-        let mut demo_entities = Vec::with_capacity(demo_count as usize);
-        for _ in 0..demo_count {
-            demo_entities.push(Self::read_u32(bytes, &mut offset)?);
-        }
+        let rng = DeterministicRng::from_state(Self::read_u64(bytes, &mut offset)?);
 
         let world =
             World::decode_state(bytes, &mut offset).map_err(StateDecodeError::InvalidWorldState)?;
@@ -152,21 +149,11 @@ impl EngineCore {
             return Err(StateDecodeError::InvalidPlayer);
         }
 
-        let mut unique_demo_entities = HashSet::with_capacity(demo_entities.len());
-        if demo_entities.iter().any(|entity| {
-            *entity == player
-                || !world.was_allocated(*entity)
-                || !unique_demo_entities.insert(*entity)
-        }) {
-            return Err(StateDecodeError::InvalidDemoEntities);
-        }
-
         Ok(Self {
             world,
             player,
             tick,
-            demo_entities,
-            demo_stress,
+            rng,
         })
     }
 
@@ -193,10 +180,6 @@ impl EngineCore {
         Ok(value)
     }
 
-    fn read_u8(bytes: &[u8], offset: &mut usize) -> Result<u8, StateDecodeError> {
-        Ok(Self::read_bytes::<1>(bytes, offset)?[0])
-    }
-
     fn read_u16(bytes: &[u8], offset: &mut usize) -> Result<u16, StateDecodeError> {
         Ok(u16::from_le_bytes(Self::read_bytes(bytes, offset)?))
     }
@@ -207,71 +190,6 @@ impl EngineCore {
 
     fn read_u64(bytes: &[u8], offset: &mut usize) -> Result<u64, StateDecodeError> {
         Ok(u64::from_le_bytes(Self::read_bytes(bytes, offset)?))
-    }
-
-    pub fn set_demo_stress(&mut self, enabled: bool) {
-        if self.demo_stress == enabled && !self.demo_entities.is_empty() {
-            return;
-        }
-
-        for entity in self.demo_entities.drain(..) {
-            self.world.despawn(entity);
-        }
-
-        let visible_total = if enabled { 192 } else { 32 };
-        for index in 0..visible_total - 1 {
-            let column = index % 16;
-            let row = index / 16;
-            let angle = Fixed::from_ratio((index as i64 * 618_034) % 6_283_185, 1_000_000);
-            let direction = match index % 8 {
-                0 => FixedVec2::new(Fixed::ONE, Fixed::ZERO),
-                1 => FixedVec2::new(Fixed::ONE, Fixed::ONE).normalize(),
-                2 => FixedVec2::new(Fixed::ZERO, Fixed::ONE),
-                3 => FixedVec2::new(-Fixed::ONE, Fixed::ONE).normalize(),
-                4 => FixedVec2::new(-Fixed::ONE, Fixed::ZERO),
-                5 => FixedVec2::new(-Fixed::ONE, -Fixed::ONE).normalize(),
-                6 => FixedVec2::new(Fixed::ZERO, -Fixed::ONE),
-                _ => FixedVec2::new(Fixed::ONE, -Fixed::ONE).normalize(),
-            };
-            let entity = self.world.spawn();
-            self.world.positions.insert(
-                entity,
-                Position(FixedVec2::new(
-                    Fixed::from_ratio((column as i64 * 2 - 15) * 11, 20),
-                    Fixed::from_ratio((row as i64 * 2 - 11) * 11, 20),
-                )),
-            );
-            self.world
-                .velocities
-                .insert(entity, Velocity(direction * Fixed::from_int(2)));
-            self.world.rotations.insert(entity, Rotation(angle));
-            self.world.spins.insert(
-                entity,
-                Spin(if index % 2 == 0 {
-                    Fixed::from_ratio(45, 100)
-                } else {
-                    Fixed::from_ratio(-45, 100)
-                }),
-            );
-            self.demo_entities.push(entity);
-        }
-
-        for index in 0..8 {
-            let entity = self.world.spawn();
-            let offset = Fixed::from_int(index as i64 * 2);
-            let x = if index % 2 == 0 {
-                Fixed::from_int(24) + offset
-            } else {
-                Fixed::from_int(-24) - offset
-            };
-            self.world
-                .positions
-                .insert(entity, Position(FixedVec2::new(x, Fixed::ZERO)));
-            self.world.rotations.insert(entity, Rotation(Fixed::ZERO));
-            self.demo_entities.push(entity);
-        }
-
-        self.demo_stress = enabled;
     }
 
     pub fn fixed_update(&mut self, input: SimulationInput) {
@@ -395,7 +313,7 @@ mod tests {
                 19_327_352_400,
             )
         );
-        assert_eq!(sim.state_hash(), 0x1147_5aac_821f_a31c);
+        assert_eq!(sim.state_hash(), 0xf750_481d_a8cf_6f5c);
     }
 
     #[test]
@@ -404,7 +322,7 @@ mod tests {
         let second = EngineCore::new();
 
         assert_eq!(first.tick(), 0);
-        assert_eq!(&first.state_bytes()[..6], b"FATE\x02\x00");
+        assert_eq!(&first.state_bytes()[..6], b"FATE\x04\x00");
         assert_eq!(first.state_hash(), second.state_hash());
 
         first.fixed_update(SimulationInput::default());
@@ -421,9 +339,13 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_round_trip_preserves_world_and_demo_lifecycle() {
-        let mut original = EngineCore::new_demo();
-        original.set_demo_stress(true);
+    fn snapshot_round_trip_preserves_world_and_tick() {
+        let mut original = EngineCore::new();
+        let extra_entity = original.world.spawn();
+        original.world.positions.insert(
+            extra_entity,
+            Position(FixedVec2::new(Fixed::from_int(3), Fixed::from_int(2))),
+        );
         for _ in 0..240 {
             original.fixed_update(SimulationInput {
                 move_x: 1,
@@ -435,7 +357,6 @@ mod tests {
         let restored = EngineCore::from_state_bytes(&original.state_bytes()).unwrap();
         assert_eq!(restored.state_bytes(), original.state_bytes());
         assert_eq!(restored.tick(), 240);
-        assert!(restored.demo_stress_enabled());
 
         let mut restored = restored;
         for tick in 0..120 {
@@ -449,9 +370,62 @@ mod tests {
             assert_eq!(restored.state_hash(), original.state_hash(), "tick {tick}");
         }
 
-        original.set_demo_stress(false);
-        restored.set_demo_stress(false);
         assert_eq!(restored.state_bytes(), original.state_bytes());
+    }
+
+    #[test]
+    fn snapshot_restore_continues_the_seeded_random_stream() {
+        let mut original = EngineCore::with_seed(0xfeed_beef);
+        for _ in 0..11 {
+            original.random_u64();
+        }
+        let snapshot = original.state_bytes();
+        let mut restored = EngineCore::from_state_bytes(&snapshot).unwrap();
+        assert_eq!(restored.state_bytes(), snapshot);
+
+        for _ in 0..100 {
+            assert_eq!(original.random_u64(), restored.random_u64());
+        }
+
+        assert_eq!(original.random_range_u32(17), restored.random_range_u32(17));
+    }
+
+    #[test]
+    fn equal_seeds_generate_equal_streams_and_different_seeds_do_not() {
+        let mut first = EngineCore::with_seed(1);
+        let mut replay = EngineCore::with_seed(1);
+        let mut different = EngineCore::with_seed(2);
+
+        for _ in 0..32 {
+            assert_eq!(first.random_u64(), replay.random_u64());
+        }
+
+        let mut first = EngineCore::with_seed(1);
+        assert_ne!(first.random_u64(), different.random_u64());
+    }
+
+    #[test]
+    fn core_rng_helpers_expose_seeded_signed_ranges_and_shuffle() {
+        let mut first = EngineCore::with_seed(99);
+        let mut second = EngineCore::with_seed(99);
+
+        for _ in 0..100 {
+            assert_eq!(
+                first.random_range_i32(-100, 100),
+                second.random_range_i32(-100, 100)
+            );
+        }
+
+        let mut first_values = [1, 2, 3, 4, 5, 6];
+        let mut second_values = first_values;
+        first.shuffle(&mut first_values);
+        second.shuffle(&mut second_values);
+        assert_eq!(first_values, second_values);
+
+        assert_eq!(
+            first.random_range_fixed(Fixed::from_int(-5), Fixed::from_int(5)),
+            second.random_range_fixed(Fixed::from_int(-5), Fixed::from_int(5))
+        );
     }
 
     #[test]
@@ -473,13 +447,6 @@ mod tests {
         assert!(matches!(
             EngineCore::from_state_bytes(&bad_version),
             Err(StateDecodeError::UnsupportedVersion(u16::MAX))
-        ));
-
-        let mut bad_boolean = snapshot.clone();
-        bad_boolean[18] = 2;
-        assert!(matches!(
-            EngineCore::from_state_bytes(&bad_boolean),
-            Err(StateDecodeError::InvalidBoolean)
         ));
 
         let mut trailing = snapshot;
