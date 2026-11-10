@@ -53,9 +53,11 @@ platform-independent input snapshots. Gameplay components and simulation
 systems use signed Q32.32 fixed-point arithmetic; conversion to `f32` happens
 only when preparing renderer-facing transforms. A golden replay regression
 test applies a fixed command sequence and verifies exact fixed-point state.
-This strengthens deterministic behavior, but cross-platform bitwise
-determinism still needs validation on multiple targets and a stable state
-serialization/hash format.
+The core also exposes a versioned canonical little-endian snapshot with
+validated restore and an FNV-1a 64-bit diagnostic hash, checked at every
+replay tick. The hash is non-cryptographic and is not suitable for
+authentication. Cross-platform bitwise determinism still needs validation on
+multiple targets.
 
 ## Architectural principles
 

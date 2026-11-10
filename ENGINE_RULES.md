@@ -7,6 +7,8 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - The simulation tick is fixed at 120 Hz unless a later milestone explicitly changes it.
 - The same world state and the same input sequence must produce the same result on repeated runs.
 - Gameplay state and simulation math use deterministic fixed-point values; float conversion is limited to the renderer boundary.
+- Replay snapshots use a versioned canonical little-endian encoding with validated restore; schema changes require a format-version bump.
+- State hashes are diagnostic, non-cryptographic checksums and must not be used as network authentication.
 - The fixed-step loop must remain stable when the frame delta is large or when the app is briefly paused.
 - The simulation core advances only through fixed ticks and explicit `SimulationInput` snapshots; it must not read platform input or wall-clock time.
 - Wall-clock accumulation and conversion of platform key state into simulation commands belong to the app/platform boundary.
