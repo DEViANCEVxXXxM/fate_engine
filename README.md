@@ -134,7 +134,7 @@ This is especially important for:
 - prediction and rollback;
 - replays and debugging;
 - procedural generation;
-- co-op gameplay.
+- co-op/mp gameplay.
 
 ### Networking
 
@@ -204,7 +204,7 @@ Only after confirming these pillars is it planned to expand content, tools, and 
 
 - Responsive control: minimal delay between input and visual reaction.
 - Procedural generation: reproducible results with the same seed and input data.
-- Co-op: predictable network simulation and state conflict resolution.
+- Co-op/Mp: predictable network simulation and state conflict resolution.
 - Performance: controlled budgets for frame, memory, CPU, and network.
 - Extensibility: game systems must not modify the engine core.
 
