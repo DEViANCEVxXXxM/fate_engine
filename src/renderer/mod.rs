@@ -15,6 +15,9 @@ pub use gpu::{Gpu, GpuInitError};
 use crate::math::{Mat4, Vec2};
 use pipeline::TrianglePipeline;
 
+pub const MAX_DRAWN_INSTANCES: usize = pipeline::MAX_INSTANCES;
+const DRAW_WARNING_THRESHOLD: f32 = 0.75;
+
 /// A drawable instance of the built-in mesh, in world space.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Instance2d {
@@ -62,18 +65,29 @@ impl Renderer {
     }
 
     pub fn budgeted_instance_count_static(instance_count: usize) -> usize {
-        let limit = pipeline::MAX_INSTANCES;
+        let limit = MAX_DRAWN_INSTANCES;
         let count = instance_count.min(limit);
+        let warning_threshold = (limit as f32 * DRAW_WARNING_THRESHOLD) as usize;
+
         if instance_count > limit {
             log::warn!(
                 "render instance budget exceeded: {instance_count} visible objects > {limit} max draw instances; clipping to {count} for the current frame",
             );
+        } else if instance_count >= warning_threshold {
+            log::warn!(
+                "render instance budget nearing cap: {instance_count}/{limit} visible objects; draw pressure may reduce frame stability",
+            );
         }
+
         count
     }
 
     pub fn budgeted_instance_count(&self, instance_count: usize) -> usize {
         Self::budgeted_instance_count_static(instance_count)
+    }
+
+    pub fn max_instance_budget() -> usize {
+        MAX_DRAWN_INSTANCES
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -168,8 +182,12 @@ mod tests {
     fn budgeted_instance_count_clips_beyond_render_limit() {
         assert_eq!(Renderer::budgeted_instance_count_static(10), 10);
         assert_eq!(
-            Renderer::budgeted_instance_count_static(pipeline::MAX_INSTANCES + 7),
-            pipeline::MAX_INSTANCES
+            Renderer::budgeted_instance_count_static(MAX_DRAWN_INSTANCES + 7),
+            MAX_DRAWN_INSTANCES
+        );
+        assert_eq!(
+            Renderer::budgeted_instance_count_static((MAX_DRAWN_INSTANCES * 3) / 4),
+            (MAX_DRAWN_INSTANCES * 3) / 4
         );
     }
 }

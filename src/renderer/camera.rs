@@ -1,5 +1,12 @@
 use crate::math::{Mat4, Vec2, Vec3};
 
+const MIN_VIEW_SIZE: f32 = 1.0;
+const MAX_VIEW_SIZE: f32 = 128.0;
+const MIN_ASPECT: f32 = 0.25;
+const MAX_ASPECT: f32 = 4.0;
+const MIN_ZOOM: f32 = 0.25;
+const MAX_ZOOM: f32 = 8.0;
+
 /// 2D camera: a world-space size plus a center position.
 ///
 /// The projection is rebuilt every frame from the window aspect, so resizing
@@ -24,16 +31,45 @@ impl Default for Camera2d {
 }
 
 impl Camera2d {
-    pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        let safe_aspect = aspect.abs().max(f32::EPSILON);
-        let safe_zoom = self.zoom.abs().max(f32::EPSILON);
-        let safe_view_size = Vec2::new(
-            self.view_size.x.abs().max(f32::EPSILON),
-            self.view_size.y.abs().max(f32::EPSILON),
-        );
+    fn sanitize_aspect(aspect: f32) -> f32 {
+        if !aspect.is_finite() {
+            return 1.0;
+        }
 
-        let size = safe_view_size * (1.0 / safe_zoom);
-        let projection = Mat4::orthographic_2d(size, safe_aspect);
+        let magnitude = aspect.abs();
+        magnitude.clamp(MIN_ASPECT, MAX_ASPECT)
+    }
+
+    fn sanitize_zoom(zoom: f32) -> f32 {
+        if !zoom.is_finite() {
+            return 1.0;
+        }
+
+        let magnitude = zoom.abs();
+        magnitude.clamp(MIN_ZOOM, MAX_ZOOM)
+    }
+
+    pub fn safe_visible_size(&self) -> Vec2 {
+        let x = if self.view_size.x.is_finite() {
+            self.view_size.x.abs().clamp(MIN_VIEW_SIZE, MAX_VIEW_SIZE)
+        } else {
+            20.0
+        };
+        let y = if self.view_size.y.is_finite() {
+            self.view_size.y.abs().clamp(MIN_VIEW_SIZE, MAX_VIEW_SIZE)
+        } else {
+            20.0
+        };
+
+        Vec2::new(x, y)
+    }
+
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        let safe_aspect = Self::sanitize_aspect(aspect);
+        let safe_zoom = Self::sanitize_zoom(self.zoom);
+        let safe_view_size = self.safe_visible_size() * (1.0 / safe_zoom);
+
+        let projection = Mat4::orthographic_2d(safe_view_size, safe_aspect);
         let view = Mat4::translation(Vec3::new(-self.center.x, -self.center.y, 0.0));
         projection.mul(view)
     }
@@ -65,5 +101,32 @@ mod tests {
         };
         let vp = camera.view_projection(0.0);
         assert!(vp.m.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn camera_clamps_extreme_view_and_zoom_values() {
+        let camera = Camera2d {
+            center: Vec2::ZERO,
+            view_size: Vec2::new(1_000.0, 1_000.0),
+            zoom: 0.01,
+        };
+
+        let size = camera.safe_visible_size();
+        assert!(size.x <= MAX_VIEW_SIZE);
+        assert!(size.y <= MAX_VIEW_SIZE);
+        assert!(
+            camera
+                .view_projection(0.0)
+                .m
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        assert!(
+            camera
+                .view_projection(100.0)
+                .m
+                .iter()
+                .all(|value| value.is_finite())
+        );
     }
 }

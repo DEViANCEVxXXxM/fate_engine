@@ -5,7 +5,11 @@ mod app;
 mod ecs;
 mod input;
 mod math;
+mod performance;
 mod renderer;
+mod simulation;
+#[allow(dead_code)]
+mod simulation_bench;
 mod time;
 
 fn main() {

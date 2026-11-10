@@ -23,13 +23,39 @@ The project is in early development.
 - [ ] Archetype ECS
 - [ ] SoA component storage
 - [ ] Parallel system scheduler
-- [ ] Deterministic fixed-point `FixedUpdate`
+- [x] Deterministic fixed-point `FixedUpdate`
 - [ ] Server-authoritative network model
 - [ ] Client prediction
 - [ ] Rollback and replay
 - [ ] Rendering on `ash` / Vulkan
 - [ ] Transport on `quinn`
 - [ ] Vertical slice: scene, input, simulation, rendering, networking
+
+## Running the current demo
+
+Run the windowed prototype with `cargo run`. The demo starts with a small moving
+swarm plus off-screen entities. The camera follows the larger player marker,
+making fixed-step movement, world bounds, camera culling, and frame telemetry
+visible together.
+
+- **W/A/S/D** or **arrow keys** — move the player.
+- **Left Shift** — boost movement.
+- **F2** — toggle the 192-visible-instance stress scene. It reaches 75% of the
+  draw budget and should report a warning tier while off-screen entities remain
+  culled.
+- **Escape** — close the demo.
+
+The window title reports frame timings, rolling averages/worst-case, draw
+pressure, budget headroom, and current policy tier.
+
+The simulation now advances only through explicit 120 Hz fixed ticks and
+platform-independent input snapshots. Gameplay components and simulation
+systems use signed Q32.32 fixed-point arithmetic; conversion to `f32` happens
+only when preparing renderer-facing transforms. A golden replay regression
+test applies a fixed command sequence and verifies exact fixed-point state.
+This strengthens deterministic behavior, but cross-platform bitwise
+determinism still needs validation on multiple targets and a stable state
+serialization/hash format.
 
 ## Architectural principles
 

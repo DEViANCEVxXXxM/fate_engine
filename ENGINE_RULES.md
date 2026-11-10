@@ -6,8 +6,10 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 
 - The simulation tick is fixed at 120 Hz unless a later milestone explicitly changes it.
 - The same world state and the same input sequence must produce the same result on repeated runs.
-- Gameplay values must not rely on floating-point behavior for state that affects logic or rollback.
+- Gameplay state and simulation math use deterministic fixed-point values; float conversion is limited to the renderer boundary.
 - The fixed-step loop must remain stable when the frame delta is large or when the app is briefly paused.
+- The simulation core advances only through fixed ticks and explicit `SimulationInput` snapshots; it must not read platform input or wall-clock time.
+- Wall-clock accumulation and conversion of platform key state into simulation commands belong to the app/platform boundary.
 
 ## 2. Frame and time rules
 
@@ -37,7 +39,9 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - The camera transform must remain stable across window resize and reconfiguration.
 - Projection and camera matrices must remain finite even when the window is minimized, zero-sized, or temporarily reports a degenerate aspect ratio.
 - The render path must cull or skip entities outside the active camera frustum to preserve stable 120 FPS frame budgets.
+- Camera view size, zoom, and aspect ratio must be sanitized to a bounded operating range before projection; degenerate or extreme values must never escape to the render path.
 - The renderer must enforce a hard draw-instance cap and clip excess work before submission to the GPU.
+- The renderer must warn once the draw workload reaches 75% of the per-frame budget and must clamp hard at the configured maximum before submission.
 - Matrices must follow the project’s column-major convention.
 - The app shell may request redraws, but it must not directly manipulate gameplay state in the render path.
 
@@ -45,11 +49,13 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 
 - The app owns the window, event loop, and top-level lifecycle.
 - The app may request render work and fixed-step simulation, but it does not own gameplay rules directly.
+- The app samples platform input into a simulation command snapshot and supplies that snapshot for each fixed tick.
 - The event loop must not spin at an unbounded rate; redraw scheduling must respect the 120 FPS performance target.
 - The app must expose a frame-budget signal so the engine can detect whether the current frame was within the target budget.
 - Fixed-step and render work must be measured separately so frame pacing issues can be identified without guessing.
 - The engine must keep a rolling performance history to estimate average and worst-case frame time, not just the most recent sample.
-- The engine must expose a machine-readable performance summary for total, average, worst, target, headroom, and current draw-instance count values.
+- The engine must expose a machine-readable performance summary for total, average, worst, target, headroom, draw pressure, and current draw-instance count values.
+- The engine must classify each frame under an explicit policy model (healthy, warning, critical) and expose that classification in the telemetry stream.
 - The engine must emit an explicit warning when the combined fixed-step and render time exceeds the 120 FPS frame budget.
 - The render profile must include the number of visible objects actually submitted after camera culling and budget clipping so draw pressure is visible in diagnostics.
 - If a renderer is missing, a frame must degrade gracefully without emitting undefined behavior.

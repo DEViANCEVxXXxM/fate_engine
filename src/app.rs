@@ -8,183 +8,94 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use crate::ecs::{self, Position, Rotation, Spin, Velocity, World};
 use crate::input::{Action, Input};
 use crate::math::Vec2;
+use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
 use crate::renderer::{Instance2d, Renderer};
+use crate::simulation::{EngineCore, SIMULATION_HZ, SimulationInput};
 use crate::time::Time;
 
-const FIXED_HZ: f32 = 120.0;
-/// Half of the playfield, in world units. The camera shows 20x20 by default.
-const PLAYFIELD_HALF: Vec2 = Vec2::new(9.0, 8.5);
-const MAX_SPEED: f32 = 18.0;
-const ACCELERATION: f32 = 40.0;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct FrameProfile {
-    sim_ms: f32,
-    render_ms: f32,
-    drawn_instances: usize,
-}
-
-impl FrameProfile {
-    fn total_ms(self) -> f32 {
-        self.sim_ms + self.render_ms
-    }
-
-    fn over_budget(self) -> bool {
-        self.total_ms() > Time::frame_budget_ms() as f32
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PerformanceStats {
-    recent_frame_times: [f32; 60],
-    recent_count: usize,
-}
-
-impl Default for PerformanceStats {
-    fn default() -> Self {
-        Self {
-            recent_frame_times: [0.0; 60],
-            recent_count: 0,
-        }
-    }
-}
-
-impl PerformanceStats {
-    fn add(&mut self, frame_ms: f32) {
-        self.recent_frame_times[self.recent_count % self.recent_frame_times.len()] = frame_ms;
-        self.recent_count = (self.recent_count + 1).min(self.recent_frame_times.len());
-    }
-
-    fn average_ms(&self) -> f32 {
-        if self.recent_count == 0 {
-            return 0.0;
-        }
-
-        let count = self.recent_count.min(self.recent_frame_times.len());
-        let sum: f32 = self.recent_frame_times.iter().take(count).sum();
-        sum / count as f32
-    }
-
-    fn worst_ms(&self) -> f32 {
-        if self.recent_count == 0 {
-            return 0.0;
-        }
-
-        let count = self.recent_count.min(self.recent_frame_times.len());
-        self.recent_frame_times
-            .iter()
-            .take(count)
-            .fold(0.0, |max, value| max.max(*value))
-    }
-
-    fn snapshot(&self) -> (f32, f32) {
-        (self.average_ms(), self.worst_ms())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PerformanceTier {
-    Healthy,
-    Warning,
-    Critical,
-}
-
-impl PerformanceTier {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Healthy => "healthy",
-            Self::Warning => "warning",
-            Self::Critical => "critical",
-        }
-    }
-}
-
 impl App {
-    fn performance_tier(&self) -> PerformanceTier {
-        let total_ms = self.frame_profile.total_ms();
-        let target_ms = Time::frame_budget_ms() as f32;
-        if total_ms <= target_ms {
-            PerformanceTier::Healthy
-        } else if total_ms <= target_ms * 1.25 {
-            PerformanceTier::Warning
+    fn draw_pressure(&self) -> f32 {
+        let budget = Renderer::max_instance_budget() as f32;
+        if budget <= 0.0 {
+            0.0
         } else {
-            PerformanceTier::Critical
+            (self.frame_profile.drawn_instances as f32 / budget).clamp(0.0, 1.0)
         }
     }
 
-    fn performance_report(&self) -> String {
+    fn telemetry(&self) -> FrameTelemetry {
         let (avg_ms, worst_ms) = self.performance.snapshot();
         let total_ms = self.frame_profile.total_ms();
         let target_ms = Time::frame_budget_ms() as f32;
-        let headroom_ms = target_ms - total_ms;
-        let tier = self.performance_tier();
+        let draw_limit = Renderer::max_instance_budget();
+        let draw_pressure = self.draw_pressure();
+        let policy = FrameBudgetPolicy::for_frame(total_ms, draw_pressure);
+        let (healthy_frames, warning_frames, critical_frames) = self.performance.budget_breakdown();
 
-        format!(
-            "sim={:.1}ms render={:.1}ms drawn={} total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms tier={}",
-            self.frame_profile.sim_ms,
-            self.frame_profile.render_ms,
-            self.frame_profile.drawn_instances,
+        FrameTelemetry {
+            sim_ms: self.frame_profile.sim_ms,
+            render_ms: self.frame_profile.render_ms,
             total_ms,
             avg_ms,
             worst_ms,
             target_ms,
-            headroom_ms,
-            tier.label(),
-        )
+            headroom_ms: target_ms - total_ms,
+            draw_count: self.frame_profile.drawn_instances,
+            draw_limit,
+            draw_pressure_pct: draw_pressure * 100.0,
+            healthy_frames,
+            warning_frames,
+            critical_frames,
+            policy,
+        }
+    }
+
+    fn performance_tier(&self) -> FrameBudgetPolicy {
+        FrameBudgetPolicy::for_frame(self.frame_profile.total_ms(), self.draw_pressure())
+    }
+
+    fn performance_report(&self) -> String {
+        self.telemetry().summary()
     }
 }
 
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    world: World,
+    core: EngineCore,
     input: Input,
     time: Time,
-    player: ecs::Entity,
-    title_timer: f32,
     frame_profile: FrameProfile,
     performance: PerformanceStats,
+    title_timer: f32,
 }
 
 impl App {
-    fn spawn_demo_player(world: &mut World) -> ecs::Entity {
-        let player = world.spawn();
-        world.positions.insert(player, Position(Vec2::ZERO));
-        world
-            .velocities
-            .insert(player, Velocity(Vec2::new(4.0, 2.5)));
-        world.rotations.insert(player, Rotation(0.0));
-        world.spins.insert(player, Spin(0.9));
-        player
-    }
-
     fn new() -> Self {
-        let mut world = World::new();
-        let player = Self::spawn_demo_player(&mut world);
-
         Self {
             window: None,
             renderer: None,
-            world,
+            core: EngineCore::new_demo(),
             input: Input::new(),
-            time: Time::new(FIXED_HZ),
-            player,
-            title_timer: 0.0,
+            time: Time::new(SIMULATION_HZ as f32),
             frame_profile: FrameProfile::default(),
             performance: PerformanceStats::default(),
+            title_timer: 0.0,
         }
     }
 
     fn step_frame(&mut self) -> bool {
         let frame_dt = self.time.tick();
+        let input = self.simulation_input();
         let sim_start = Instant::now();
-        while let Some(dt) = self.time.next_fixed_step() {
-            self.fixed_update(dt);
+        while self.time.next_fixed_step().is_some() {
+            self.core.fixed_update(input);
         }
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
+        self.input.end_frame();
+        self.update_camera();
 
         let instances = self.instances();
         let draw_budget = self
@@ -205,7 +116,9 @@ impl App {
             render_ms,
             drawn_instances: draw_budget,
         };
-        self.performance.add(self.frame_profile.total_ms());
+        let policy = self.performance_tier();
+        self.performance
+            .record_budget(self.frame_profile.total_ms(), policy, self.draw_pressure());
 
         if self.frame_profile.over_budget() {
             let (avg_ms, worst_ms) = self.performance.snapshot();
@@ -220,11 +133,49 @@ impl App {
         }
 
         self.update_title(frame_dt);
-        self.input.end_frame();
         rendered
     }
 
-    fn handle_key(&mut self, event_loop: &ActiveEventLoop, key: PhysicalKey, state: ElementState) {
+    #[allow(dead_code)]
+    fn headless_step(&mut self) -> bool {
+        self.step_frame()
+    }
+
+    fn simulation_input(&self) -> SimulationInput {
+        let axis = |positive, negative| {
+            self.input.action_down(positive) as i8 - self.input.action_down(negative) as i8
+        };
+        SimulationInput {
+            move_x: axis(Action::MoveRight, Action::MoveLeft),
+            move_y: axis(Action::MoveUp, Action::MoveDown),
+            boost: self.input.action_down(Action::Boost),
+        }
+    }
+
+    fn player_camera_target(&self) -> Option<Vec2> {
+        self.core
+            .world
+            .positions
+            .get(self.core.player)
+            .map(|position| position.0.to_vec2())
+    }
+
+    fn update_camera(&mut self) {
+        let Some(target) = self.player_camera_target() else {
+            return;
+        };
+        if let Some(renderer) = &mut self.renderer {
+            renderer.camera.center = target;
+        }
+    }
+
+    fn handle_key(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        key: PhysicalKey,
+        state: ElementState,
+        repeat: bool,
+    ) {
         let PhysicalKey::Code(code) = key else {
             return;
         };
@@ -234,51 +185,15 @@ impl App {
             return;
         }
 
+        if code == KeyCode::F2 && state == ElementState::Pressed && !repeat {
+            let enable_stress = !self.core.demo_stress_enabled();
+            self.core.set_demo_stress(enable_stress);
+            return;
+        }
+
         match state {
             ElementState::Pressed => self.input.press(code),
             ElementState::Released => self.input.release(code),
-        }
-    }
-
-    /// Fixed-step simulation: input, movement, spin, bounce.
-    fn fixed_update(&mut self, dt: f32) {
-        self.apply_input(dt);
-        ecs::movement_system(&mut self.world, dt);
-        ecs::spin_system(&mut self.world, dt);
-        ecs::bounds_system(&mut self.world, PLAYFIELD_HALF);
-    }
-
-    fn apply_input(&mut self, dt: f32) {
-        let mut direction = Vec2::ZERO;
-        if self.input.action_down(Action::MoveLeft) {
-            direction.x -= 1.0;
-        }
-        if self.input.action_down(Action::MoveRight) {
-            direction.x += 1.0;
-        }
-        if self.input.action_down(Action::MoveDown) {
-            direction.y -= 1.0;
-        }
-        if self.input.action_down(Action::MoveUp) {
-            direction.y += 1.0;
-        }
-
-        if direction == Vec2::ZERO {
-            return;
-        }
-
-        let boost = if self.input.action_down(Action::Boost) {
-            2.0
-        } else {
-            1.0
-        };
-        let Some(velocity) = self.world.velocities.get_mut(self.player) else {
-            return;
-        };
-
-        velocity.0 += direction.normalize() * (ACCELERATION * boost * dt);
-        if velocity.0.length() > MAX_SPEED * boost {
-            velocity.0 = velocity.0.normalize() * (MAX_SPEED * boost);
         }
     }
 
@@ -286,7 +201,7 @@ impl App {
         let view_size = self
             .renderer
             .as_ref()
-            .map(|renderer| renderer.camera.view_size)
+            .map(|renderer| renderer.camera.safe_visible_size())
             .unwrap_or(Vec2::new(20.0, 20.0));
         let half = view_size * 0.5;
         let center = self
@@ -296,17 +211,23 @@ impl App {
             .unwrap_or(Vec2::ZERO);
 
         let mut instances = Vec::new();
-        for (entity, position) in self.world.positions.iter() {
-            let delta = position.0 - center;
+        for (entity, position) in self.core.world.positions.iter() {
+            let render_position = position.0.to_vec2();
+            let delta = render_position - center;
             if delta.x.abs() > half.x || delta.y.abs() > half.y {
                 continue;
             }
 
-            let rotation = self.world.rotations.get(entity).map_or(0.0, |r| r.0);
+            let rotation = self
+                .core
+                .world
+                .rotations
+                .get(entity)
+                .map_or(0.0, |r| r.0.to_f32());
             instances.push(Instance2d {
-                position: position.0,
+                position: render_position,
                 rotation,
-                scale: 1.0,
+                scale: if entity == self.core.player { 1.7 } else { 1.0 },
             });
         }
         instances
@@ -328,9 +249,10 @@ impl App {
             };
 
             window.set_title(&format!(
-                "fate - {:.0} fps - {} entities - {} / budget {}",
+                "fate | WASD/arrows move, Shift boost, F2 stress {} | {:.0} fps - {} entities - {} / budget {}",
+                if self.core.demo_stress_enabled() { "on" } else { "off" },
                 self.time.fps(),
-                self.world.entity_count(),
+                self.core.world.entity_count(),
                 self.performance_report(),
                 budget_text,
             ));
@@ -370,7 +292,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } => {
-                self.handle_key(event_loop, event.physical_key, event.state);
+                self.handle_key(event_loop, event.physical_key, event.state, event.repeat);
             }
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
@@ -407,6 +329,9 @@ pub async fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ecs::Position;
+    use crate::math::FixedVec2;
+    use crate::performance::PerformanceStats;
 
     #[test]
     fn step_frame_without_renderer_is_skipped_cleanly() {
@@ -415,7 +340,7 @@ mod tests {
         let rendered = app.step_frame();
 
         assert!(!rendered);
-        assert_eq!(app.world.entity_count(), 1);
+        assert_eq!(app.core.world.entity_count(), 40);
         assert!(app.frame_profile.sim_ms >= 0.0);
         assert!(app.frame_profile.render_ms >= 0.0);
         assert!(app.frame_profile.total_ms() >= 0.0);
@@ -446,6 +371,23 @@ mod tests {
     }
 
     #[test]
+    fn platform_key_bindings_become_platform_independent_simulation_input() {
+        let mut app = App::new();
+        app.input.press(KeyCode::ArrowRight);
+        app.input.press(KeyCode::KeyW);
+        app.input.press(KeyCode::ShiftLeft);
+
+        assert_eq!(
+            app.simulation_input(),
+            SimulationInput {
+                move_x: 1,
+                move_y: 1,
+                boost: true,
+            }
+        );
+    }
+
+    #[test]
     fn performance_stats_roll_and_average_recent_frames() {
         let mut stats = PerformanceStats::default();
         stats.add(4.0);
@@ -461,6 +403,19 @@ mod tests {
     }
 
     #[test]
+    fn performance_stats_track_budget_policy_breakdown() {
+        let mut stats = PerformanceStats::default();
+
+        stats.record_budget(7.0, FrameBudgetPolicy::Healthy, 0.25);
+        stats.record_budget(9.0, FrameBudgetPolicy::Warning, 0.8);
+        stats.record_budget(12.0, FrameBudgetPolicy::Critical, 1.0);
+
+        let (healthy, warning, critical) = stats.budget_breakdown();
+        assert_eq!((healthy, warning, critical), (1, 1, 1));
+        assert!((stats.peak_draw_pressure_pct() - 100.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn performance_report_contains_budget_summary() {
         let mut app = App::new();
         app.frame_profile = FrameProfile {
@@ -472,7 +427,8 @@ mod tests {
         app.performance.add(9.0);
 
         let report = app.performance_report();
-        assert!(report.contains("drawn=2"));
+        assert!(report.contains("drawn=2/256"));
+        assert!(report.contains("load=0.8%"));
         assert!(report.contains("total=7.0ms"));
         assert!(report.contains("target=8.0ms"));
         assert!(report.contains("headroom=1.0ms"));
@@ -487,35 +443,154 @@ mod tests {
             render_ms: 2.0,
             drawn_instances: 4,
         };
-        assert_eq!(app.performance_tier(), PerformanceTier::Warning);
+        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Warning);
 
         app.frame_profile = FrameProfile {
             sim_ms: 10.0,
             render_ms: 10.0,
             drawn_instances: 8,
         };
-        assert_eq!(app.performance_tier(), PerformanceTier::Critical);
+        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Critical);
+    }
+
+    #[test]
+    fn draw_pressure_tracks_budget_usage() {
+        let mut app = App::new();
+        app.frame_profile.drawn_instances = 192;
+        assert!((app.draw_pressure() - 0.75).abs() < 1e-5);
+
+        app.frame_profile.drawn_instances = 256;
+        assert!((app.draw_pressure() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn telemetry_snapshot_exposes_machine_readable_budget_data() {
+        let mut app = App::new();
+        app.frame_profile = FrameProfile {
+            sim_ms: 3.0,
+            render_ms: 4.0,
+            drawn_instances: 128,
+        };
+        app.performance.add(7.0);
+        app.performance.add(9.0);
+
+        let telemetry = app.telemetry();
+        assert_eq!(telemetry.draw_count, 128);
+        assert_eq!(telemetry.draw_limit, Renderer::max_instance_budget());
+        assert!(telemetry.draw_pressure_pct > 0.0);
+        assert_eq!(telemetry.policy, FrameBudgetPolicy::Healthy);
+        assert!(telemetry.summary().contains("tier=healthy"));
+    }
+
+    #[test]
+    fn headless_simulation_runs_without_window_or_renderer() {
+        let mut app = App::new();
+        app.input.press(winit::keyboard::KeyCode::KeyA);
+
+        let rendered = app.headless_step();
+
+        assert!(!rendered);
+        assert!(app.core.world.entity_count() >= 1);
+        assert!(app.frame_profile.total_ms() >= 0.0);
+        assert!(!app.input.key_just_pressed(winit::keyboard::KeyCode::KeyA));
+    }
+
+    #[test]
+    fn app_can_step_through_headless_simulation_isolation() {
+        let mut app = App::new();
+        app.input.press(winit::keyboard::KeyCode::KeyD);
+
+        let rendered = app.headless_step();
+
+        assert!(!rendered);
+        assert_eq!(app.core.world.entity_count(), 40);
+        assert!(app.frame_profile.total_ms() >= 0.0);
     }
 
     #[test]
     fn instances_only_include_entities_in_camera_view() {
         let mut app = App::new();
-        let visible = app.world.spawn();
-        let hidden = app.world.spawn();
-        app.world
-            .positions
-            .insert(visible, Position(Vec2::new(1.0, 1.0)));
-        app.world
-            .positions
-            .insert(hidden, Position(Vec2::new(30.0, 30.0)));
+        let visible = app.core.world.spawn();
+        let hidden = app.core.world.spawn();
+        app.core.world.positions.insert(
+            visible,
+            Position(FixedVec2::new(
+                crate::math::Fixed::ONE,
+                crate::math::Fixed::ONE,
+            )),
+        );
+        app.core.world.positions.insert(
+            hidden,
+            Position(FixedVec2::new(
+                crate::math::Fixed::from_int(30),
+                crate::math::Fixed::from_int(30),
+            )),
+        );
 
         let instances = app.instances();
 
-        assert_eq!(instances.len(), 2);
+        assert_eq!(instances.len(), 33);
         assert!(
             instances
                 .iter()
                 .all(|instance| instance.position != Vec2::new(30.0, 30.0))
+        );
+    }
+
+    #[test]
+    fn demo_stress_mode_shows_culling_and_budget_warning() {
+        let mut app = App::new();
+        assert_eq!(app.instances().len(), 32);
+
+        app.core.set_demo_stress(true);
+
+        assert_eq!(app.instances().len(), 192);
+        assert_eq!(app.core.world.entity_count(), 200);
+        app.frame_profile.drawn_instances = app.instances().len();
+        assert!((app.draw_pressure() - 0.75).abs() < 1e-5);
+        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Warning);
+
+        app.core.set_demo_stress(false);
+        assert_eq!(app.instances().len(), 32);
+        assert_eq!(app.core.world.entity_count(), 40);
+    }
+
+    #[test]
+    fn player_camera_target_tracks_player_position() {
+        let mut app = App::new();
+        let player = app.core.player;
+        let target = FixedVec2::new(
+            crate::math::Fixed::from_int(4),
+            crate::math::Fixed::from_int(-3),
+        );
+        app.core.world.positions.insert(player, Position(target));
+
+        assert_eq!(app.player_camera_target(), Some(target.to_vec2()));
+    }
+
+    #[test]
+    fn player_is_visually_distinguished_from_demo_swarm() {
+        let app = App::new();
+        let instances = app.instances();
+        let player_position = app
+            .core
+            .world
+            .positions
+            .get(app.core.player)
+            .unwrap()
+            .0
+            .to_vec2();
+        let player_instance = instances
+            .iter()
+            .find(|instance| instance.position == player_position)
+            .unwrap();
+
+        assert_eq!(player_instance.scale, 1.7);
+        assert!(
+            instances
+                .iter()
+                .filter(|instance| instance.position != player_position)
+                .all(|instance| instance.scale == 1.0)
         );
     }
 }

@@ -1,4 +1,4 @@
-use crate::math::Vec2;
+use crate::math::{Fixed, FixedVec2};
 
 pub type Entity = u32;
 
@@ -75,18 +75,18 @@ impl<T: Copy> Default for Column<T> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Position(pub Vec2);
+pub struct Position(pub FixedVec2);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Velocity(pub Vec2);
+pub struct Velocity(pub FixedVec2);
 
 /// Orientation in radians, for the 2D demo.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Rotation(pub f32);
+pub struct Rotation(pub Fixed);
 
 /// Angular velocity in radians per second.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct Spin(pub f32);
+pub struct Spin(pub Fixed);
 
 pub struct World {
     next_entity: Entity,
@@ -170,7 +170,10 @@ mod tests {
     fn spawn_insert_remove() {
         let mut world = World::new();
         let e = world.spawn();
-        world.positions.insert(e, Position(Vec2::new(1.0, 2.0)));
+        world.positions.insert(
+            e,
+            Position(FixedVec2::new(Fixed::from_int(1), Fixed::from_int(2))),
+        );
         assert!(world.positions.contains(e));
 
         world.despawn(e);
@@ -184,9 +187,9 @@ mod tests {
         let mut world = World::new();
         let a = world.spawn();
         let b = world.spawn();
-        world.spins.insert(b, Spin(1.0));
+        world.spins.insert(b, Spin(Fixed::ONE));
         assert!(world.spins.get(a).is_none());
-        assert_eq!(world.spins.get(b), Some(&Spin(1.0)));
+        assert_eq!(world.spins.get(b), Some(&Spin(Fixed::ONE)));
     }
 
     #[test]
@@ -194,10 +197,16 @@ mod tests {
         let mut world = World::new();
         let e = world.spawn();
 
-        world.positions.insert(e, Position(Vec2::new(1.0, 2.0)));
-        world.velocities.insert(e, Velocity(Vec2::new(3.0, 4.0)));
-        world.rotations.insert(e, Rotation(0.5));
-        world.spins.insert(e, Spin(1.25));
+        world.positions.insert(
+            e,
+            Position(FixedVec2::new(Fixed::from_int(1), Fixed::from_int(2))),
+        );
+        world.velocities.insert(
+            e,
+            Velocity(FixedVec2::new(Fixed::from_int(3), Fixed::from_int(4))),
+        );
+        world.rotations.insert(e, Rotation(Fixed::from_ratio(1, 2)));
+        world.spins.insert(e, Spin(Fixed::from_ratio(5, 4)));
 
         world.despawn(e);
 
