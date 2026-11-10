@@ -7,8 +7,8 @@
 
 This is the practical guide for someone building a project on the current
 engine. It aims to be complete about what is available and what remains a
-prototype. It does not replace the longer-term [engine design document](../../engine-doc.md),
-the game-specific [game design document](../../game-doc.md), or the engineering
+prototype. It does not replace the longer-term [engine design document](../../engine-doc.md) (private),
+the game-specific [game design document](../../game-doc.md) (private), or the engineering
 constraints in [`ENGINE_RULES.md`](../ENGINE_RULES.md).
 For current gaps and prioritized future work, see the
 [engine roadmap](roadmap.md).
