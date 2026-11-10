@@ -1,8 +1,8 @@
 use std::ops::{Deref, DerefMut};
 
+use crate::prototype_simulation::EngineCore;
 use fate_sim::ecs::{Entity, Position, Rotation, Spin, Velocity};
 use fate_sim::math::{Fixed, FixedVec2};
-use fate_sim::simulation::EngineCore;
 
 const DEFAULT_SEED: u64 = 0x4641_5445_5349_4d31;
 

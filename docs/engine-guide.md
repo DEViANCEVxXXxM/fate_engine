@@ -23,11 +23,11 @@ the engine is not intended to hardcode that genre.
 | Area | Current state | Important limitation |
 |---|---|---|
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
-| Simulation | `fate_sim` supplies fixed-tick simulation, small ECS, deterministic RNG, snapshots, replay, and bounded rollback | `EngineCore` and its movement command currently implement one 2D prototype workload, not a general game framework |
+| Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a game-rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges | Projects must translate their platform events and define their own actions and mappings |
 | Rendering | `wgpu` renderer with a built-in 2D triangle path and indexed 3D mesh path | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
-| Networking | Snapshot/replay and rollback primitives exist | No transport, server authority protocol, authentication, or production networking layer |
+| Networking | The demo has local replay and rollback examples | No reusable network protocol, transport, server authority, or production networking layer |
 
 Use the primitives as an experimental starting point. Do not assume that
 planned features in a design document are already implemented.
@@ -42,6 +42,7 @@ fate_engine/
     fate_sim/                # headless deterministic simulation crate
     fate_sim_bench/          # CPU-only simulation benchmark
   projects/
+    consumer_smoke/          # headless example consumer
     demo/                    # separate runnable consumer application
   docs/
     engine-guide.md          # this guide
@@ -126,18 +127,21 @@ fate_sim = { path = "../../crates/fate_sim" }
 ```
 
 The workspace's `default-members` currently selects `projects/demo`, so plain
-`cargo run` from the root runs the demo. Prefer explicit package selectors in
-scripts and instructions:
+`cargo run` from the root runs the demo. The headless
+[`fate_consumer_smoke`](../projects/consumer_smoke/README.md) package is an
+independent example consumer and can be run without opening a window:
 
 ```powershell
 cargo run -p fate_demo
+cargo run -p fate_consumer_smoke
 cargo test -p fate_engine
 cargo test -p fate_sim
 ```
 
 Keep the project's own `Cargo.toml`, entry point, configuration, content, and
-tests under its directory. For a working consumer layout, start with
-[`projects/demo/`](../projects/demo/).
+tests under its directory. For a minimal headless consumer, start with
+[`projects/consumer_smoke/`](../projects/consumer_smoke/); for windowed
+rendering and platform integration, see [`projects/demo/`](../projects/demo/).
 
 ## 5. A project's runtime responsibilities
 
@@ -151,7 +155,8 @@ A typical frame follows this order:
 1. Receive platform events; update the project's button state.
 2. Advance `Time` once to collect a clamped wall-clock delta.
 3. Convert the current project actions into a simulation command snapshot.
-4. Consume every available fixed step, applying the command for each tick.
+4. Consume fixed steps up to the clock's per-frame limit, applying the
+   appropriate command for each tick; leave any excess backlog queued.
 5. Build renderer-facing transforms from simulation state.
 6. Submit a render request and handle a skipped frame if the surface is
    temporarily unavailable.
@@ -192,7 +197,9 @@ fn main() {
 }
 ```
 
-Call `release(button)` for the corresponding platform release event. Repeated
+Call `release(button)` for the corresponding platform release event. Use
+`clear()` when the host loses focus to discard held buttons and pending edge
+transitions so controls cannot remain stuck. Repeated
 presses while held do not create additional press edges. If several buttons
 are bound to one action, the action is pressed when its first button becomes
 held and released when its last held button is released. Adding/removing a
@@ -214,21 +221,25 @@ platform input objects into simulation code.
 simulation default is 120 Hz, but the clock accepts another rate:
 
 ```rust
-use fate_sim::simulation::{EngineCore, SimulationInput};
+use fate_sim::ecs::{Position, Velocity, movement_system};
+use fate_sim::math::{Fixed, FixedVec2};
+use fate_sim::simulation::SimulationState;
 use fate_engine::time::Time;
 
 fn main() {
     let mut time = Time::new(120.0);
-    let mut simulation = EngineCore::with_seed(1234);
-    let input = SimulationInput {
-        move_x: 1,
-        move_y: 0,
-        boost: false,
-    };
+    let mut simulation = SimulationState::with_seed(1234);
+    let player = simulation.world.spawn();
+    simulation.world.positions.insert(player, Position(FixedVec2::ZERO));
+    simulation.world.velocities.insert(
+        player,
+        Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)),
+    );
 
     let frame_delta_seconds = time.tick();
     while time.next_fixed_step().is_some() {
-        simulation.fixed_update(input);
+        movement_system(&mut simulation.world, Fixed::from_ratio(1, 120));
+        simulation.advance_tick().expect("tick counter exhausted");
     }
 
     let interpolation_alpha = time.alpha();
@@ -236,53 +247,64 @@ fn main() {
 }
 ```
 
-`tick()` clamps a single frame delta to 0.1 seconds and adds it to the fixed
-accumulator. Consume steps in a loop; `next_fixed_step()` removes one step per
-call. `alpha()` is the remaining accumulator fraction after consumed steps, so
-consume all available steps before using it as a render interpolation factor.
-The clock does not implement pause policy, a maximum number of catch-up ticks,
-or a scheduler for the application.
+`tick()` returns a frame delta clamped to 0.1 seconds for presentation work,
+but adds the full wall-clock delta to the fixed accumulator. This prevents a
+long frame from silently discarding simulation time. `next_fixed_step()` runs
+at most eight ticks per frame; any backlog is preserved for subsequent frames.
+Use `is_catching_up()` or `pending_fixed_steps()` to observe that backlog.
+`alpha()` remains the fractional remainder for interpolation and excludes
+queued whole ticks, so the rendered state can temporarily lag wall time while
+the simulation catches up.
 
-The current `EngineCore` advances at its own fixed 120 Hz and does not accept a
-configurable delta. Pair it with `Time::new(120.0)` unless your project
-deliberately owns a different simulation loop; changing the clock rate alone
-does not change the simulation's rate.
+The demo keeps its simulation active after focus loss, clears held input and
+mouse motion to avoid stuck controls, skips rendering, and throttles redraws to
+20 Hz. At the demo's 120 Hz simulation rate, that leaves room for the eight
+step-per-frame limit to catch up after a brief stall. The engine does not
+define a local gameplay-pause state; networked pause should be represented in
+the simulation/game state while network ticks continue.
+
+`SimulationState` does not choose a tick rate or invoke systems. The example
+uses 120 Hz and advances its state once for each consumed fixed step; the
+consumer must keep its chosen `Time` frequency and per-tick system delta in
+agreement.
 
 Use frame delta for non-deterministic presentation work, such as a free camera.
 Advance deterministic state only with fixed ticks and explicit input values.
 Do not read wall-clock time, renderer state, or platform devices from
 simulation systems.
 
-### Current simulation API and its limits
+### Simulation state and its limits
 
-`fate_sim::simulation::EngineCore` is constructed with `new()` or
-`with_seed(seed)`. It currently creates one player entity with a default 2D
-position/velocity and `fixed_update(SimulationInput)` implements the current
-prototype's movement, boost, spin, and fixed playfield boundaries.
-`SimulationInput` has `move_x`, `move_y` axes intended to be `-1..=1`, and a
-`boost` flag. Keep the axes in range; replay and rollback validate that range.
+`fate_sim::simulation::SimulationState` owns a `World`, deterministic tick
+counter, and seeded random stream; it does not select or run gameplay systems,
+define input commands, or create entities on behalf of a game. Construct with
+`new()` or `with_seed(seed)`, run the consumer's systems explicitly, then call
+`advance_tick()`. Snapshots include the world, tick, and RNG state.
 
 ```rust
-use fate_sim::simulation::{EngineCore, SimulationInput};
+use fate_sim::ecs::{Position, Velocity, movement_system};
+use fate_sim::math::{Fixed, FixedVec2};
+use fate_sim::simulation::SimulationState;
 
-fn main() {
-    let mut simulation = EngineCore::with_seed(1234);
-    simulation.fixed_update(SimulationInput {
-        move_x: 1,
-        move_y: 0,
-        boost: false,
-    });
-    assert_eq!(simulation.tick(), 1);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut state = SimulationState::with_seed(1234);
+    let entity = state.world.spawn();
+    state.world.positions.insert(entity, Position(FixedVec2::ZERO));
+    state.world.velocities.insert(
+        entity,
+        Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)),
+    );
+    movement_system(&mut state.world, Fixed::from_ratio(1, 120));
+    state.advance_tick()?;
+    assert_eq!(state.tick(), 1);
+    Ok(())
 }
 ```
 
-This is **not yet a configurable or general-purpose game simulation API**:
-movement constants and the playfield are currently built into `EngineCore`.
-Projects can access its public `world` and `player`, but arbitrary component
-types, a plugin system, configurable gameplay systems, or a generic command
-interface are not provided. The demo's swarm/stress-scene population is kept
-outside `fate_sim` in
-[`demo_simulation.rs`](../projects/demo/src/demo_simulation.rs).
+The fixed ECS component set and 2D systems are still small prototypes; projects
+choose which systems to call and how to interpret commands. The demo's
+`EngineCore`, movement/boost rules, playfield, and swarm/stress-scene
+population live under `projects/demo/src`.
 
 ### ECS and fixed-point math
 
@@ -303,42 +325,41 @@ does not preserve deterministic precision. The engine's renderer-facing
 
 ### Deterministic randomness
 
-Use the seeded `EngineCore` RNG helpers or
+Use `SimulationState`'s seeded RNG methods or
 `fate_sim::rng::DeterministicRng` for reproducible simulation randomness.
 Available operations include `next_u64`, bounded unsigned/signed/fixed-point
 ranges, and seeded shuffling. Ranges are half-open: `[min, max)`. Invalid or
 empty ranges assert rather than returning an error.
 
-The RNG state is included in `EngineCore` snapshots. To continue the same
+The RNG state is included in `SimulationState` snapshots. To continue the same
 sequence after restore, restore the same simulation snapshot rather than
 seeding a new generator.
 
 ### Snapshots and replay
 
-`EngineCore::state_bytes()` produces a versioned canonical little-endian
-snapshot; `EngineCore::from_state_bytes()` validates and restores it.
+`SimulationState::state_bytes()` produces a versioned canonical little-endian
+snapshot; `SimulationState::from_state_bytes()` validates and restores it.
 `state_hash()` is an FNV-1a 64-bit diagnostic checksum. It is not
 cryptographic, authenticated, or suitable as proof that remote data is
 trustworthy. Snapshot format changes require a version bump and may make older
 snapshots unreadable; persist an application-level version/metadata alongside
 saved data if your project needs migration.
 
-`fate_sim::replay::ReplayTape` records an initial state and a bounded list of
-`SimulationInput` commands, stores a hash after each tick, serializes with
-`to_bytes()`, restores with `from_bytes()`, and can verify playback with
-`playback()`. It is tied to the current `EngineCore` command schema and has a
-10-million-tick limit. Replay serialization has versioning but no
-authentication or encryption. Treat replay files as untrusted input.
+`SimulationState` snapshot version 1 stores only generic simulation state; it
+is not compatible with the earlier prototype `EngineCore` snapshot schema.
+The demo-specific [`ReplayTape`](../projects/demo/src/demo_replay.rs) records
+the demo command schema and bounded input history. Its replay serialization is
+versioned but has no authentication or encryption; treat replay files as
+untrusted input.
 
 ### Rollback
 
-`RollbackSession::new(core, history_capacity)` creates a bounded local input
-history; a zero capacity returns an error. Use `advance(input)` instead of
-advancing its core directly, then call `reconcile(authoritative_snapshot)`
-when an authoritative state arrives. `reconcile_with_corrections` can replace
-predicted input for retained ticks. Reconciliation validates snapshot/tick
-relationships and fails without changing live state or history if the
-required input history is unavailable or corrections are invalid.
+The demo-specific `RollbackSession` in
+[`demo_replay.rs`](../projects/demo/src/demo_replay.rs) creates a bounded local
+input history; a zero capacity returns an error. It advances the demo
+simulation and reconciles authoritative snapshots, optionally applying
+corrected inputs for retained ticks. The reusable `fate_sim` crate does not
+currently prescribe a command format or rollback policy.
 
 This is a deterministic state/input primitive, not a networking solution.
 Transport, packet ordering, authentication, server policy, interpolation,
@@ -422,6 +443,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 Useful source references:
 
 - [`src/lib.rs`](../src/lib.rs) — engine library module surface.
+- [`projects/consumer_smoke/`](../projects/consumer_smoke/) — minimal
+  independent consumer package and invocation.
 - [`src/input.rs`](../src/input.rs) and
   [`projects/demo/src/demo_input.rs`](../projects/demo/src/demo_input.rs) —
   generic input state and a platform-specific mapping.
@@ -429,9 +452,9 @@ Useful source references:
 - [`crates/fate_sim/src/simulation.rs`](../crates/fate_sim/src/simulation.rs)
   and [`crates/fate_sim/src/ecs/`](../crates/fate_sim/src/ecs/) — simulation
   and current ECS.
-- [`crates/fate_sim/src/replay.rs`](../crates/fate_sim/src/replay.rs) and
-  [`crates/fate_sim/src/rng.rs`](../crates/fate_sim/src/rng.rs) — replay,
-  rollback, and deterministic random generation.
+- [`projects/demo/src/demo_replay.rs`](../projects/demo/src/demo_replay.rs) and
+  [`crates/fate_sim/src/rng.rs`](../crates/fate_sim/src/rng.rs) — demo replay/
+  rollback and deterministic random generation.
 - [`src/renderer/`](../src/renderer/) and
   [`projects/demo/src/app.rs`](../projects/demo/src/app.rs) — render APIs and
   window/event-loop integration.

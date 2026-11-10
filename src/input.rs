@@ -92,6 +92,15 @@ where
         self.just_released_actions.contains(&action)
     }
 
+    /// Clear held buttons and pending transitions, such as when a window loses focus.
+    pub fn clear(&mut self) {
+        self.pressed.clear();
+        self.just_pressed.clear();
+        self.just_released.clear();
+        self.just_pressed_actions.clear();
+        self.just_released_actions.clear();
+    }
+
     fn bound_actions(&self, button: Button) -> Vec<Action> {
         self.bindings
             .iter()
@@ -151,6 +160,22 @@ mod tests {
         input.end_frame();
         assert!(!input.action_just_pressed(Action::ActionB));
         assert!(!input.button_just_pressed(2));
+    }
+
+    #[test]
+    fn clear_releases_held_buttons_and_edges() {
+        let mut input = Input::new();
+        input.bind(Action::ActionA, 1_u8);
+        input.press(1);
+
+        input.clear();
+
+        assert!(!input.button_down(1));
+        assert!(!input.button_just_pressed(1));
+        assert!(!input.button_just_released(1));
+        assert!(!input.action_down(Action::ActionA));
+        assert!(!input.action_just_pressed(Action::ActionA));
+        assert!(!input.action_just_released(Action::ActionA));
     }
 
     #[test]

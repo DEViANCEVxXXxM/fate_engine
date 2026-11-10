@@ -1,0 +1,8 @@
+[package]
+name = "fate_consumer_smoke"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fate_engine = { path = "../.." }
+fate_sim = { path = "../../crates/fate_sim" }

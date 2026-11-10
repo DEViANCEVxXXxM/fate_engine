@@ -8,14 +8,13 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
+use crate::demo_input::{self, Action, DemoInput};
+use crate::demo_simulation::DemoSimulation;
 use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
+use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{Camera3d, Draw3d, Instance2d, Mesh3d, Renderer, cube_mesh};
 use fate_engine::time::Time;
-use fate_sim::simulation::{SIMULATION_HZ, SimulationInput};
-
-use crate::demo_input::{self, Action, DemoInput};
-use crate::demo_simulation::DemoSimulation;
 const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
 const CAMERA_MOVE_SPEED: f32 = 4.0;
 const CAMERA_BOOST_SPEED: f32 = 8.0;
@@ -113,6 +112,11 @@ impl App {
         self.input.end_frame();
         self.update_camera();
         self.update_3d_camera(frame_dt);
+
+        if !self.focused {
+            self.update_title(frame_dt);
+            return false;
+        }
 
         let render_start = Instant::now();
         let (rendered, draw_budget) = if self.three_d_mode {
@@ -499,6 +503,8 @@ impl ApplicationHandler for App {
                     self.capture_cursor();
                 } else if !focused {
                     self.release_cursor();
+                    self.input.clear();
+                    self.mouse_delta = (0.0, 0.0);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -532,7 +538,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let frame_budget = Duration::from_millis(Time::frame_budget_ms());
+        let frame_budget = Duration::from_millis(if self.focused {
+            Time::frame_budget_ms()
+        } else {
+            50
+        });
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame_budget));
 
         if let Some(window) = &self.window {

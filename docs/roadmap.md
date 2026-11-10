@@ -14,8 +14,9 @@ this page updated as tasks are completed or reprioritized.
   separate `projects/demo` workspace package.
 - Deterministic simulation code is isolated in `crates/fate_sim`, which has no
   third-party dependencies and forbids unsafe code. It includes fixed-point
-  math, fixed-tick updates, an indexed-column ECS, deterministic RNG,
-  versioned snapshots, replay, and bounded rollback primitives.
+  math, a game-rule-neutral state container, an indexed-column ECS,
+  deterministic RNG, and versioned snapshots. Demo gameplay, replay, and
+  rollback live under `projects/demo`.
 - A standalone CPU-only simulation benchmark lives in `crates/fate_sim_bench`.
 - The renderer has 2D triangle and indexed 3D mesh paths, cameras, depth
   testing, and per-draw 3D tint. The demo has 2D and 3D scenes and free-camera
@@ -31,9 +32,8 @@ this page updated as tasks are completed or reprioritized.
 
 ## Important gaps
 
-- `fate_sim::simulation::EngineCore` still embeds one concrete 2D player
-  movement model, its input shape, constants, and playfield. It is not yet a
-  general-purpose simulation host.
+- `fate_sim::ecs::World` still has a fixed component set; its current systems
+  are limited to 2D movement, spin, and bounds.
 - `fate_sim::ecs::World` has fixed component columns and no arbitrary
   component registration, composed queries, entity reuse, or parallel
   scheduler.
@@ -42,10 +42,10 @@ this page updated as tasks are completed or reprioritized.
   material, asset, or lighting system.
 - The renderer enforces a draw-count cap but does not provide general frustum
   culling. The demo performs its own 2D visibility filtering.
-- The clock and simulation rate are not yet one configurable policy: `Time`
-  accepts a rate, while `EngineCore` advances at its built-in 120 Hz.
+- Consumers must coordinate their chosen `Time` rate, per-tick delta, and
+  calls to `SimulationState::advance_tick()`.
 - Snapshot/replay/rollback are deterministic local primitives, not a network
-  protocol or secure persistence format.
+  protocol or secure persistence format; replay/rollback are demo-specific.
 
 ## Prioritized backlog
 
@@ -54,12 +54,11 @@ this page updated as tasks are completed or reprioritized.
 **Goal:** Find missing exports and accidental demo/workspace assumptions
 before adding more subsystems.
 
-- Add a minimal consumer example or smoke-test package that depends only on
-  the engine crates it uses.
-- Demonstrate generic input, a fixed-step simulation update, and the
-  documented path-dependency setup without importing demo modules.
-- Keep project-specific actions, content, and scene code out of reusable
-  crates.
+**Status: done.** [`projects/consumer_smoke/`](../projects/consumer_smoke/)
+is a headless package with path dependencies only on `fate_engine` and
+`fate_sim`. It exercises generic input, one fixed simulation tick, and snapshot
+restore without importing demo modules or starting a window/GPU. Run it with
+`cargo run -p fate_consumer_smoke`.
 
 **Done when:** The consumer builds using only documented public APIs; its
 dependencies and commands are documented; the workspace quality gate passes.
@@ -69,14 +68,14 @@ dependencies and commands are documented; the workspace quality gate passes.
 **Goal:** Let a project own its gameplay rules without losing the useful
 deterministic primitives.
 
-- First describe the smallest consumer-driven API needed to own a simulation
-  tick, command data, and system selection.
-- Move the current player movement, boost, spin/bounds policy, and their
-  constants behind the demo/game layer or a clearly named example workload.
-- Preserve `fate_sim` fixed-point, world-state, RNG, snapshot, replay, and
-  rollback capabilities where they remain reusable.
-- Define snapshot compatibility/versioning consequences before changing its
-  serialized state schema.
+**Status: done.** `fate_sim::simulation::SimulationState` now owns only world,
+tick, deterministic RNG, and generic snapshot/hash behavior. The concrete
+2D prototype `EngineCore`, its command shape and movement policy, and its
+replay/rollback implementation are under `projects/demo`. The CPU benchmark
+uses its own workload, and the headless consumer smoke test defines its own
+movement behavior using reusable primitives. Snapshot compatibility is
+explicitly versioned: generic state starts at version 1 and is not compatible
+with the removed prototype-core snapshot schema.
 
 **Done when:** A second minimal simulation consumer can choose different
 gameplay rules without changing `fate_sim`; deterministic replay and rollback
@@ -87,17 +86,17 @@ tests still validate their documented scope.
 **Goal:** Make clock behavior predictable when frames stall, windows pause, or
 simulation work takes longer than the frame budget.
 
-- Decide whether catch-up ticks are capped, accumulated indefinitely, or
-  intentionally dropped, and document the time-dilation implications.
-- Make the current 120 Hz `EngineCore` rate explicit at the boundary; do not
-  imply that changing `Time::new(hz)` changes simulation frequency.
-- Specify pause/resume behavior and input handling across focus loss.
-- Add deterministic tests for long stalls, repeated overload, pause/resume,
-  and interpolation alpha after consuming available steps.
+**Status: done.** The client never resets or drops accumulated simulation
+time. `Time` caps work at eight fixed steps per rendered frame and retains any
+backlog for later frames, exposing its presence and depth to the host. Its
+interpolation alpha uses only the fractional remainder. The demo continues
+simulation while unfocused, clears held input, skips rendering, and throttles
+redraws to 20 Hz. Clock-drift compensation against a server tick is deferred
+until a network clock/tick source exists; client prediction and replicated
+state must use server ticks when that layer is implemented.
 
 **Done when:** The policy is explicit, bounded according to the chosen
-behavior, observable to the host app, and covered by tests. Resolve the policy
-decision before implementation rather than selecting a cap implicitly.
+behavior, observable to the host app, and covered by tests.
 
 ### 4. Harden ECS lifecycle and define the next ECS capability
 
@@ -158,6 +157,10 @@ rollback as a networking stack.
 
 - Define the authoritative input/state exchange and threat model separately
   from serialization and local rollback.
+- Use server ticks as the client prediction target and preserve backlog under
+  the local per-frame work cap; compensate measured clock drift with small,
+  bounded tick-rate adjustments (approximately 1–2%) instead of dropping
+  simulation ticks. Implement this only once server-tick observations exist.
 - Specify snapshot schema evolution, input acknowledgement/history windows,
   and behavior when required history expires.
 - Prototype transport independently; do not treat diagnostic hashes as
@@ -169,9 +172,8 @@ server roles. This item is intentionally downstream of tasks 2 and 3.
 
 ## Suggested immediate next task
 
-Start with **Task 1: independent-consumer smoke test**. It is small, checks
-whether the new separation and user guide work in practice, and can reveal
-public API friction before larger simulation or ECS redesigns begin.
+Continue with **Task 4: ECS lifecycle invariants**. Harden entity lifecycle
+and snapshot validation before adding more simulation scheduling abstractions.
 
 ## Review checklist for future updates
 

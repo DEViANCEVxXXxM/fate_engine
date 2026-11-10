@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
-use crate::simulation::{EngineCore, SimulationInput, StateDecodeError};
+use crate::prototype_simulation::{EngineCore, SimulationInput, StateDecodeError};
 
 const REPLAY_VERSION: u16 = 1;
 const MAX_REPLAY_TICKS: usize = 10_000_000;

@@ -1,9 +1,45 @@
 use std::time::Instant;
 
-use fate_sim::ecs::{Position, Rotation, Spin, Velocity};
+use fate_sim::ecs::{
+    Position, Rotation, Spin, Velocity, bounds_system, movement_system, spin_system,
+};
 use fate_sim::math::{Fixed, FixedVec2};
-use fate_sim::simulation::{EngineCore, SIMULATION_HZ, SimulationInput};
+use fate_sim::simulation::SimulationState;
 use std::fmt;
+
+const SIMULATION_HZ: u32 = 120;
+const FIXED_DELTA: Fixed = Fixed::from_ratio(1, SIMULATION_HZ as i64);
+const PLAYFIELD_HALF: FixedVec2 = FixedVec2::new(Fixed::from_int(9), Fixed::from_ratio(17, 2));
+const MAX_SPEED: Fixed = Fixed::from_int(8);
+const ACCELERATION: Fixed = Fixed::from_int(24);
+
+#[derive(Clone, Copy, Default)]
+struct BenchmarkInput {
+    move_x: i8,
+    move_y: i8,
+}
+
+fn update(state: &mut SimulationState, player: fate_sim::ecs::Entity, input: BenchmarkInput) {
+    if let Some(velocity) = state.world.velocities.get_mut(player) {
+        let direction = FixedVec2::new(
+            Fixed::from_int(i64::from(input.move_x)),
+            Fixed::from_int(i64::from(input.move_y)),
+        );
+        velocity.0 += direction * (ACCELERATION * FIXED_DELTA);
+        let speed_squared = velocity.0.x * velocity.0.x + velocity.0.y * velocity.0.y;
+        if speed_squared > MAX_SPEED * MAX_SPEED {
+            let speed = speed_squared.sqrt();
+            velocity.0 = velocity.0 * (MAX_SPEED / speed);
+        }
+    }
+
+    movement_system(&mut state.world, FIXED_DELTA);
+    spin_system(&mut state.world, FIXED_DELTA);
+    bounds_system(&mut state.world, PLAYFIELD_HALF);
+    state
+        .advance_tick()
+        .expect("benchmark simulation tick counter should not overflow");
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BenchmarkError {
@@ -38,42 +74,54 @@ impl BenchmarkScenario {
         }
     }
 
-    fn setup(self, core: &mut EngineCore) -> SimulationInput {
-        match self {
-            Self::Idle => SimulationInput::default(),
-            Self::Movement => SimulationInput {
+    fn setup(self, state: &mut SimulationState) -> (fate_sim::ecs::Entity, BenchmarkInput) {
+        let player = state.world.spawn();
+        state
+            .world
+            .positions
+            .insert(player, Position(FixedVec2::ZERO));
+        state
+            .world
+            .velocities
+            .insert(player, Velocity(FixedVec2::new(Fixed::ZERO, Fixed::ZERO)));
+        state.world.rotations.insert(player, Rotation(Fixed::ZERO));
+        state.world.spins.insert(player, Spin(Fixed::ZERO));
+        let input = match self {
+            Self::Idle => BenchmarkInput::default(),
+            Self::Movement => BenchmarkInput {
                 move_x: 1,
                 move_y: 1,
-                boost: false,
             },
             Self::EntityLoad { entities } => {
                 for index in 0..entities {
-                    let entity = core.world.spawn();
-                    core.world.positions.insert(
+                    let entity = state.world.spawn();
+                    state.world.positions.insert(
                         entity,
                         Position(FixedVec2::new(
                             Fixed::from_ratio(index as i64, 4),
                             Fixed::from_ratio((index % 16) as i64, 4),
                         )),
                     );
-                    core.world.velocities.insert(
+                    state.world.velocities.insert(
                         entity,
                         Velocity(FixedVec2::new(Fixed::from_int(2), Fixed::from_ratio(3, 2))),
                     );
-                    core.world
+                    state
+                        .world
                         .rotations
                         .insert(entity, Rotation(Fixed::from_ratio(index as i64, 10)));
-                    core.world
+                    state
+                        .world
                         .spins
                         .insert(entity, Spin(Fixed::from_ratio(1, 2)));
                 }
-                SimulationInput {
+                BenchmarkInput {
                     move_x: -1,
                     move_y: 0,
-                    boost: true,
                 }
             }
-        }
+        };
+        (player, input)
     }
 }
 
@@ -118,11 +166,11 @@ pub fn benchmark_scenario(
     if ticks == 0 {
         return Err(BenchmarkError::ZeroTicks);
     }
-    let mut core = EngineCore::new();
-    let input = scenario.setup(&mut core);
+    let mut state = SimulationState::new();
+    let (player, input) = scenario.setup(&mut state);
     let warmup_ticks = ticks.min(100);
     for _ in 0..warmup_ticks {
-        core.fixed_update(input);
+        update(&mut state, player, input);
     }
 
     let mut samples_ms = Vec::with_capacity(ticks);
@@ -131,7 +179,7 @@ pub fn benchmark_scenario(
 
     for _ in 0..ticks {
         let start = Instant::now();
-        core.fixed_update(input);
+        update(&mut state, player, input);
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         total_ms += elapsed_ms;
         samples_ms.push(elapsed_ms);
@@ -159,7 +207,7 @@ pub fn benchmark_scenario(
         worst_ms,
         target_ms,
         passes_budget,
-        final_state_hash: core.state_hash(),
+        final_state_hash: state.state_hash(),
     })
 }
 
