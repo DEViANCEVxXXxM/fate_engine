@@ -418,7 +418,10 @@ mod tests {
     #[test]
     fn performance_report_contains_budget_summary() {
         let mut app = App::new();
-        app.frame_profile = FrameProfile { sim_ms: 3.0, render_ms: 4.0 };
+        app.frame_profile = FrameProfile {
+            sim_ms: 3.0,
+            render_ms: 4.0,
+        };
         app.performance.add(7.0);
         app.performance.add(9.0);
 
@@ -433,12 +436,20 @@ mod tests {
         let mut app = App::new();
         let visible = app.world.spawn();
         let hidden = app.world.spawn();
-        app.world.positions.insert(visible, Position(Vec2::new(1.0, 1.0)));
-        app.world.positions.insert(hidden, Position(Vec2::new(30.0, 30.0)));
+        app.world
+            .positions
+            .insert(visible, Position(Vec2::new(1.0, 1.0)));
+        app.world
+            .positions
+            .insert(hidden, Position(Vec2::new(30.0, 30.0)));
 
         let instances = app.instances();
 
         assert_eq!(instances.len(), 2);
-        assert!(instances.iter().all(|instance| instance.position != Vec2::new(30.0, 30.0)));
+        assert!(
+            instances
+                .iter()
+                .all(|instance| instance.position != Vec2::new(30.0, 30.0))
+        );
     }
 }

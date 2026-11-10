@@ -61,6 +61,21 @@ impl Renderer {
         })
     }
 
+    pub fn budgeted_instance_count_static(instance_count: usize) -> usize {
+        let limit = pipeline::MAX_INSTANCES;
+        let count = instance_count.min(limit);
+        if instance_count > limit {
+            log::warn!(
+                "render instance budget exceeded: {instance_count} visible objects > {limit} max draw instances; clipping to {count} for the current frame",
+            );
+        }
+        count
+    }
+
+    pub fn budgeted_instance_count(&self, instance_count: usize) -> usize {
+        Self::budgeted_instance_count_static(instance_count)
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         self.gpu.resize(size);
     }
@@ -98,7 +113,7 @@ impl Renderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let view_proj = self.camera.view_projection(self.gpu.aspect());
-        let count = instances.len().min(pipeline::MAX_INSTANCES);
+        let count = self.budgeted_instance_count(instances.len());
 
         for (index, instance) in instances.iter().take(count).enumerate() {
             self.triangle.write_instance(
@@ -142,5 +157,19 @@ impl Renderer {
         self.gpu.queue.submit(Some(encoder.finish()));
         self.gpu.queue.present(frame);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn budgeted_instance_count_clips_beyond_render_limit() {
+        assert_eq!(Renderer::budgeted_instance_count_static(10), 10);
+        assert_eq!(
+            Renderer::budgeted_instance_count_static(pipeline::MAX_INSTANCES + 7),
+            pipeline::MAX_INSTANCES
+        );
     }
 }

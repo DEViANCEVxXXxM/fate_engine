@@ -37,6 +37,7 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - The camera transform must remain stable across window resize and reconfiguration.
 - Projection and camera matrices must remain finite even when the window is minimized, zero-sized, or temporarily reports a degenerate aspect ratio.
 - The render path must cull or skip entities outside the active camera frustum to preserve stable 120 FPS frame budgets.
+- The renderer must enforce a hard draw-instance cap and clip excess work before submission to the GPU.
 - Matrices must follow the project’s column-major convention.
 - The app shell may request redraws, but it must not directly manipulate gameplay state in the render path.
 
