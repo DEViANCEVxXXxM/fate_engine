@@ -7,6 +7,8 @@ mod input;
 mod math;
 mod performance;
 mod renderer;
+#[allow(dead_code)]
+mod replay;
 mod simulation;
 #[allow(dead_code)]
 mod simulation_bench;

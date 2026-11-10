@@ -59,6 +59,11 @@ replay tick. The hash is non-cryptographic and is not suitable for
 authentication. Cross-platform bitwise determinism still needs validation on
 multiple targets.
 
+`ReplayTape` can record a sequence of bounded movement commands with a
+per-tick state hash, serialize it, and replay it from an initial snapshot.
+Playback reports the first diverging tick; the replay format is diagnostic
+and is not authenticated.
+
 ## Architectural principles
 
 ### ECS

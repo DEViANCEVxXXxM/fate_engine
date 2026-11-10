@@ -9,6 +9,7 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - Gameplay state and simulation math use deterministic fixed-point values; float conversion is limited to the renderer boundary.
 - Replay snapshots use a versioned canonical little-endian encoding with validated restore; schema changes require a format-version bump.
 - State hashes are diagnostic, non-cryptographic checksums and must not be used as network authentication.
+- Replay tapes validate command ranges and compare a state checksum after every tick, reporting the first divergence.
 - The fixed-step loop must remain stable when the frame delta is large or when the app is briefly paused.
 - The simulation core advances only through fixed ticks and explicit `SimulationInput` snapshots; it must not read platform input or wall-clock time.
 - Wall-clock accumulation and conversion of platform key state into simulation commands belong to the app/platform boundary.
