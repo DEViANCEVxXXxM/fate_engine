@@ -134,7 +134,7 @@ This is especially important for:
 - prediction and rollback;
 - replays and debugging;
 - procedural generation;
-- co-op gameplay.
+- co-op/mp gameplay.
 
 ### Networking
 
@@ -192,7 +192,7 @@ The vertical slice must confirm that the architecture withstands load:
 
 1. Creation and processing of a large number of entities in ECS.
 2. Deterministic simulation in `FixedUpdate`.
-3. Scene rendering via `ash` and Vulkan.
+3. Scene rendering via [`ash`](https://github.com/ash-rs/ash) and Vulkan.
 4. Network connection via `quinn`.
 5. Basic server-authoritative replication.
 6. Prediction and rollback on a minimal example.
@@ -204,18 +204,19 @@ Only after confirming these pillars is it planned to expand content, tools, and 
 
 - Responsive control: minimal delay between input and visual reaction.
 - Procedural generation: reproducible results with the same seed and input data.
-- Co-op: predictable network simulation and state conflict resolution.
+- Co-op/Mp: predictable network simulation and state conflict resolution.
 - Performance: controlled budgets for frame, memory, CPU, and network.
 - Extensibility: game systems must not modify the engine core.
 
 ## Technologies
 
-- **Rust** — the project's primary language.
+- **[Rust](https://rust-lang.org/)** — the project's primary language.
 - **ECS** — the architectural foundation of simulation.
 - **SoA layout** — component data layout.
 - **Fixed-point** — deterministic simulation math.
-- **ash** — Vulkan bindings for Rust. [3][11]
-- **quinn** — async QUIC transport for Rust. [6][8]
+- **[wgpu](https://github.com/gfx-rs/wgpu)** - graphics API.
+- **[ash](https://github.com/ash-rs/ash)** — Vulkan bindings for Rust.
+- **[quinn](https://github.com/quinn-rs/quinn)** — async QUIC transport for Rust.
 
 ## Roadmap
 
