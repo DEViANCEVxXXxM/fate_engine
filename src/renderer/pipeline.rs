@@ -72,20 +72,19 @@ impl TrianglePipeline {
         let uniform_size = std::mem::size_of::<Uniforms>() as u64;
         let uniform_stride = uniform_size.div_ceil(alignment.max(1)) * alignment.max(1);
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("triangle bind group layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(uniform_size),
-                    },
-                    count: None,
-                }],
-            });
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("triangle bind group layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(uniform_size),
+                },
+                count: None,
+            }],
+        });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("triangle uniforms"),
@@ -210,14 +209,12 @@ mod tests {
     #[test]
     fn triangle_is_visible_offscreen() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        )
-        .expect("no adapter available");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default()),
-        )
-        .expect("no device available");
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no adapter available");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("no device available");
 
         let size: u32 = 64;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -316,8 +313,10 @@ mod tests {
             .expect("buffer mapping failed");
 
         let data = slice.get_mapped_range().expect("mapped range");
-        let lit_pixels = data
-            .chunks_exact(4)
+        let bytes = data.as_ref();
+        let (pixels, _) = bytes.as_chunks::<4>();
+        let lit_pixels = pixels
+            .iter()
             .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
             .count();
         drop(data);
@@ -342,14 +341,12 @@ mod camera_scale_tests {
     #[test]
     fn default_camera_draws_the_triangle() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter = pollster::block_on(
-            instance.request_adapter(&wgpu::RequestAdapterOptions::default()),
-        )
-        .expect("no adapter available");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default()),
-        )
-        .expect("no device available");
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no adapter available");
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                .expect("no device available");
 
         let width = 1280u32;
         let height = 720u32;
@@ -378,7 +375,14 @@ mod camera_scale_tests {
             rotation: 0.1,
             scale: 1.0,
         };
-        for _ in 0..5 { pipeline.write_instance(&queue, 0, camera.view_projection(width as f32 / height as f32), instance.model_matrix()); }
+        for _ in 0..5 {
+            pipeline.write_instance(
+                &queue,
+                0,
+                camera.view_projection(width as f32 / height as f32),
+                instance.model_matrix(),
+            );
+        }
 
         let bytes_per_row = width * 4;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -449,8 +453,10 @@ mod camera_scale_tests {
             .expect("buffer mapping failed");
 
         let data = slice.get_mapped_range().expect("mapped range");
-        let lit_pixels = data
-            .chunks_exact(4)
+        let bytes = data.as_ref();
+        let (pixels, _) = bytes.as_chunks::<4>();
+        let lit_pixels = pixels
+            .iter()
             .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
             .count();
         drop(data);

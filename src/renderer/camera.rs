@@ -25,8 +25,15 @@ impl Default for Camera2d {
 
 impl Camera2d {
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
-        let size = self.view_size * (1.0 / self.zoom.max(0.001));
-        let projection = Mat4::orthographic_2d(size, aspect);
+        let safe_aspect = aspect.abs().max(f32::EPSILON);
+        let safe_zoom = self.zoom.abs().max(f32::EPSILON);
+        let safe_view_size = Vec2::new(
+            self.view_size.x.abs().max(f32::EPSILON),
+            self.view_size.y.abs().max(f32::EPSILON),
+        );
+
+        let size = safe_view_size * (1.0 / safe_zoom);
+        let projection = Mat4::orthographic_2d(size, safe_aspect);
         let view = Mat4::translation(Vec3::new(-self.center.x, -self.center.y, 0.0));
         projection.mul(view)
     }
@@ -47,5 +54,16 @@ mod tests {
         // camera offset of 5 lands at -0.5 in clip space.
         assert!((vp.m[12] + 0.5).abs() < 1e-5);
         assert!((vp.m[13] + 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn zero_zoom_and_aspect_still_produce_finite_projection() {
+        let camera = Camera2d {
+            center: Vec2::ZERO,
+            view_size: Vec2::ZERO,
+            zoom: 0.0,
+        };
+        let vp = camera.view_projection(0.0);
+        assert!(vp.m.iter().all(|value| value.is_finite()));
     }
 }

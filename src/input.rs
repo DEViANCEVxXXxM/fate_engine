@@ -63,6 +63,10 @@ impl Input {
         self.just_pressed.contains(&key)
     }
 
+    pub fn key_just_released(&self, key: KeyCode) -> bool {
+        self.just_released.contains(&key)
+    }
+
     pub fn action_down(&self, action: Action) -> bool {
         self.bindings
             .iter()
@@ -75,9 +79,52 @@ impl Input {
             .any(|(bound, key)| *bound == action && self.just_pressed.contains(key))
     }
 
+    pub fn action_just_released(&self, action: Action) -> bool {
+        self.bindings
+            .iter()
+            .any(|(bound, key)| *bound == action && self.just_released.contains(key))
+    }
+
     /// Call once at the end of every frame, after systems have read the input.
     pub fn end_frame(&mut self) {
         self.just_pressed.clear();
         self.just_released.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_press_and_release_transitions_are_tracked() {
+        let mut input = Input::new();
+
+        input.press(KeyCode::KeyA);
+        assert!(input.key_down(KeyCode::KeyA));
+        assert!(input.key_just_pressed(KeyCode::KeyA));
+        assert!(input.action_down(Action::MoveLeft));
+        assert!(input.action_just_pressed(Action::MoveLeft));
+
+        input.end_frame();
+        assert!(!input.key_just_pressed(KeyCode::KeyA));
+        assert!(!input.action_just_pressed(Action::MoveLeft));
+
+        input.release(KeyCode::KeyA);
+        assert!(!input.key_down(KeyCode::KeyA));
+        assert!(input.key_just_released(KeyCode::KeyA));
+        assert!(input.action_just_released(Action::MoveLeft));
+    }
+
+    #[test]
+    fn repeated_end_frame_clears_edge_state() {
+        let mut input = Input::new();
+        input.press(KeyCode::KeyD);
+        assert!(input.action_just_pressed(Action::MoveRight));
+
+        input.end_frame();
+        input.end_frame();
+        assert!(!input.action_just_pressed(Action::MoveRight));
+        assert!(!input.key_just_pressed(KeyCode::KeyD));
     }
 }

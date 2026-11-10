@@ -8,11 +8,31 @@ pub struct Vec3 {
 }
 
 impl Vec3 {
-    pub const ZERO: Self = Self { x: 0.0, y: 0.0, z: 0.0 };
-    pub const ONE: Self = Self { x: 1.0, y: 1.0, z: 1.0 };
-    pub const X: Self = Self { x: 1.0, y: 0.0, z: 0.0 };
-    pub const Y: Self = Self { x: 0.0, y: 1.0, z: 0.0 };
-    pub const Z: Self = Self { x: 0.0, y: 0.0, z: 1.0 };
+    pub const ZERO: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const ONE: Self = Self {
+        x: 1.0,
+        y: 1.0,
+        z: 1.0,
+    };
+    pub const X: Self = Self {
+        x: 1.0,
+        y: 0.0,
+        z: 0.0,
+    };
+    pub const Y: Self = Self {
+        x: 0.0,
+        y: 1.0,
+        z: 0.0,
+    };
+    pub const Z: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
 
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
@@ -40,7 +60,11 @@ impl Vec3 {
 
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > super::EPSILON { self / len } else { Self::ZERO }
+        if len > super::EPSILON {
+            self / len
+        } else {
+            Self::ZERO
+        }
     }
 
     pub fn lerp(self, other: Self, t: f32) -> Self {
@@ -95,6 +119,13 @@ impl Mul<f32> for Vec3 {
     }
 }
 
+impl Mul<Vec3> for Vec3 {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Self::new(self.x * rhs.x, self.y * rhs.y, self.z * rhs.z)
+    }
+}
+
 impl Mul<Vec3> for f32 {
     type Output = Vec3;
     fn mul(self, rhs: Vec3) -> Vec3 {
@@ -106,6 +137,13 @@ impl Div<f32> for Vec3 {
     type Output = Self;
     fn div(self, rhs: f32) -> Self {
         Self::new(self.x / rhs, self.y / rhs, self.z / rhs)
+    }
+}
+
+impl Div<Vec3> for Vec3 {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        Self::new(self.x / rhs.x, self.y / rhs.y, self.z / rhs.z)
     }
 }
 
@@ -126,5 +164,19 @@ mod tests {
         let b = Vec3::new(0.0, 1.0, 0.0);
         let c = a.cross(b);
         assert!((c - Vec3::Z).length() < 1e-5);
+    }
+
+    #[test]
+    fn zero_vector_normalizes_to_zero() {
+        let v = Vec3::ZERO.normalize();
+        assert_eq!(v, Vec3::ZERO);
+    }
+
+    #[test]
+    fn componentwise_mul_and_div_work() {
+        let a = Vec3::new(6.0, 9.0, 12.0);
+        let b = Vec3::new(2.0, 3.0, 4.0);
+        assert_eq!(a * b, Vec3::new(12.0, 27.0, 48.0));
+        assert_eq!(a / b, Vec3::new(3.0, 3.0, 3.0));
     }
 }

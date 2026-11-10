@@ -81,6 +81,12 @@ impl Mat4 {
     /// Orthographic projection for 2D. `size` is the visible world size,
     /// `aspect` the window aspect ratio; the larger dimension is kept fixed.
     pub fn orthographic_2d(size: Vec2, aspect: f32) -> Self {
+        let aspect = aspect.abs().max(super::EPSILON);
+        let size = Vec2::new(
+            size.x.abs().max(super::EPSILON),
+            size.y.abs().max(super::EPSILON),
+        );
+
         let (half_w, half_h) = if aspect >= 1.0 {
             (size.x * 0.5, size.x * 0.5 / aspect)
         } else {
@@ -118,6 +124,7 @@ impl Mat4 {
     #[allow(dead_code)]
     pub fn perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Self {
         let f = 1.0 / (fov_y_radians * 0.5).tan();
+        let nf = near - far;
         Self::from_cols_array([
             f / aspect,
             0.0,
@@ -129,11 +136,11 @@ impl Mat4 {
             0.0,
             0.0,
             0.0,
-            far / (near - far),
+            far / nf,
             -1.0,
             0.0,
             0.0,
-            (near * far) / (near - far),
+            (near * far) / nf,
             0.0,
         ])
     }
@@ -145,9 +152,18 @@ impl Mat4 {
         let u = s.cross(f);
 
         Self::from_cols_array([
-            s.x, u.x, -f.x, 0.0, //
-            s.y, u.y, -f.y, 0.0, //
-            s.z, u.z, -f.z, 0.0, //
+            s.x,
+            u.x,
+            -f.x,
+            0.0, //
+            s.y,
+            u.y,
+            -f.y,
+            0.0, //
+            s.z,
+            u.z,
+            -f.z,
+            0.0, //
             -s.dot(eye),
             -u.dot(eye),
             f.dot(eye),
@@ -182,5 +198,23 @@ mod tests {
         assert!((p.m[13]).abs() < 1e-5);
         // Top of the screen maps to +1 in clip space.
         assert!((p.m[5] - 0.1).abs() < 1e-5);
+    }
+
+    #[test]
+    fn perspective_projection_is_well_defined() {
+        let p = Mat4::perspective(std::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        let expected_z = 100.0 / (0.1 - 100.0);
+        let expected_w = (0.1 * 100.0) / (0.1 - 100.0);
+        assert!((p.m[0] - 1.0).abs() < 1e-5);
+        assert!((p.m[5] - 1.0).abs() < 1e-5);
+        assert!((p.m[10] - expected_z).abs() < 1e-5);
+        assert!((p.m[14] - expected_w).abs() < 1e-5);
+    }
+
+    #[test]
+    fn orthographic_zero_size_and_zero_aspect_stay_finite() {
+        let p = Mat4::orthographic_2d(Vec2::ZERO, 0.0);
+        assert!(p.m.iter().all(|value| value.is_finite()));
+        assert!(p.m[0].is_finite());
     }
 }

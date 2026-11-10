@@ -35,7 +35,11 @@ impl Vec2 {
 
     pub fn normalize(self) -> Self {
         let len = self.length();
-        if len > super::EPSILON { self / len } else { Self::ZERO }
+        if len > super::EPSILON {
+            self / len
+        } else {
+            Self::ZERO
+        }
     }
 
     /// Rotated 90 degrees counter-clockwise.
@@ -93,6 +97,13 @@ impl Mul<f32> for Vec2 {
     }
 }
 
+impl Mul<Vec2> for Vec2 {
+    type Output = Self;
+    fn mul(self, rhs: Self) -> Self {
+        Self::new(self.x * rhs.x, self.y * rhs.y)
+    }
+}
+
 impl Mul<Vec2> for f32 {
     type Output = Vec2;
     fn mul(self, rhs: Vec2) -> Vec2 {
@@ -104,6 +115,13 @@ impl Div<f32> for Vec2 {
     type Output = Self;
     fn div(self, rhs: f32) -> Self {
         Self::new(self.x / rhs, self.y / rhs)
+    }
+}
+
+impl Div<Vec2> for Vec2 {
+    type Output = Self;
+    fn div(self, rhs: Self) -> Self {
+        Self::new(self.x / rhs.x, self.y / rhs.y)
     }
 }
 
@@ -130,8 +148,22 @@ mod tests {
     }
 
     #[test]
+    fn zero_vector_normalizes_to_zero() {
+        let v = Vec2::ZERO.normalize();
+        assert_eq!(v, Vec2::ZERO);
+    }
+
+    #[test]
     fn perp_is_orthogonal() {
         let v = Vec2::new(2.0, 3.0);
         assert!(v.dot(v.perp()).abs() < 1e-5);
+    }
+
+    #[test]
+    fn componentwise_mul_and_div_work() {
+        let a = Vec2::new(6.0, 8.0);
+        let b = Vec2::new(2.0, 4.0);
+        assert_eq!(a * b, Vec2::new(12.0, 32.0));
+        assert_eq!(a / b, Vec2::new(3.0, 2.0));
     }
 }

@@ -35,35 +35,6 @@ pub fn spin_system(world: &mut World, dt: f32) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{ecs::world::Position, math::Vec2};
-
-    #[test]
-    fn movement_integrates_velocity() {
-        let mut world = World::new();
-        let e = world.spawn();
-        world.positions.insert(e, Position(Vec2::new(0.0, 0.0)));
-        world.velocities.insert(e, crate::ecs::world::Velocity(Vec2::new(2.0, 0.0)));
-
-        movement_system(&mut world, 0.5);
-
-        assert_eq!(world.positions.get(e).unwrap().0, Vec2::new(1.0, 0.0));
-    }
-
-    #[test]
-    fn static_entities_do_not_move() {
-        let mut world = World::new();
-        let e = world.spawn();
-        world.positions.insert(e, Position(Vec2::new(5.0, 5.0)));
-
-        movement_system(&mut world, 1.0);
-
-        assert_eq!(world.positions.get(e).unwrap().0, Vec2::new(5.0, 5.0));
-    }
-}
-
 /// Reflect entities off the playfield walls.
 pub fn bounds_system(world: &mut World, half: Vec2) {
     let World {
@@ -88,3 +59,33 @@ pub fn bounds_system(world: &mut World, half: Vec2) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ecs::world::Position, math::Vec2};
+
+    #[test]
+    fn movement_integrates_velocity() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.positions.insert(e, Position(Vec2::new(0.0, 0.0)));
+        world
+            .velocities
+            .insert(e, crate::ecs::world::Velocity(Vec2::new(2.0, 0.0)));
+
+        movement_system(&mut world, 0.5);
+
+        assert_eq!(world.positions.get(e).unwrap().0, Vec2::new(1.0, 0.0));
+    }
+
+    #[test]
+    fn static_entities_do_not_move() {
+        let mut world = World::new();
+        let e = world.spawn();
+        world.positions.insert(e, Position(Vec2::new(5.0, 5.0)));
+
+        movement_system(&mut world, 1.0);
+
+        assert_eq!(world.positions.get(e).unwrap().0, Vec2::new(5.0, 5.0));
+    }
+}

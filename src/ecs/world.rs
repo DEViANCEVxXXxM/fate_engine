@@ -188,4 +188,24 @@ mod tests {
         assert!(world.spins.get(a).is_none());
         assert_eq!(world.spins.get(b), Some(&Spin(1.0)));
     }
+
+    #[test]
+    fn despawn_clears_all_component_columns() {
+        let mut world = World::new();
+        let e = world.spawn();
+
+        world.positions.insert(e, Position(Vec2::new(1.0, 2.0)));
+        world.velocities.insert(e, Velocity(Vec2::new(3.0, 4.0)));
+        world.rotations.insert(e, Rotation(0.5));
+        world.spins.insert(e, Spin(1.25));
+
+        world.despawn(e);
+
+        assert!(!world.is_alive(e));
+        assert!(!world.positions.contains(e));
+        assert!(!world.velocities.contains(e));
+        assert!(!world.rotations.contains(e));
+        assert!(!world.spins.contains(e));
+        assert_eq!(world.entity_count(), 0);
+    }
 }

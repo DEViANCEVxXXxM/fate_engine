@@ -26,9 +26,13 @@ pub struct Instance2d {
 impl Instance2d {
     pub fn model_matrix(&self) -> Mat4 {
         let scale = if self.scale > 0.0 { self.scale } else { 1.0 };
-        Mat4::translation(crate::math::Vec3::new(self.position.x, self.position.y, 0.0))
-            .mul(Mat4::rotation_z(self.rotation))
-            .mul(Mat4::scale(crate::math::Vec3::new(scale, scale, 1.0)))
+        Mat4::translation(crate::math::Vec3::new(
+            self.position.x,
+            self.position.y,
+            0.0,
+        ))
+        .mul(Mat4::rotation_z(self.rotation))
+        .mul(Mat4::scale(crate::math::Vec3::new(scale, scale, 1.0)))
     }
 }
 
