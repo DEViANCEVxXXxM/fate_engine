@@ -7,23 +7,22 @@
 
 This is the practical guide for someone building a project on the current
 engine. It aims to be complete about what is available and what remains a
-prototype. It does not replace the longer-term [engine design document](engine-design.md),
-the game-specific [game design document](game-design.md), or the engineering
-constraints in [`ENGINE_RULES.md`](../ENGINE_RULES.md).
+prototype. It should be read alongside the engineering constraints in
+[`ENGINE_RULES.md`](../ENGINE_RULES.md).
 For current gaps and prioritized future work, see the
 [engine roadmap](roadmap.md).
 
 ## 1. What the engine currently is
 
 The codebase is a Rust workspace containing a renderer/platform-facing library,
-a deterministic simulation crate, and a separate runnable demo project. The
-3D co-op FPS described by the design documents is the first validation target;
-the engine is not intended to hardcode that genre.
+a deterministic simulation crate, and a separate runnable demo project. The demo
+is the first validation workload; the engine is not intended to hardcode any
+specific application's rules.
 
 | Area | Current state | Important limitation |
 |---|---|---|
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
-| Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a game-rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
+| Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
 | Rendering | `wgpu` renderer with a built-in 2D triangle path and indexed 3D mesh path | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
@@ -276,10 +275,10 @@ use fate_engine::time::Time;
 fn main() {
     let mut time = Time::new(120.0);
     let mut simulation = SimulationState::with_seed(1234);
-    let player = simulation.world.spawn();
-    simulation.world.positions.insert(player, Position(FixedVec2::ZERO));
+    let entity = simulation.world.spawn();
+    simulation.world.positions.insert(entity, Position(FixedVec2::ZERO));
     simulation.world.velocities.insert(
-        player,
+        entity,
         Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)),
     );
 
@@ -308,7 +307,7 @@ mouse motion to avoid stuck controls, skips rendering, and throttles redraws to
 20 Hz. At the demo's 120 Hz simulation rate, that leaves room for the eight
 step-per-frame limit to catch up after a brief stall. The engine does not
 define a local gameplay-pause state; networked pause should be represented in
-the simulation/game state while network ticks continue.
+the simulation state while network ticks continue.
 
 `SimulationState` does not choose a tick rate or invoke systems. The example
 uses 120 Hz and advances its state once for each consumed fixed step; the
@@ -324,7 +323,7 @@ simulation systems.
 
 `fate_sim::simulation::SimulationState` owns a `World`, deterministic tick
 counter, and seeded random stream; it does not select or run gameplay systems,
-define input commands, or create entities on behalf of a game. Construct with
+define input commands, or create entities on behalf of an application. Construct with
 `new()` or `with_seed(seed)`, run the consumer's systems explicitly, then call
 `advance_tick()`. Snapshots include the world, tick, and RNG state.
 
@@ -374,7 +373,10 @@ query composition, archetype storage, and parallel scheduling are deferred to
 later milestones.
 
 `fate_sim::math::Fixed` is signed Q32.32. Arithmetic saturates on overflow;
-division truncates. `FixedVec2` provides the current 2D vector operations.
+division truncates. `FixedVec2` and `FixedVec3` provide the current 2D and 3D
+vector operations: addition, scaling, dot product, 3D cross product, length,
+and normalization. `FixedVec3::to_f32x3()` converts a vector to a
+renderer-facing float triple.
 Convert to `f32` only when preparing renderer-facing values; converting back
 does not preserve deterministic precision. The engine's renderer-facing
 `fate_engine::math::{Vec2, Vec3, Mat4}` uses `f32`.
@@ -420,7 +422,7 @@ currently prescribe a command format or rollback policy.
 
 This is a deterministic state/input primitive, not a networking solution.
 Transport, packet ordering, authentication, server policy, interpolation,
-ownership, and production threat handling remain the consuming game's
+ownership, and production threat handling remain the consuming application's
 responsibility.
 
 ## 8. Rendering
@@ -457,9 +459,13 @@ should treat this as a skipped render, not as successful presentation.
 
 The renderer caps work at `MAX_DRAWN_INSTANCES` (currently 256) and warns when
 draw pressure reaches the warning threshold. This is a hard draw count limit,
-not automatic frustum culling: the consumer must filter invisible entities
-before constructing the submitted list. The demo's 2D culling and its
-performance HUD are project code, not renderer features.
+not automatic culling: the consumer must filter invisible entities before
+constructing the submitted list. For 2D, `Camera2d::visible_bounds(aspect)`
+returns a `renderer::Bounds2d` matching the camera projection; `Bounds2d` also
+provides `contains_point`, `intersects`, `expanded`, `min`, and `max`. The demo
+uses this helper for its draw list but still owns scene traversal and object
+selection. There is no 3D frustum helper yet, and the demo's performance HUD
+remains project code.
 
 ### Backend coupling
 

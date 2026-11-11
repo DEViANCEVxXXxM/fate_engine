@@ -34,7 +34,7 @@ this page updated as tasks are completed or reprioritized.
 
 ## Important gaps
 
-- `fate_sim::simulation::EngineCore` still embeds one concrete 2D player
+- `fate_sim::simulation::EngineCore` still embeds one concrete 2D prototype
   movement model, its input shape, constants, and playfield. It is not yet a
   general-purpose simulation host.
 - `fate_sim::ecs::World` has fixed component columns and no arbitrary
@@ -74,8 +74,8 @@ deterministic primitives.
 
 - First describe the smallest consumer-driven API needed to own a simulation
   tick, command data, and system selection.
-- Move the current player movement, boost, spin/bounds policy, and their
-  constants behind the demo/game layer or a clearly named example workload.
+- Move the current prototype movement, boost, spin/bounds policy, and their
+  constants behind the demo/application layer or a clearly named example workload.
 - Preserve `fate_sim` fixed-point, world-state, RNG, snapshot, replay, and
   rollback capabilities where they remain reusable.
 - Define snapshot compatibility/versioning consequences before changing its
@@ -179,7 +179,7 @@ public API friction before larger simulation or ECS redesigns begin.
 ## Review checklist for future updates
 
 - Does the proposed engine change solve a demonstrated consumer need?
-- Is game-specific policy still outside reusable crates?
+- Is application-specific policy still outside reusable crates?
 - Does the usage guide describe the actual behavior and failure modes?
 - Are deterministic serialization/versioning effects covered by tests?
 - Did the relevant workspace checks pass?

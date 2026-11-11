@@ -112,14 +112,14 @@
 - Description:
   - Move from “prototype app logic” toward engine loop pattern.
 - Tasks:
-  - Separate app shell from game setup
+  - Separate app shell from application setup
   - Keep fixed-update call site explicit
   - Keep renderer call site explicit
   - Keep title/logging updates independent
   - Guard against missing renderer/window state
 - Acceptance criteria:
   - App loop is readable as engine lifecycle
-  - game setup is not conflated with core engine behavior
+  - application setup is not conflated with core engine behavior
   - no crash on resize/redraw without active renderer
 
 10. [App lifecycle] Add basic loop safety tests or checks

@@ -12,5 +12,5 @@ cargo check -p fate_consumer_smoke
 ```
 
 Its dependencies are local path dependencies declared in this project's
-`Cargo.toml`, just as an in-repository game project would use them. For an
+`Cargo.toml`, just as an in-repository application project would use them. For an
 external project, adjust those paths relative to its own manifest.

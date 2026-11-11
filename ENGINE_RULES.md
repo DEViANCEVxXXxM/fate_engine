@@ -4,11 +4,11 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 
 ## 0. Engine scope and reuse
 
-- The 3D cooperative FPS is the first validation workload, not a hardcoded engine genre.
-- Keep game-specific rules, content, and progression outside reusable engine mechanisms.
+- The runnable demo is the first validation workload, not a hardcoded engine genre.
+- Keep application-specific rules, content, and progression outside reusable engine mechanisms.
 - Treat backend, transport, tick-rate, and data-layout choices as replaceable or configurable when a real consumer needs it; do not generalize without evidence.
 - The current 120 Hz simulation rate and fixed-point implementation are Phase 1 defaults, not universal requirements for every game built on the engine.
-- Keep the runnable demo/game, its scene setup, and its configuration under `projects/demo`; it should consume engine crates through path dependencies rather than live in the engine library.
+- Keep the runnable demo, its scene setup, and its configuration under `projects/demo`; it should consume engine crates through path dependencies rather than live in the engine library.
 - Reusable crates must not own demo-specific entities, stress-scene setup, or presentation behavior.
 
 ## 1. Deterministic fixed-step simulation
