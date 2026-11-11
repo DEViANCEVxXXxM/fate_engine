@@ -279,11 +279,12 @@ fn main() {
     let mut time = Time::new(120.0);
     let mut simulation = SimulationState::with_seed(1234);
     let entity = simulation.world.spawn();
-    simulation.world.positions.insert(entity, Position(FixedVec2::ZERO));
-    simulation.world.velocities.insert(
+    simulation.world.set_position(entity, Position(FixedVec2::ZERO))
+        .expect("fresh entity must be alive");
+    simulation.world.set_velocity(
         entity,
         Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)),
-    );
+    ).expect("fresh entity must be alive");
 
     let frame_delta_seconds = time.tick();
     while time.next_fixed_step().is_some() {
@@ -304,6 +305,11 @@ Use `is_catching_up()` or `pending_fixed_steps()` to observe that backlog.
 `alpha()` remains the fractional remainder for interpolation and excludes
 queued whole ticks, so the rendered state can temporarily lag wall time while
 the simulation catches up.
+
+The exact period at 120 Hz is approximately 8.333 ms. The current
+`Time::frame_budget_ms()` helper returns a conservative integer 8 ms value for
+scheduling and budget checks; it is not the exact tick period or a guarantee of
+120 presented frames per second.
 
 The demo keeps its simulation active after focus loss, clears held input and
 mouse motion to avoid stuck controls, skips rendering, and throttles redraws to
@@ -338,11 +344,11 @@ use fate_sim::simulation::SimulationState;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = SimulationState::with_seed(1234);
     let entity = state.world.spawn();
-    state.world.positions.insert(entity, Position(FixedVec2::ZERO));
-    state.world.velocities.insert(
+    state.world.set_position(entity, Position(FixedVec2::ZERO))?;
+    state.world.set_velocity(
         entity,
         Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)),
-    );
+    )?;
     movement_system(&mut state.world, Fixed::from_ratio(1, 120));
     state.advance_tick()?;
     assert_eq!(state.tick(), 1);
@@ -355,6 +361,12 @@ Owned snapshot buffers are produced with `state_bytes()`, while per-tick state h
 via `state_hash()` using the zero-allocation `StateHasher` (a streaming FNV-1a 64-bit diagnostic sink),
 avoiding per-tick heap allocations during recording, playback, or resimulation.
 
+Snapshot validation is not yet a complete invariant check: world restoration
+currently accepts duplicate free-list IDs. The local networking client also does
+not cross-check the packet's `server_tick` against the tick in its restored state.
+Do not treat successful decoding or a matching checksum as proof that arbitrary
+external state is safe or authentic. These gaps are tracked in roadmap steps 1–2.
+
 The fixed ECS component set and 2D systems are still small prototypes; projects
 choose which systems to call and how to interpret commands. The demo's
 `EngineCore`, movement/boost rules, playfield, and swarm/stress-scene
@@ -366,11 +378,14 @@ The `fate_sim::ecs::World` uses generational `Entity` handles (32-bit ID + 32-bi
 generation) and fixed columns for `Position`, `Velocity`, `Rotation`, and `Spin`.
 `spawn()` allocates a fresh handle or recycles a despawned slot from an internal
 free list with an incremented generation, preventing the ABA problem and unbounded
-vector growth. Despawning is safe and idempotent. Lifecycle invariants prevent
-dead entities from acquiring components: checked setters (`World::set_position`,
-`set_velocity`, etc.) return `Err(EcsError::EntityNotAlive)` when given a dead or
-invalid entity handle. Columns also validate generation on `get`, `get_mut`, and
-`remove`, ensuring stale handles cannot observe or modify newly spawned entities.
+vector growth during normal slot reuse. Despawning is safe and idempotent.
+Checked setters (`World::set_position`, `set_velocity`, etc.) return
+`Err(EcsError::EntityNotAlive)` when given a dead or invalid entity handle.
+Columns validate the stored generation on `get`, `get_mut`, and `remove`.
+However, world columns and `Column::insert` are public: direct insertion bypasses
+world lifecycle checks and can overwrite a slot using a stale handle. Prefer
+checked world setters when attaching components; full mutation encapsulation is
+planned in [roadmap step 1](roadmap.md#step-1--harden-ecs-lifecycle-and-snapshot-restoration).
 This remains a lightweight indexed-column foundation; arbitrary component registration,
 query composition, archetype storage, and parallel scheduling are deferred to
 later milestones.

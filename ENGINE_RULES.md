@@ -1,6 +1,6 @@
 # Engine Rules
 
-This document defines the core rules for the Phase 1 engine milestone. These are engineering constraints, not gameplay design goals.
+This document defines the engineering constraints for the Phase 1 engine milestone, not gameplay design goals. These are required contracts, not a claim that every public API already enforces them. The current implementation scope is described in `docs/engine-guide.md`; known gaps and follow-up work are tracked in `docs/roadmap.md`.
 
 ## 0. Engine scope and reuse
 
@@ -22,9 +22,9 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - Replay tapes validate command ranges and compare a state checksum after every tick, reporting the first divergence.
 - Rollback input history has an explicit non-zero capacity; reconciliation and predicted-input corrections are transactional and fail if required commands are no longer retained.
 - The fixed-step loop must remain stable when the frame delta is large or when the app is briefly paused.
-- The simulation core advances only through fixed ticks and explicit `SimulationInput` snapshots; it must not read platform input or wall-clock time.
+- The simulation core advances only through fixed ticks and explicit project-defined command snapshots; it must not read platform input or wall-clock time. The demo's `SimulationInput` is one concrete command type, not a reusable engine contract.
 - Wall-clock accumulation and conversion of platform key state into simulation commands belong to the app/platform boundary.
-- Deterministic simulation, ECS, fixed-point math, replay, and rollback live in the dependency-free `fate_sim` crate; windowing and rendering remain in the app project. Demo-specific scene population stays in `projects/demo`.
+- Deterministic state/snapshot primitives, ECS, fixed-point math, and seeded RNG live in the dependency-free `fate_sim` crate. Consumers currently own command types, tick policy, replay, and rollback; the existing replay/rollback implementation lives in `projects/demo`. Window/event-loop integration and demo-specific scene population also stay in the app project.
 - CPU simulation benchmarks run in a separate headless tool and must not be presented as full-frame or GPU measurements.
 
 ## 2. Frame and time rules
@@ -32,7 +32,7 @@ This document defines the core rules for the Phase 1 engine milestone. These are
 - `Time::tick()` must only advance wall-clock time.
 - `next_fixed_step()` must consume fixed-step ticks from the accumulator.
 - `alpha()` must stay in a valid range and must handle zero or invalid fixed-time values safely.
-- A giant frame delta must be clamped instead of causing a large simulation jump.
+- A giant frame delta must be clamped for presentation. The fixed-step accumulator retains the full wall-clock delta; process at most eight fixed steps per frame and keep excess backlog observable instead of dropping simulation time.
 
 ## 3. ECS lifecycle
 
