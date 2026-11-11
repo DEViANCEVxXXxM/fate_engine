@@ -24,7 +24,7 @@ the engine is not intended to hardcode that genre.
 |---|---|---|
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a game-rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
-| Input | Generic button/action state with press/release edges | Projects must translate their platform events and define their own actions and mappings |
+| Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
 | Rendering | `wgpu` renderer with a built-in 2D triangle path and indexed 3D mesh path | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | The demo has local replay and rollback examples | No reusable network protocol, transport, server authority, or production networking layer |
@@ -169,10 +169,13 @@ shell.
 
 ## 6. Input
 
-The public type is `fate_engine::input::Input<Action, Button>`. Both type
-parameters must be `Copy + Eq + Hash`. `Input` stores held buttons, edge state,
-and a many-to-many action map. It does not know about keys, gamepad APIs,
-`winit`, or game-specific action names.
+The public type is `fate_engine::input::Input<Action, Button, Axis>`. All three
+type parameters must be `Copy + Eq + Hash`. `Axis` defaults to `()` for
+callers that do not need analog axes. `Input` stores held buttons, edge state,
+a many-to-many action map, and accumulated per-frame analog axis deltas. It
+does not know about keys, gamepad APIs, `winit`, or game-specific action names.
+
+### Digital buttons and actions
 
 ```rust
 use fate_engine::input::Input;
@@ -198,16 +201,60 @@ fn main() {
 ```
 
 Call `release(button)` for the corresponding platform release event. Use
-`clear()` when the host loses focus to discard held buttons and pending edge
-transitions so controls cannot remain stuck. Repeated
+`clear()` when the host loses focus to discard held buttons, pending edge
+transitions, and axis deltas so controls cannot remain stuck. Repeated
 presses while held do not create additional press edges. If several buttons
 are bound to one action, the action is pressed when its first button becomes
 held and released when its last held button is released. Adding/removing a
 binding while a button is held does not synthesize a transition; establish
 bindings before normal event processing.
 
+### Analog axes
+
+`update_axis(axis, delta)` accumulates a floating-point delta onto a named
+axis for the current frame. Multiple calls per frame are summed so raw device
+events (e.g. `winit::DeviceEvent::MouseMotion`) can be fed directly without
+pre-aggregation. `axis_delta(axis)` returns the total accumulated value and is
+`0.0` if the axis was not updated this frame.
+
+Both `end_frame()` and `clear()` reset all axis deltas alongside button edge
+state, so callers must read axes **before** calling `end_frame()`.
+
+```rust
+use fate_engine::input::Input;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum GameAction { Fire }
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum Axis { MouseX, MouseY }
+
+fn main() {
+    let mut input: Input<GameAction, u8, Axis> = Input::new();
+
+    // feed raw device events (may fire multiple times per frame)
+    input.update_axis(Axis::MouseX, 3.0);
+    input.update_axis(Axis::MouseX, -1.5);
+    input.update_axis(Axis::MouseY, 7.0);
+
+    assert!((input.axis_delta(Axis::MouseX) - 1.5).abs() < f32::EPSILON);
+    assert!((input.axis_delta(Axis::MouseY) - 7.0).abs() < f32::EPSILON);
+
+    input.end_frame(); // resets both button edges and axis deltas
+    assert_eq!(input.axis_delta(Axis::MouseX), 0.0);
+}
+```
+
+The demo's `Axis { MouseX, MouseY }` enum is defined in
+[`demo_input.rs`](../projects/demo/src/demo_input.rs). `DeviceEvent::MouseMotion`
+deltas are fed via `input.update_axis(...)` in `device_event`; the 3D camera
+reads them via `input.axis_delta(...)` in `update_3d_camera` before
+`end_frame()` clears them.
+
+### Translation boundary
+
 Translate physical input at the project boundary. The demo defines its own
-actions and `winit::KeyCode` bindings in
+actions, axes, and `winit::KeyCode` bindings in
 [`demo_input.rs`](../projects/demo/src/demo_input.rs). For deterministic
 simulation, convert those actions to a simple command value; do not pass
 platform input objects into simulation code.
@@ -301,6 +348,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+Simulation state serialization uses the `StateWriter` trait (`write_state(&self, writer: &mut W)`).
+Owned snapshot buffers are produced with `state_bytes()`, while per-tick state hashes are computed
+via `state_hash()` using the zero-allocation `StateHasher` (a streaming FNV-1a 64-bit diagnostic sink),
+avoiding per-tick heap allocations during recording, playback, or resimulation.
+
 The fixed ECS component set and 2D systems are still small prototypes; projects
 choose which systems to call and how to interpret commands. The demo's
 `EngineCore`, movement/boost rules, playfield, and swarm/stress-scene
@@ -308,14 +360,18 @@ population live under `projects/demo/src`.
 
 ### ECS and fixed-point math
 
-The current `fate_sim::ecs::World` uses monotonically allocated `u32` entity
-IDs and fixed columns for `Position`, `Velocity`, `Rotation`, and `Spin`. Each
-column is indexed by entity ID and stores optional values.
-`spawn()` returns an entity ID; component columns support `insert`, `get`,
-`get_mut`, `remove`, `contains`, and iteration. `despawn()` removes all four
-known component types. This is a deliberately small indexed-column prototype,
-not the planned archetype ECS; arbitrary component registration, query
-composition, entity ID reuse, and parallel scheduling are not implemented.
+The `fate_sim::ecs::World` uses generational `Entity` handles (32-bit ID + 32-bit
+generation) and fixed columns for `Position`, `Velocity`, `Rotation`, and `Spin`.
+`spawn()` allocates a fresh handle or recycles a despawned slot from an internal
+free list with an incremented generation, preventing the ABA problem and unbounded
+vector growth. Despawning is safe and idempotent. Lifecycle invariants prevent
+dead entities from acquiring components: checked setters (`World::set_position`,
+`set_velocity`, etc.) return `Err(EcsError::EntityNotAlive)` when given a dead or
+invalid entity handle. Columns also validate generation on `get`, `get_mut`, and
+`remove`, ensuring stale handles cannot observe or modify newly spawned entities.
+This remains a lightweight indexed-column foundation; arbitrary component registration,
+query composition, archetype storage, and parallel scheduling are deferred to
+later milestones.
 
 `fate_sim::math::Fixed` is signed Q32.32. Arithmetic saturates on overflow;
 division truncates. `FixedVec2` provides the current 2D vector operations.

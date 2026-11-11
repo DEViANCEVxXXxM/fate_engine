@@ -21,8 +21,10 @@ this page updated as tasks are completed or reprioritized.
 - The renderer has 2D triangle and indexed 3D mesh paths, cameras, depth
   testing, and per-draw 3D tint. The demo has 2D and 3D scenes and free-camera
   controls.
-- Reusable input state is generic over project-defined action and button
-  types; platform key bindings and demo actions live in the demo project.
+- Reusable input state is generic over project-defined action, button, and axis
+  types; analog axes accumulate per-frame deltas via `update_axis` / `axis_delta`
+  and are reset by `end_frame()` / `clear()`. Platform key bindings, mouse-axis
+  routing, and demo actions live in the demo project.
 - The demo exercises the engine as a separate consumer. A practical user guide
   documents workspace setup, current APIs, examples, limitations, and
   verification commands.
@@ -103,13 +105,14 @@ behavior, observable to the host app, and covered by tests.
 **Goal:** Ensure the current ECS remains correct under project use before
 replacing its storage model.
 
-- Define behavior for invalid IDs, repeated despawn, and entity ID exhaustion.
-- Ensure dead entities cannot silently acquire components that appear valid
-  in snapshots or iteration.
-- Document which operations require a live entity and test those invariants.
-- Use a measured consumer workload to decide whether the next step is
-  arbitrary component columns, query ergonomics, archetype storage, or entity
-  generations; avoid implementing all at once.
+**Status: done.** Generational handles (`Entity` with 32-bit ID and 32-bit generation)
+prevent the ABA problem and stale component accesses. A slot free-list (`free_list`)
+recycles despawned entities with incremented generations, preventing unbounded ID
+growth. Lifecycle invariants strictly prevent dead or dangling entities from acquiring
+components (`World::set_position` etc. return `Err(EcsError::EntityNotAlive)`). Repeated
+`despawn` is idempotent and safe. Canonical snapshot encoding stores all slot generations,
+the recycled free list, and live component records, with strict invariant validation during
+restore (`live_count + free_list.len() == next_id`).
 
 **Done when:** Lifecycle invariants are explicit and regression-tested, and the
 next storage/scheduling change is justified by a measurable need.
@@ -172,8 +175,9 @@ server roles. This item is intentionally downstream of tasks 2 and 3.
 
 ## Suggested immediate next task
 
-Continue with **Task 4: ECS lifecycle invariants**. Harden entity lifecycle
-and snapshot validation before adding more simulation scheduling abstractions.
+Continue with **Step 4 / 3D Deterministic Math**: Add `FixedVec3` (dot, cross,
+normalize, length, `to_f32x3()`) to `crates/fate_sim/src/math/`. Zero third-party
+deps, `#![forbid(unsafe_code)]`, and determinism tests required.
 
 ## Review checklist for future updates
 

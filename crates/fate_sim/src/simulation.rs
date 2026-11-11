@@ -2,7 +2,92 @@ use crate::ecs::World;
 use crate::math::Fixed;
 use crate::rng::DeterministicRng;
 
-const STATE_FORMAT_VERSION: u16 = 1;
+const STATE_FORMAT_VERSION: u16 = 2;
+
+/// Sink trait for writing canonical Little-Endian simulation state bytes.
+pub trait StateWriter {
+    fn write_byte(&mut self, byte: u8);
+    fn write_bytes(&mut self, bytes: &[u8]);
+
+    #[inline]
+    fn write_u8(&mut self, value: u8) {
+        self.write_byte(value);
+    }
+
+    #[inline]
+    fn write_u16(&mut self, value: u16) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u32(&mut self, value: u32) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+
+    #[inline]
+    fn write_i64(&mut self, value: i64) {
+        self.write_bytes(&value.to_le_bytes());
+    }
+}
+
+impl StateWriter for Vec<u8> {
+    #[inline]
+    fn write_byte(&mut self, byte: u8) {
+        self.push(byte);
+    }
+
+    #[inline]
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Zero-allocation FNV-1a 64-bit streaming diagnostic state hasher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StateHasher {
+    hash: u64,
+}
+
+impl StateHasher {
+    pub const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    pub const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    pub const fn new() -> Self {
+        Self {
+            hash: Self::OFFSET_BASIS,
+        }
+    }
+
+    #[inline]
+    pub fn finish(self) -> u64 {
+        self.hash
+    }
+}
+
+impl Default for StateHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StateWriter for StateHasher {
+    #[inline]
+    fn write_byte(&mut self, byte: u8) {
+        self.hash = (self.hash ^ (byte as u64)).wrapping_mul(Self::PRIME);
+    }
+
+    #[inline]
+    fn write_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_byte(byte);
+        }
+    }
+}
 
 /// Reusable deterministic state container without any built-in game rules.
 pub struct SimulationState {
@@ -91,13 +176,19 @@ impl SimulationState {
         self.rng.shuffle(values);
     }
 
+    /// Stream canonical Little-Endian state bytes into any `StateWriter` sink without heap buffering.
+    pub fn write_state<W: StateWriter>(&self, writer: &mut W) {
+        writer.write_bytes(b"FSTS");
+        writer.write_u16(STATE_FORMAT_VERSION);
+        writer.write_u64(self.tick);
+        writer.write_u64(self.rng.state());
+        self.world.write_state(writer);
+    }
+
+    /// Serialize state into an owned vector.
     pub fn state_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"FSTS");
-        bytes.extend_from_slice(&STATE_FORMAT_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&self.tick.to_le_bytes());
-        bytes.extend_from_slice(&self.rng.state().to_le_bytes());
-        self.world.encode_state(&mut bytes);
+        self.write_state(&mut bytes);
         bytes
     }
 
@@ -121,12 +212,11 @@ impl SimulationState {
         Ok(Self { world, tick, rng })
     }
 
+    /// Calculate FNV-1a 64-bit diagnostic hash via zero-allocation streaming.
     pub fn state_hash(&self) -> u64 {
-        self.state_bytes()
-            .into_iter()
-            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3)
-            })
+        let mut hasher = StateHasher::new();
+        self.write_state(&mut hasher);
+        hasher.finish()
     }
 
     fn read_bytes<const N: usize>(
@@ -153,6 +243,28 @@ mod tests {
     use crate::math::FixedVec2;
 
     #[test]
+    fn streaming_hash_matches_byte_buffer_fold() {
+        let mut state = SimulationState::with_seed(42);
+        let e = state.world.spawn();
+        state
+            .world
+            .set_position(
+                e,
+                Position(FixedVec2::new(Fixed::from_int(7), Fixed::from_int(-9))),
+            )
+            .unwrap();
+        state.advance_tick().unwrap();
+
+        let streamed_hash = state.state_hash();
+        let bytes = state.state_bytes();
+        let manual_hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |h, &b| {
+            (h ^ (b as u64)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+
+        assert_eq!(streamed_hash, manual_hash);
+    }
+
+    #[test]
     fn state_round_trip_preserves_world_tick_and_future_random_stream() {
         let mut state = SimulationState::with_seed(1234);
         let entity = state.world.spawn();
@@ -167,6 +279,7 @@ mod tests {
         assert_eq!(restored.state_bytes(), snapshot);
         assert_eq!(restored.tick(), 1);
         assert_eq!(state.random_u64(), restored.random_u64());
+        assert_eq!(state.state_hash(), restored.state_hash());
     }
 
     #[test]

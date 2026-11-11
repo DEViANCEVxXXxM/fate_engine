@@ -10,7 +10,16 @@ pub enum Action {
     Boost,
 }
 
-pub type DemoInput = Input<Action, KeyCode>;
+/// Analog axes used by the demo (mouse look).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Axis {
+    /// Horizontal mouse movement (positive = right).
+    MouseX,
+    /// Vertical mouse movement (positive = down in screen space).
+    MouseY,
+}
+
+pub type DemoInput = Input<Action, KeyCode, Axis>;
 
 pub fn new() -> DemoInput {
     let mut input = DemoInput::new();

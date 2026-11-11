@@ -8,7 +8,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::demo_input::{self, Action, DemoInput};
+use crate::demo_input::{self, Action, Axis, DemoInput};
 use crate::demo_simulation::DemoSimulation;
 use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
 use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
@@ -73,7 +73,6 @@ struct App {
     three_d_mode: bool,
     cursor_captured: bool,
     focused: bool,
-    mouse_delta: (f64, f64),
     core: DemoSimulation,
     input: DemoInput,
     time: Time,
@@ -91,7 +90,6 @@ impl App {
             three_d_mode: false,
             cursor_captured: false,
             focused: true,
-            mouse_delta: (0.0, 0.0),
             core: DemoSimulation::new(),
             input: demo_input::new(),
             time: Time::new(SIMULATION_HZ as f32),
@@ -109,9 +107,9 @@ impl App {
             self.core.fixed_update(input);
         }
         let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
+        self.update_3d_camera(frame_dt);
         self.input.end_frame();
         self.update_camera();
-        self.update_3d_camera(frame_dt);
 
         if !self.focused {
             self.update_title(frame_dt);
@@ -278,7 +276,8 @@ impl App {
     }
 
     fn update_3d_camera(&mut self, dt: f32) {
-        let mouse_delta = std::mem::take(&mut self.mouse_delta);
+        let mouse_dx = self.input.axis_delta(Axis::MouseX) as f64;
+        let mouse_dy = self.input.axis_delta(Axis::MouseY) as f64;
         let Some(renderer) = &mut self.renderer else {
             return;
         };
@@ -298,7 +297,7 @@ impl App {
                 right: self.input.button_down(KeyCode::KeyD)
                     || self.input.button_down(KeyCode::ArrowRight),
                 boost: self.input.action_down(Action::Boost),
-                mouse_delta,
+                mouse_delta: (mouse_dx, mouse_dy),
                 dt,
             },
         );
@@ -333,7 +332,6 @@ impl App {
             }
         }
         self.cursor_captured = false;
-        self.mouse_delta = (0.0, 0.0);
     }
 
     fn set_3d_mode(&mut self, enabled: bool) {
@@ -350,7 +348,6 @@ impl App {
             self.three_d_mode = false;
             self.release_cursor();
         }
-        self.mouse_delta = (0.0, 0.0);
     }
 
     fn handle_key(
@@ -504,7 +501,6 @@ impl ApplicationHandler for App {
                 } else if !focused {
                     self.release_cursor();
                     self.input.clear();
-                    self.mouse_delta = (0.0, 0.0);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -532,8 +528,8 @@ impl ApplicationHandler for App {
             && self.cursor_captured
             && let DeviceEvent::MouseMotion { delta } = event
         {
-            self.mouse_delta.0 += delta.0;
-            self.mouse_delta.1 += delta.1;
+            self.input.update_axis(Axis::MouseX, delta.0 as f32);
+            self.input.update_axis(Axis::MouseY, delta.1 as f32);
         }
     }
 

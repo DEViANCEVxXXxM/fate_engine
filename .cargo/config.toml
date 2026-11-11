@@ -1,0 +1,5 @@
+# Redirect the build output directory to a drive that supports hard links,
+# which avoids the "hard linking files in the incremental compilation cache
+# failed" warning that appears when building from X:\ (which denies hard links).
+[build]
+target-dir = "C:\\cargo-targets\\fate_engine"

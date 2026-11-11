@@ -1,12 +1,13 @@
 //! Fixed-tick gameplay simulation with no platform, wall-clock, or renderer dependency.
 
-use fate_sim::ecs::{self, Position, Rotation, Spin, Velocity, World};
+use fate_sim::ecs::{self, Entity, Position, Rotation, Spin, Velocity, World};
 use fate_sim::math::{Fixed, FixedVec2};
 use fate_sim::rng::DeterministicRng;
+use fate_sim::{StateHasher, StateWriter};
 use std::fmt;
 
 pub const SIMULATION_HZ: u32 = 120;
-const STATE_FORMAT_VERSION: u16 = 4;
+const STATE_FORMAT_VERSION: u16 = 5;
 const FIXED_DELTA: Fixed = Fixed::from_ratio(1, SIMULATION_HZ as i64);
 const PLAYFIELD_HALF: FixedVec2 = FixedVec2::new(Fixed::from_int(9), Fixed::from_ratio(17, 2));
 
@@ -114,15 +115,20 @@ impl EngineCore {
         self.rng.shuffle(values);
     }
 
+    /// Stream canonical Little-Endian state bytes into any `StateWriter` sink without heap buffering.
+    pub fn write_state<W: StateWriter>(&self, writer: &mut W) {
+        writer.write_bytes(b"FATE");
+        writer.write_u16(STATE_FORMAT_VERSION);
+        writer.write_u64(self.tick);
+        writer.write_u64(self.player.to_bits());
+        writer.write_u64(self.rng.state());
+        self.world.write_state(writer);
+    }
+
     /// Versioned canonical snapshot; all integers use little-endian encoding.
     pub fn state_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"FATE");
-        bytes.extend_from_slice(&STATE_FORMAT_VERSION.to_le_bytes());
-        bytes.extend_from_slice(&self.tick.to_le_bytes());
-        bytes.extend_from_slice(&self.player.to_le_bytes());
-        bytes.extend_from_slice(&self.rng.state().to_le_bytes());
-        self.world.encode_state(&mut bytes);
+        self.write_state(&mut bytes);
         bytes
     }
 
@@ -137,7 +143,7 @@ impl EngineCore {
         }
 
         let tick = Self::read_u64(bytes, &mut offset)?;
-        let player = Self::read_u32(bytes, &mut offset)?;
+        let player = Entity::from_bits(Self::read_u64(bytes, &mut offset)?);
         let rng = DeterministicRng::from_state(Self::read_u64(bytes, &mut offset)?);
 
         let world =
@@ -157,13 +163,11 @@ impl EngineCore {
         })
     }
 
-    /// FNV-1a 64-bit diagnostic hash over `state_bytes`; not a security primitive.
+    /// FNV-1a 64-bit diagnostic hash via zero-allocation streaming.
     pub fn state_hash(&self) -> u64 {
-        self.state_bytes()
-            .into_iter()
-            .fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-                (hash ^ byte as u64).wrapping_mul(0x0000_0100_0000_01b3)
-            })
+        let mut hasher = StateHasher::new();
+        self.write_state(&mut hasher);
+        hasher.finish()
     }
 
     fn read_bytes<const N: usize>(
@@ -313,7 +317,7 @@ mod tests {
                 19_327_352_400,
             )
         );
-        assert_eq!(sim.state_hash(), 0xf750_481d_a8cf_6f5c);
+        assert_eq!(sim.state_hash(), 0x4de0_f2f5_b340_fc18);
     }
 
     #[test]
@@ -322,7 +326,7 @@ mod tests {
         let second = EngineCore::new();
 
         assert_eq!(first.tick(), 0);
-        assert_eq!(&first.state_bytes()[..6], b"FATE\x04\x00");
+        assert_eq!(&first.state_bytes()[..6], b"FATE\x05\x00");
         assert_eq!(first.state_hash(), second.state_hash());
 
         first.fixed_update(SimulationInput::default());
