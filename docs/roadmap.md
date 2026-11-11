@@ -76,7 +76,7 @@ tick, deterministic RNG, and generic snapshot/hash behavior. The concrete
 replay/rollback implementation are under `projects/demo`. The CPU benchmark
 uses its own workload, and the headless consumer smoke test defines its own
 movement behavior using reusable primitives. Snapshot compatibility is
-explicitly versioned: generic state starts at version 1 and is not compatible
+explicitly versioned: generic state uses format version 2 and is not compatible
 with the removed prototype-core snapshot schema.
 
 **Done when:** A second minimal simulation consumer can choose different

@@ -7,8 +7,8 @@
 
 This is the practical guide for someone building a project on the current
 engine. It aims to be complete about what is available and what remains a
-prototype. It does not replace the longer-term [engine design document](../../engine-doc.md) (private),
-the game-specific [game design document](../../game-doc.md) (private), or the engineering
+prototype. It does not replace the longer-term [engine design document](engine-design.md),
+the game-specific [game design document](game-design.md), or the engineering
 constraints in [`ENGINE_RULES.md`](../ENGINE_RULES.md).
 For current gaps and prioritized future work, see the
 [engine roadmap](roadmap.md).
@@ -401,8 +401,9 @@ trustworthy. Snapshot format changes require a version bump and may make older
 snapshots unreadable; persist an application-level version/metadata alongside
 saved data if your project needs migration.
 
-`SimulationState` snapshot version 1 stores only generic simulation state; it
-is not compatible with the earlier prototype `EngineCore` snapshot schema.
+`SimulationState` snapshot format version 2 stores only generic simulation
+state; it is not compatible with the earlier prototype `EngineCore` snapshot
+schema.
 The demo-specific [`ReplayTape`](../projects/demo/src/demo_replay.rs) records
 the demo command schema and bounded input history. Its replay serialization is
 versioned but has no authentication or encryption; treat replay files as

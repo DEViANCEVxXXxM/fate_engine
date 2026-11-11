@@ -17,10 +17,11 @@ Current architectural hypotheses include:
 - **Fixed deterministic FixedUpdate** on fixed-point math.
 - **Server-authoritative networking** with prediction and rollback.
 
-The design document evaluates `ash` for Vulkan and `quinn` for transport, but
-neither is a locked-in dependency: the current renderer uses `wgpu`, and both
-choices should be made from prototype evidence. Consumers should depend on
-engine-facing interfaces rather than backend-specific types.
+The [engine design document](docs/engine-design.md) evaluates `ash` for Vulkan
+and `quinn` for transport, but neither is a locked-in dependency: the current
+renderer uses `wgpu`, and both choices should be made from prototype evidence.
+Consumers should depend on engine-facing interfaces rather than
+backend-specific types.
 
 Game requirements — responsiveness, procedural generation, and co-op — guide
 budgets and subsystem boundaries. They must not become hardcoded game rules in
@@ -45,7 +46,7 @@ The project is in early development.
 - [x] Deterministic fixed-point `FixedUpdate`
 - [ ] Server-authoritative network model
 - [ ] Client prediction
-- [ ] Rollback and replay
+- [x] Rollback and replay (demo-local deterministic primitives; not a network protocol)
 - [ ] Rendering on `ash` / Vulkan
 - [ ] Transport on `quinn`
 - [ ] Vertical slice: scene, input, simulation, rendering, networking
@@ -100,12 +101,17 @@ For less noisy results, use `cargo run --release -p fate_sim_bench -- --ticks
 10000`. This is simulation-only timing, not a full-frame or GPU performance
 guarantee.
 
-## Working with the engine
+## Documentation
 
-See the [engine guide](docs/engine-guide.md) for workspace setup, consuming the
-library, and using the current input, time, simulation, and rendering APIs.
-For a review of current capabilities and a prioritized backlog, see the
-[engine roadmap](docs/roadmap.md).
+All project documentation lives under [`docs/`](docs/):
+
+- [Engine guide](docs/engine-guide.md) — workspace setup, consuming the
+  library, and the current input, time, simulation, and rendering APIs.
+- [Roadmap](docs/roadmap.md) — current capabilities and prioritized backlog.
+- [Engine design](docs/engine-design.md) — technical design draft and
+  architectural hypotheses.
+- [Game design](docs/game-design.md) — game-design draft for the target FPS.
+- [Archive](docs/archive/) — superseded drafts kept for history.
 
 ## Architectural principles
 
@@ -149,7 +155,7 @@ Planned model:
 
 ## Rendering
 
-`ash` was chosen as a thin wrapper over Vulkan: it provides direct access to the Vulkan API while retaining control over resources, synchronization, pipelines, and memory. [3][11]
+`ash` is being evaluated as a thin wrapper over Vulkan: it would provide direct access to the Vulkan API while retaining control over resources, synchronization, pipelines, and memory. The current renderer uses `wgpu`; no backend has been locked in. See [the engine design](docs/engine-design.md).
 
 Rendering approach:
 
