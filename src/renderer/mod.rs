@@ -14,7 +14,7 @@ use winit::window::Window;
 pub use camera::{Camera2d, Camera3d};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex};
-pub use visibility::Bounds2d;
+pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
 use crate::math::{Mat4, Vec2};
 use mesh::MeshPipeline;

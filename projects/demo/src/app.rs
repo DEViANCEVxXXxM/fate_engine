@@ -119,7 +119,8 @@ impl App {
         let render_start = Instant::now();
         let (rendered, draw_budget) = if self.three_d_mode {
             if let (Some(renderer), Some(mesh)) = (&mut self.renderer, &self.demo_mesh) {
-                let draws = Self::three_d_demo_draws(mesh);
+                let draws =
+                    Self::three_d_demo_draws(mesh, &renderer.camera_3d, renderer.gpu.aspect());
                 let count = renderer.budgeted_instance_count(draws.len());
                 (renderer.render_meshes(&draws), count)
             } else {
@@ -202,10 +203,18 @@ impl App {
         }
     }
 
-    fn three_d_demo_draws(mesh: &Mesh3d) -> Vec<Draw3d<'_>> {
+    fn three_d_demo_draws<'a>(mesh: &'a Mesh3d, camera: &Camera3d, aspect: f32) -> Vec<Draw3d<'a>> {
+        let frustum = camera.frustum(aspect);
         let mut draws = Vec::with_capacity(19);
 
         let mut add_box = |position: Vec3, scale: Vec3, rotation: f32, tint: [f32; 3]| {
+            // The demo mesh is a unit cube, so this sphere encloses the box
+            // regardless of rotation.
+            let radius = scale.length() * 0.5;
+            if !frustum.intersects_sphere(position, radius) {
+                return;
+            }
+
             let model = Mat4::translation(position)
                 .mul(Mat4::rotation_y(rotation))
                 .mul(Mat4::rotation_x(rotation * 0.5))

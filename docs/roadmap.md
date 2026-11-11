@@ -19,8 +19,8 @@ this page updated as tasks are completed or reprioritized.
   replay, and rollback live under `projects/demo`.
 - A standalone CPU-only simulation benchmark lives in `crates/fate_sim_bench`.
 - The renderer has 2D triangle and indexed 3D mesh paths, cameras, depth
-  testing, a 2D visibility-bounds helper, and per-draw 3D tint. The demo has 2D
-  and 3D scenes and free-camera controls.
+  testing, 2D/3D visibility helpers, and per-draw 3D tint. The demo has 2D and
+  3D scenes and free-camera controls.
 - Reusable input state is generic over project-defined action, button, and axis
   types; analog axes accumulate per-frame deltas via `update_axis` / `axis_delta`
   and are reset by `end_frame()` / `clear()`. Platform key bindings, mouse-axis
@@ -42,10 +42,10 @@ this page updated as tasks are completed or reprioritized.
 - `fate_engine::renderer::Renderer` currently depends directly on `winit` and
   exposes `wgpu` types. 3D mesh drawing is a foundation, not a general scene,
   material, asset, or lighting system.
-- The renderer enforces a draw-count cap and provides `Bounds2d` plus
-  `Camera2d::visible_bounds` for 2D visibility checks, but there is no automatic
-  culling or 3D frustum helper. Consumers still traverse their scenes and choose
-  draw candidates.
+- The renderer enforces a draw-count cap and provides `Bounds2d`/`Bounds3d`
+  with camera bounds/frustum helpers for visibility checks, but there is no
+  automatic culling. Consumers still traverse their scenes and choose draw
+  candidates.
 - Consumers must coordinate their chosen `Time` rate, per-tick delta, and
   calls to `SimulationState::advance_tick()`.
 - Snapshot/replay/rollback are deterministic local primitives, not a network
@@ -125,10 +125,10 @@ scene workload
 **Goal:** Test renderer capabilities without embedding demo policy in the
 renderer.
 
-**Status: in progress.** `Bounds2d` and `Camera2d::visible_bounds` provide the
-2D visibility primitive, with tests for edges, overlap, degenerate input, and
-projection alignment; the demo builds its draw list with them. Remaining: 3D
-bounds/frustum coverage for the mesh path, resize-specific regressions, and a
+**Status: in progress.** `Bounds2d`, `Bounds3d`, `Camera2d::visible_bounds`, and
+`Camera3d::frustum` provide 2D/3D visibility primitives, with tests for edges,
+overlap, projection alignment, aspect, and degenerate input; the demo builds
+both draw lists with them. Remaining: resize-specific regressions and a
 repeatable indexed-mesh draw-cost baseline.
 
 - Add a small render-facing bounds/frustum visibility helper or another

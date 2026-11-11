@@ -461,10 +461,13 @@ The renderer caps work at `MAX_DRAWN_INSTANCES` (currently 256) and warns when
 draw pressure reaches the warning threshold. This is a hard draw count limit,
 not automatic culling: the consumer must filter invisible entities before
 constructing the submitted list. For 2D, `Camera2d::visible_bounds(aspect)`
-returns a `renderer::Bounds2d` matching the camera projection; `Bounds2d` also
-provides `contains_point`, `intersects`, `expanded`, `min`, and `max`. The demo
-uses this helper for its draw list but still owns scene traversal and object
-selection. There is no 3D frustum helper yet, and the demo's performance HUD
+returns a `renderer::Bounds2d` matching the camera projection. For 3D,
+`Camera3d::frustum(aspect)` returns a `renderer::Frustum3d` extracted from the
+view-projection matrix (wgpu `0..=1` depth); test candidates with
+`intersects_bounds(Bounds3d)` or `intersects_sphere`. `Bounds2d` and `Bounds3d`
+also provide `contains_point`, `intersects`, `expanded`, `min`, and `max`. The
+demo uses these helpers for both draw lists but still owns scene traversal and
+object selection. Culling is not automatic, and the demo's performance HUD
 remains project code.
 
 ### Backend coupling

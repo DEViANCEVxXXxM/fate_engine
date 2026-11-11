@@ -1,5 +1,5 @@
 use crate::math::{Mat4, Vec2, Vec3};
-use crate::renderer::visibility::Bounds2d;
+use crate::renderer::visibility::{Bounds2d, Frustum3d};
 
 const MIN_VIEW_SIZE: f32 = 1.0;
 const MAX_VIEW_SIZE: f32 = 128.0;
@@ -181,11 +181,20 @@ impl Camera3d {
         let projection = Mat4::perspective(self.safe_fov_y(), Self::safe_aspect(aspect), near, far);
         projection.mul(view)
     }
+
+    /// View frustum matching `view_projection(aspect)`.
+    ///
+    /// Consumers can use this to filter draw candidates; the renderer does not
+    /// cull automatically.
+    pub fn frustum(&self, aspect: f32) -> Frustum3d {
+        Frustum3d::from_view_projection(self.view_projection(aspect))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::renderer::visibility::Bounds3d;
 
     #[test]
     fn center_of_view_maps_to_origin() {
@@ -262,6 +271,46 @@ mod tests {
             assert!(bounds.center.y.is_finite());
             assert!(bounds.half_extent.x.is_finite());
             assert!(bounds.half_extent.y.is_finite());
+        }
+    }
+
+    #[test]
+    fn camera_3d_frustum_culls_behind_side_and_far_boxes() {
+        let camera = Camera3d::default();
+        let frustum = camera.frustum(16.0 / 9.0);
+        let box_at = |x, y, z| Bounds3d::new(Vec3::new(x, y, z), Vec3::ONE);
+
+        assert!(frustum.intersects_bounds(box_at(0.0, 1.6, 0.0)));
+        assert!(!frustum.intersects_bounds(box_at(0.0, 1.6, 10.0)));
+        assert!(!frustum.intersects_bounds(box_at(100.0, 1.6, 0.0)));
+        assert!(!frustum.intersects_bounds(box_at(0.0, 1.6, -2000.0)));
+    }
+
+    #[test]
+    fn camera_3d_frustum_follows_aspect_ratio() {
+        let camera = Camera3d::default();
+        let bounds = Bounds3d::new(Vec3::new(20.0, 1.6, -10.0), Vec3::ONE);
+
+        assert!(camera.frustum(4.0).intersects_bounds(bounds));
+        assert!(!camera.frustum(0.25).intersects_bounds(bounds));
+    }
+
+    #[test]
+    fn camera_3d_frustum_handles_degenerate_inputs() {
+        let camera = Camera3d {
+            position: Vec3::new(f32::NAN, f32::INFINITY, f32::NEG_INFINITY),
+            yaw: f32::NAN,
+            pitch: f32::INFINITY,
+            fov_y_radians: 0.0,
+            near: f32::NAN,
+            far: 0.0,
+        };
+
+        for aspect in [0.0, f32::NAN, f32::INFINITY, 100.0] {
+            let frustum = camera.frustum(aspect);
+            let _ = frustum.contains_point(Vec3::ZERO);
+            let _ = frustum.intersects_bounds(Bounds3d::ZERO);
+            let _ = frustum.intersects_sphere(Vec3::ZERO, f32::NAN);
         }
     }
 
