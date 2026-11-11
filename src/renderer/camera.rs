@@ -315,6 +315,67 @@ mod tests {
     }
 
     #[test]
+    fn camera_bounds_track_window_resizes() {
+        let camera = Camera2d {
+            center: Vec2::new(2.0, -1.0),
+            view_size: Vec2::new(20.0, 20.0),
+            zoom: 1.0,
+        };
+
+        for (width, height) in [(1280, 720), (720, 1280), (3440, 1440), (0, 0), (1, 1)] {
+            let aspect = width as f32 / height.max(1) as f32;
+            let bounds = camera.visible_bounds(aspect);
+            let view_projection = camera.view_projection(aspect);
+            let min = bounds.min();
+            let max = bounds.max();
+
+            assert!(bounds.center.x.is_finite(), "{width}x{height}");
+            assert!(bounds.center.y.is_finite(), "{width}x{height}");
+            assert!(bounds.half_extent.x.is_finite(), "{width}x{height}");
+            assert!(bounds.half_extent.y.is_finite(), "{width}x{height}");
+
+            for (x, y) in [
+                (min.x, min.y),
+                (max.x, min.y),
+                (min.x, max.y),
+                (max.x, max.y),
+            ] {
+                let clip_x =
+                    view_projection.m[0] * x + view_projection.m[4] * y + view_projection.m[12];
+                let clip_y =
+                    view_projection.m[1] * x + view_projection.m[5] * y + view_projection.m[13];
+
+                assert!((clip_x.abs() - 1.0).abs() < 1e-4, "{width}x{height}");
+                assert!((clip_y.abs() - 1.0).abs() < 1e-4, "{width}x{height}");
+            }
+        }
+    }
+
+    #[test]
+    fn camera_3d_frustum_tracks_window_resizes() {
+        let camera = Camera3d::default();
+        let centered = Bounds3d::new(Vec3::new(0.0, 1.6, 0.0), Vec3::ONE);
+        let side = Bounds3d::new(Vec3::new(35.0, 1.6, -10.0), Vec3::ONE);
+
+        for (width, height, side_visible) in [
+            (1280, 720, false),
+            (5120, 1440, true),
+            (720, 1280, false),
+            (0, 0, false),
+        ] {
+            let aspect = width as f32 / height.max(1) as f32;
+            let frustum = camera.frustum(aspect);
+
+            assert!(frustum.intersects_bounds(centered), "{width}x{height}");
+            assert_eq!(
+                frustum.intersects_bounds(side),
+                side_visible,
+                "{width}x{height}"
+            );
+        }
+    }
+
+    #[test]
     fn zero_zoom_and_aspect_still_produce_finite_projection() {
         let camera = Camera2d {
             center: Vec2::ZERO,

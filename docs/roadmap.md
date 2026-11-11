@@ -18,9 +18,16 @@ this page updated as tasks are completed or reprioritized.
   indexed-column ECS, deterministic RNG, and versioned snapshots. Demo behavior,
   replay, and rollback live under `projects/demo`.
 - A standalone CPU-only simulation benchmark lives in `crates/fate_sim_bench`.
+- `crates/fate_net` provides a transport-agnostic local protocol prototype:
+  versioned input/snapshot packets, bounded payloads and acknowledgement
+  history, ordered transactional server input application, and client snapshot
+  validation. It does not open sockets or authenticate peers.
 - The renderer has 2D triangle and indexed 3D mesh paths, cameras, depth
-  testing, 2D/3D visibility helpers, and per-draw 3D tint. The demo has 2D and
-  3D scenes and free-camera controls.
+  testing, 2D/3D visibility helpers, per-draw 3D tint, and renderer-owned mesh
+  upload helpers. The demo has 2D and 3D scenes and free-camera controls. A
+  second windowed consumer (`projects/window_smoke`) validates the public
+  renderer seam without a direct `wgpu` dependency. A CPU-only example records
+  draw-list preparation cost; GPU submission is not measured.
 - Reusable input state is generic over project-defined action, button, and axis
   types; analog axes accumulate per-frame deltas via `update_axis` / `axis_delta`
   and are reset by `end_frame()` / `clear()`. Platform key bindings, mouse-axis
@@ -48,8 +55,10 @@ this page updated as tasks are completed or reprioritized.
   candidates.
 - Consumers must coordinate their chosen `Time` rate, per-tick delta, and
   calls to `SimulationState::advance_tick()`.
-- Snapshot/replay/rollback are deterministic local primitives, not a network
-  protocol or secure persistence format; replay/rollback are demo-specific.
+- Snapshot/replay/rollback are deterministic local primitives. `fate_net` adds
+  a local protocol prototype, but there is still no transport, authentication,
+  encryption, clock synchronization, interpolation, ownership model, or
+  production server policy.
 
 ## Prioritized backlog
 
@@ -125,11 +134,16 @@ scene workload
 **Goal:** Test renderer capabilities without embedding demo policy in the
 renderer.
 
-**Status: in progress.** `Bounds2d`, `Bounds3d`, `Camera2d::visible_bounds`, and
-`Camera3d::frustum` provide 2D/3D visibility primitives, with tests for edges,
-overlap, projection alignment, aspect, and degenerate input; the demo builds
-both draw lists with them. Remaining: resize-specific regressions and a
-repeatable indexed-mesh draw-cost baseline.
+**Status: done.** `Bounds2d`, `Bounds3d`, `Camera2d::visible_bounds`, and
+`Camera3d::frustum` provide 2D/3D visibility primitives. Tests cover edges,
+overlap, projection alignment, window resizes (including zero-size), aspect
+ratios, and degenerate input. The demo builds both draw lists with them.
+
+`examples/draw_list_bench.rs` records a CPU-side baseline for 4,096 box
+candidates: 3,296 visible per frame, 11.4 ns per candidate and 14.2 ns per
+visible draw in release mode on an AMD Ryzen 9 3950X. It measures frustum
+culling and draw-list assembly only, not GPU submission. Run it with
+`cargo run --release -p fate_engine --example draw_list_bench`.
 
 - Add a small render-facing bounds/frustum visibility helper or another
   renderer-owned culling primitive; keep scene traversal and object selection
@@ -150,12 +164,33 @@ are backed by repeatable measurements.
 **Goal:** Avoid designing abstractions without evidence while preserving a
 clear future seam.
 
+**Status: done for the current evidence.** The audit found two coupling points:
+
+- Window creation and resize require `winit` types at the app boundary:
+  `Renderer::new(Arc<winit::window::Window>)` and
+  `Renderer::resize(winit::dpi::PhysicalSize<u32>)`.
+- `Renderer::gpu` and the `Gpu` fields expose `wgpu::Instance`, `Surface`,
+  `Adapter`, `Device`, `Queue`, and `SurfaceConfiguration`, and mesh upload
+  originally required a `&wgpu::Device`.
+
+`projects/window_smoke` is a second, independent windowed consumer. It depends
+only on `fate_engine`, `pollster`, and `winit`; it owns its window, initializes
+`Renderer`, uploads a custom mesh, handles resize, and submits 3D draws. A local
+run completed 180 redraws with 180 submitted frames. To keep that consumer off
+`wgpu`, `Renderer::create_mesh`, `Renderer::cube_mesh`, and `Renderer::aspect`
+were added as thin delegates; the demo uses the same methods. No trait or
+backend abstraction was added: `winit` is still required to create a window,
+`wgpu` remains visible for lower-level access, and backend portability is not
+promised until a second backend exists.
+
 - Identify which public APIs force consumers to depend directly on `winit` or
-  `wgpu`.
+  `wgpu`. (Done; see the audit above.)
 - Ask a second consumer to exercise window creation, surface ownership, GPU
-  resources, and render submission before extracting interfaces.
+  resources, and render submission before extracting interfaces. (Done;
+  `projects/window_smoke`.)
 - Keep backend-specific resource ownership explicit; do not promise backend
   portability until a second backend or a meaningful mock/test seam exists.
+  (Kept explicit; no portability claim added.)
 
 **Done when:** A documented consumer need motivates the abstraction and at
 least two implementations or a concrete independent test seam validate it.
@@ -166,16 +201,35 @@ are clear
 **Goal:** Build on stable deterministic inputs and state rather than treating
 rollback as a networking stack.
 
+**Status: done for the local protocol prototype.** `crates/fate_net` provides
+versioned input/snapshot packets with explicit payload and history limits, a
+server session that applies ordered inputs transactionally and keeps a bounded
+acknowledgement history, and a client session that validates snapshots and
+rejects stale or future acknowledgements. `crates/fate_net/tests/loopback.rs`
+runs both roles end to end.
+
+Trust boundaries are explicit: client input is untrusted until the
+application's applier validates it, and server snapshots are untrusted until
+`SimulationState::from_state_bytes` accepts them. State hashes remain
+diagnostic only and are not authentication. The prototype does not include a
+transport, encryption, peer identity, clock drift compensation, interpolation,
+ownership, or production server policy; inputs must arrive in order and the
+transport must retransmit.
+
 - Define the authoritative input/state exchange and threat model separately
-  from serialization and local rollback.
+  from serialization and local rollback. (Local exchange and trust boundaries
+  are defined; production threat modeling remains open.)
 - Use server ticks as the client prediction target and preserve backlog under
   the local per-frame work cap; compensate measured clock drift with small,
   bounded tick-rate adjustments (approximately 1–2%) instead of dropping
   simulation ticks. Implement this only once server-tick observations exist.
+  (Server-tick observations exist; clock compensation is not implemented.)
 - Specify snapshot schema evolution, input acknowledgement/history windows,
-  and behavior when required history expires.
+  and behavior when required history expires. (Protocol versioning, bounded
+  acknowledgement history, and stale/future rejection are implemented.)
 - Prototype transport independently; do not treat diagnostic hashes as
-  authentication or trust arbitrary network snapshots.
+  authentication or trust arbitrary network snapshots. (Packets are
+  transport-agnostic; no transport is included.)
 
 **Done when:** A local protocol prototype has explicit trust boundaries,
 bounded resource use, failure handling, and end-to-end tests across client and
@@ -183,13 +237,22 @@ server roles. This item is intentionally downstream of tasks 2 and 3.
 
 ## Suggested immediate next task
 
-**Step 4 / 3D Deterministic Math — `FixedVec3` is done.** It provides dot,
-cross, length, normalize, and `to_f32x3()` in `crates/fate_sim/src/math/`, with
-determinism tests and no third-party dependencies.
+No concrete engine task is currently unblocked. The prioritized backlog is
+complete for the current evidence; further work should be driven by a real
+consumer:
 
-The next math addition should wait for a consumer that needs deterministic 3D
-rotation. A `FixedQuat` (or a fixed-point transform type) is the likely
-candidate, but it should not be added speculatively.
+- A production transport (for example QUIC) and clock synchronization should be
+  added only when a networked consumer exists.
+- Authentication, encryption, and peer identity need an explicit threat model
+  before implementation.
+- A `FixedQuat` or fixed-point transform type should be added only when a
+  consumer needs deterministic 3D rotation.
+- Further renderer backend work needs a second backend or a meaningful
+  mock/test seam; the current `wgpu`/`winit` boundary is documented and
+  validated by two consumers.
+
+Pick the next task from a demonstrated consumer need rather than adding
+speculative abstractions.
 
 ## Review checklist for future updates
 

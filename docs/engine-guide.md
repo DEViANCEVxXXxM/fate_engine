@@ -26,7 +26,7 @@ specific application's rules.
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
 | Rendering | `wgpu` renderer with a built-in 2D triangle path and indexed 3D mesh path | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
-| Networking | The demo has local replay and rollback examples | No reusable network protocol, transport, server authority, or production networking layer |
+| Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
 
 Use the primitives as an experimental starting point. Do not assume that
 planned features in a design document are already implemented.
@@ -38,6 +38,7 @@ fate_engine/
   Cargo.toml                 # workspace root and fate_engine library package
   src/                       # reusable input, math, renderer, and time APIs
   crates/
+    fate_net/                # versioned local protocol prototype
     fate_sim/                # headless deterministic simulation crate
     fate_sim_bench/          # CPU-only simulation benchmark
   projects/
@@ -53,6 +54,8 @@ Responsibilities are intentionally split:
   window/GPU renderer foundations, and a frame/fixed-step clock.
 - **`fate_sim`** — deterministic simulation primitives. It has no third-party
   dependencies and forbids unsafe code.
+- **`fate_net`** — transport-agnostic packet encoding and client/server session
+  state machines built on `fate_sim` snapshots. It does not open sockets.
 - **`fate_demo`** — window/event loop, platform bindings, demo scene setup,
   demo simulation population, controls, and presentation/telemetry.
 - **`fate_sim_bench`** — headless simulation measurements. Its timings do not
@@ -425,6 +428,32 @@ Transport, packet ordering, authentication, server policy, interpolation,
 ownership, and production threat handling remain the consuming application's
 responsibility.
 
+### Local networking protocol prototype
+
+`fate_net` is a transport-agnostic local protocol prototype built on
+`fate_sim` snapshots. It encodes versioned little-endian packets for client
+inputs and server snapshots; it does not open sockets or authenticate peers.
+
+- `Limits` bounds input payloads, snapshot payloads, and acknowledgement
+  history. Encoding and decoding reject payloads over the configured limits.
+- `ClientSession::make_input` numbers inputs and produces encoded input packets.
+- `ServerSession::accept_input` validates packet structure and ordered ticks,
+  applies the input transactionally, advances one simulation tick, and keeps a
+  bounded acknowledgement history.
+- `ServerSession::snapshot_bytes` produces a snapshot packet with the server
+  tick, highest acknowledged input tick, and a diagnostic state hash.
+- `ClientSession::receive_snapshot` validates the snapshot schema and hash,
+  rejects stale or future acknowledgements and server ticks, and returns the
+  accepted snapshot.
+
+Inputs must arrive in order; the transport is responsible for retransmission.
+Client input is untrusted until the application's applier validates it, and
+server snapshots are untrusted until `SimulationState::from_state_bytes`
+accepts them. State hashes are diagnostic only and must not be treated as
+authentication. The crate does not implement transport, encryption, peer
+identity, clock drift compensation, interpolation, ownership, or production
+server policy. `crates/fate_net/tests/loopback.rs` runs both roles end to end.
+
 ## 8. Rendering
 
 ### Available paths
@@ -438,11 +467,15 @@ responsibility.
   projection and a depth buffer. `MeshVertex` contains position and vertex
   color; each `Draw3d` adds a model matrix and RGB tint.
 
-`Mesh3d::new(device, label, vertices, indices)` returns a `Result` and checks
-for empty data, triangle index count, out-of-range indices, and unsupported
-index count. Meshes are caller-owned and can be reused by multiple draw
-records. The current 3D pipeline is not a full material, lighting, texture,
-asset-loading, or scene-graph system.
+`Renderer::create_mesh(label, vertices, indices)` uploads a mesh through the
+renderer's device and returns a `Result`; `Renderer::cube_mesh()` uploads the
+built-in unit cube. Both avoid naming `wgpu::Device`. The lower-level
+`Mesh3d::new(device, label, vertices, indices)` remains available for headless
+tools that create their own device. Mesh creation checks for empty data,
+triangle index count, out-of-range indices, and unsupported index count. Meshes
+are caller-owned and can be reused by multiple draw records. The current 3D
+pipeline is not a full material, lighting, texture, asset-loading, or
+scene-graph system.
 
 The camera types are `Camera2d` and `Camera3d`. The 2D camera uses a world-space
 center, view size, and zoom. The 3D camera uses +Y as up and faces -Z when yaw
@@ -470,14 +503,32 @@ demo uses these helpers for both draw lists but still owns scene traversal and
 object selection. Culling is not automatic, and the demo's performance HUD
 remains project code.
 
+For a repeatable CPU-side baseline, run
+`cargo run --release -p fate_engine --example draw_list_bench`. It reports the
+candidate count, visible draw count, and per-candidate/per-visible preparation
+time without initializing a GPU; driver-side submission cost is not included.
+
 ### Backend coupling
 
-The renderer currently uses `wgpu` and `winit`; initialization takes an
-`Arc<winit::window::Window>`, mesh creation needs a `wgpu::Device`, and the
-renderer exposes GPU-related fields. This is a known prototype boundary. A
-design goal of backend-facing abstractions does not mean such an abstraction
-already exists. Pin or inspect dependency/API versions as part of your own
-integration; do not assume future backend compatibility.
+The renderer uses `wgpu` and `winit` directly. The current public coupling is:
+
+- `Renderer::new(Arc<winit::window::Window>)` and
+  `Renderer::resize(PhysicalSize<u32>)` require `winit` types at the app
+  boundary, because the consumer owns the event loop and window.
+- `Renderer::gpu` and the `Gpu` fields expose `wgpu::Instance`, `Surface`,
+  `Adapter`, `Device`, `Queue`, and `SurfaceConfiguration` for lower-level
+  work. `GpuInitError` also wraps `wgpu` error types.
+- The common consumer path does not need to name `wgpu`: `Renderer::aspect`,
+  `Renderer::create_mesh`, `Renderer::cube_mesh`, `render`, and `render_meshes`
+  are sufficient for window creation, surface ownership, mesh upload, and draw
+  submission.
+
+`projects/window_smoke` is a second windowed consumer that validates this seam.
+Its manifest depends only on `fate_engine`, `pollster`, and `winit`; it creates
+its own window, uploads a custom mesh through the renderer, handles resize, and
+submits 3D draws. There is no second backend and no backend-portability trait.
+Treat the `wgpu`/`winit` boundary as a prototype seam, pin dependency versions,
+and do not assume future backend compatibility.
 
 ## 9. Errors, diagnostics, and operational notes
 
@@ -495,6 +546,9 @@ integration; do not assume future backend compatibility.
 - Keep snapshot/replay validation errors visible. Their checksums detect
   deterministic divergence, but do not validate the identity or trustworthiness
   of a sender.
+- `fate_net` protocol and session errors are explicit. Treat malformed,
+  out-of-order, or stale packets as rejected input, not as partial success;
+  the server commits an input only when its applier returns `Ok`.
 
 ## 10. Verification and examples
 
@@ -511,6 +565,9 @@ Useful source references:
 - [`src/lib.rs`](../src/lib.rs) — engine library module surface.
 - [`projects/consumer_smoke/`](../projects/consumer_smoke/) — minimal
   independent consumer package and invocation.
+- [`projects/window_smoke/`](../projects/window_smoke/) — minimal independent
+  windowed consumer that exercises the renderer seam without a direct `wgpu`
+  dependency.
 - [`src/input.rs`](../src/input.rs) and
   [`projects/demo/src/demo_input.rs`](../projects/demo/src/demo_input.rs) —
   generic input state and a platform-specific mapping.

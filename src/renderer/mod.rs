@@ -127,6 +127,33 @@ impl Renderer {
         MAX_DRAWN_INSTANCES
     }
 
+    /// Aspect ratio of the current surface configuration.
+    ///
+    /// Consumers that build visibility bounds or frusta need this; it avoids
+    /// reaching into [`Gpu`] for the common case.
+    pub fn aspect(&self) -> f32 {
+        self.gpu.aspect()
+    }
+
+    /// Upload a mesh through the renderer's device.
+    ///
+    /// This is the backend-neutral path for consumers that do not want to name
+    /// `wgpu::Device`. The lower-level [`Mesh3d::new`] remains available for
+    /// headless tools that create their own device.
+    pub fn create_mesh(
+        &self,
+        label: &str,
+        vertices: &[MeshVertex],
+        indices: &[u32],
+    ) -> Result<Mesh3d, MeshCreateError> {
+        Mesh3d::new(&self.gpu.device, label, vertices, indices)
+    }
+
+    /// Upload the built-in unit cube through the renderer's device.
+    pub fn cube_mesh(&self) -> Result<Mesh3d, MeshCreateError> {
+        cube_mesh(&self.gpu.device)
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let previous_size = (self.gpu.config.width, self.gpu.config.height);
         self.gpu.resize(size);

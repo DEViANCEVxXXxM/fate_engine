@@ -507,6 +507,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fate_net"
+version = "0.1.0"
+dependencies = [
+ "fate_sim",
+]
+
+[[package]]
 name = "fate_sim"
 version = "0.1.0"
 
@@ -515,6 +522,15 @@ name = "fate_sim_bench"
 version = "0.1.0"
 dependencies = [
  "fate_sim",
+]
+
+[[package]]
+name = "fate_window_smoke"
+version = "0.1.0"
+dependencies = [
+ "fate_engine",
+ "pollster",
+ "winit",
 ]
 
 [[package]]

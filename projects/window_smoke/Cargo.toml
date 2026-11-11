@@ -1,0 +1,9 @@
+[package]
+name = "fate_window_smoke"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fate_engine = { path = "../.." }
+pollster = "1.0.1"
+winit = "0.30.13"

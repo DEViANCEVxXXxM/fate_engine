@@ -5,10 +5,12 @@ edition = "2024"
 
 [workspace]
 members = [
+    "crates/fate_net",
     "crates/fate_sim",
     "crates/fate_sim_bench",
     "projects/consumer_smoke",
     "projects/demo",
+    "projects/window_smoke",
 ]
 default-members = ["projects/demo"]
 resolver = "3"

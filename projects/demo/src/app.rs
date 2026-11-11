@@ -13,7 +13,7 @@ use crate::demo_simulation::DemoSimulation;
 use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
 use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
 use fate_engine::math::{Mat4, Vec2, Vec3};
-use fate_engine::renderer::{Bounds2d, Camera3d, Draw3d, Instance2d, Mesh3d, Renderer, cube_mesh};
+use fate_engine::renderer::{Bounds2d, Camera3d, Draw3d, Instance2d, Mesh3d, Renderer};
 use fate_engine::time::Time;
 const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
 const CAMERA_MOVE_SPEED: f32 = 4.0;
@@ -119,8 +119,7 @@ impl App {
         let render_start = Instant::now();
         let (rendered, draw_budget) = if self.three_d_mode {
             if let (Some(renderer), Some(mesh)) = (&mut self.renderer, &self.demo_mesh) {
-                let draws =
-                    Self::three_d_demo_draws(mesh, &renderer.camera_3d, renderer.gpu.aspect());
+                let draws = Self::three_d_demo_draws(mesh, &renderer.camera_3d, renderer.aspect());
                 let count = renderer.budgeted_instance_count(draws.len());
                 (renderer.render_meshes(&draws), count)
             } else {
@@ -474,7 +473,7 @@ impl ApplicationHandler for App {
 
         let renderer = pollster::block_on(Renderer::new(window.clone()))
             .expect("failed to initialize renderer");
-        let demo_mesh = match cube_mesh(&renderer.gpu.device) {
+        let demo_mesh = match renderer.cube_mesh() {
             Ok(mesh) => Some(mesh),
             Err(error) => {
                 log::error!("failed to create 3d demo mesh: {error}");

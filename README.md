@@ -18,6 +18,12 @@ expanding content.
 - The headless consumer smoke test in
   [`projects/consumer_smoke/`](projects/consumer_smoke/) validates the public
   APIs outside the demo.
+- A second, minimal windowed consumer in
+  [`projects/window_smoke/`](projects/window_smoke/) exercises the renderer's
+  public seam without a direct `wgpu` dependency.
+- A transport-agnostic `fate_net` crate provides a versioned local protocol
+  prototype with bounded payloads, ordered inputs, acknowledgement history, and
+  snapshot validation. It does not open sockets.
 
 ## Build and test
 
