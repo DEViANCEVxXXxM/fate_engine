@@ -13,7 +13,7 @@ use crate::demo_simulation::DemoSimulation;
 use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
 use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
 use fate_engine::math::{Mat4, Vec2, Vec3};
-use fate_engine::renderer::{Camera3d, Draw3d, Instance2d, Mesh3d, Renderer, cube_mesh};
+use fate_engine::renderer::{Bounds2d, Camera3d, Draw3d, Instance2d, Mesh3d, Renderer, cube_mesh};
 use fate_engine::time::Time;
 const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
 const CAMERA_MOVE_SPEED: f32 = 4.0;
@@ -388,23 +388,15 @@ impl App {
     }
 
     fn instances(&self) -> Vec<Instance2d> {
-        let view_size = self
-            .renderer
-            .as_ref()
-            .map(|renderer| renderer.camera.safe_visible_size())
-            .unwrap_or(Vec2::new(20.0, 20.0));
-        let half = view_size * 0.5;
-        let center = self
-            .renderer
-            .as_ref()
-            .map(|renderer| renderer.camera.center)
-            .unwrap_or(Vec2::ZERO);
+        let bounds = match &self.renderer {
+            Some(renderer) => renderer.camera.visible_bounds(renderer.gpu.aspect()),
+            None => Bounds2d::new(Vec2::ZERO, Vec2::new(10.0, 10.0)),
+        };
 
         let mut instances = Vec::new();
         for (entity, position) in self.core.world.positions.iter() {
             let render_position = Vec2::new(position.0.x.to_f32(), position.0.y.to_f32());
-            let delta = render_position - center;
-            if delta.x.abs() > half.x || delta.y.abs() > half.y {
+            if !bounds.contains_point(render_position) {
                 continue;
             }
 

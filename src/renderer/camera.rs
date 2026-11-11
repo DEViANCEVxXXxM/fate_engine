@@ -1,4 +1,5 @@
 use crate::math::{Mat4, Vec2, Vec3};
+use crate::renderer::visibility::Bounds2d;
 
 const MIN_VIEW_SIZE: f32 = 1.0;
 const MAX_VIEW_SIZE: f32 = 128.0;
@@ -79,6 +80,24 @@ impl Camera2d {
         let projection = Mat4::orthographic_2d(safe_view_size, safe_aspect);
         let view = Mat4::translation(Vec3::new(-self.center.x, -self.center.y, 0.0));
         projection.mul(view)
+    }
+
+    /// World-space bounds matching `view_projection(aspect)`.
+    ///
+    /// Consumers can use this to filter draw candidates before submitting them;
+    /// the renderer does not cull automatically.
+    pub fn visible_bounds(&self, aspect: f32) -> Bounds2d {
+        let safe_aspect = Self::sanitize_aspect(aspect);
+        let safe_zoom = Self::sanitize_zoom(self.zoom);
+        let size = self.safe_visible_size() * (1.0 / safe_zoom);
+
+        let (half_w, half_h) = if safe_aspect >= 1.0 {
+            (size.x * 0.5, size.x * 0.5 / safe_aspect)
+        } else {
+            (size.y * 0.5 * safe_aspect, size.y * 0.5)
+        };
+
+        Bounds2d::new(self.center, Vec2::new(half_w, half_h))
     }
 }
 
@@ -179,6 +198,71 @@ mod tests {
         // camera offset of 5 lands at -0.5 in clip space.
         assert!((vp.m[12] + 0.5).abs() < 1e-5);
         assert!((vp.m[13] + 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn visible_bounds_follow_aspect_and_zoom() {
+        let camera = Camera2d::default();
+        assert_eq!(
+            camera.visible_bounds(1.0),
+            Bounds2d::new(Vec2::ZERO, Vec2::new(10.0, 10.0))
+        );
+        assert_eq!(camera.visible_bounds(2.0).half_extent, Vec2::new(10.0, 5.0));
+        assert_eq!(camera.visible_bounds(0.5).half_extent, Vec2::new(5.0, 10.0));
+
+        let zoomed = Camera2d {
+            zoom: 2.0,
+            ..Default::default()
+        };
+        assert_eq!(zoomed.visible_bounds(1.0).half_extent, Vec2::new(5.0, 5.0));
+    }
+
+    #[test]
+    fn visible_bounds_corners_match_projection_edges() {
+        let camera = Camera2d {
+            center: Vec2::new(3.0, -4.0),
+            view_size: Vec2::new(24.0, 12.0),
+            zoom: 1.5,
+        };
+
+        for aspect in [0.25, 0.5, 1.0, 2.0, 4.0] {
+            let view_projection = camera.view_projection(aspect);
+            let bounds = camera.visible_bounds(aspect);
+            let min = bounds.min();
+            let max = bounds.max();
+
+            for (x, y) in [
+                (min.x, min.y),
+                (max.x, min.y),
+                (min.x, max.y),
+                (max.x, max.y),
+            ] {
+                let clip_x =
+                    view_projection.m[0] * x + view_projection.m[4] * y + view_projection.m[12];
+                let clip_y =
+                    view_projection.m[1] * x + view_projection.m[5] * y + view_projection.m[13];
+
+                assert!((clip_x.abs() - 1.0).abs() < 1e-4, "aspect {aspect}");
+                assert!((clip_y.abs() - 1.0).abs() < 1e-4, "aspect {aspect}");
+            }
+        }
+    }
+
+    #[test]
+    fn visible_bounds_stay_finite_for_degenerate_camera_inputs() {
+        let camera = Camera2d {
+            center: Vec2::new(f32::NAN, f32::INFINITY),
+            view_size: Vec2::ZERO,
+            zoom: 0.0,
+        };
+
+        for aspect in [0.0, f32::NAN, f32::INFINITY, 100.0] {
+            let bounds = camera.visible_bounds(aspect);
+            assert!(bounds.center.x.is_finite());
+            assert!(bounds.center.y.is_finite());
+            assert!(bounds.half_extent.x.is_finite());
+            assert!(bounds.half_extent.y.is_finite());
+        }
     }
 
     #[test]

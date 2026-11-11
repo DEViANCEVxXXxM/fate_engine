@@ -1,3 +1,3 @@
 mod fixed;
 
-pub use fixed::{Fixed, FixedVec2};
+pub use fixed::{Fixed, FixedVec2, FixedVec3};

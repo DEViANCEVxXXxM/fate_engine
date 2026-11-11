@@ -196,6 +196,105 @@ impl Neg for FixedVec2 {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FixedVec3 {
+    pub x: Fixed,
+    pub y: Fixed,
+    pub z: Fixed,
+}
+
+impl FixedVec3 {
+    pub const ZERO: Self = Self {
+        x: Fixed::ZERO,
+        y: Fixed::ZERO,
+        z: Fixed::ZERO,
+    };
+
+    pub const fn new(x: Fixed, y: Fixed, z: Fixed) -> Self {
+        Self { x, y, z }
+    }
+
+    pub fn dot(self, rhs: Self) -> Fixed {
+        self.x * rhs.x + self.y * rhs.y + self.z * rhs.z
+    }
+
+    pub fn cross(self, rhs: Self) -> Self {
+        Self::new(
+            self.y * rhs.z - self.z * rhs.y,
+            self.z * rhs.x - self.x * rhs.z,
+            self.x * rhs.y - self.y * rhs.x,
+        )
+    }
+
+    pub fn length_squared(self) -> Fixed {
+        self.dot(self)
+    }
+
+    pub fn length(self) -> Fixed {
+        self.length_squared().sqrt()
+    }
+
+    pub fn normalize(self) -> Self {
+        let length = self.length();
+        if length == Fixed::ZERO {
+            Self::ZERO
+        } else {
+            self / length
+        }
+    }
+
+    /// Convert to a renderer-facing float triple. Do not feed this back into simulation.
+    pub fn to_f32x3(self) -> [f32; 3] {
+        [self.x.to_f32(), self.y.to_f32(), self.z.to_f32()]
+    }
+}
+
+impl Add for FixedVec3 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self {
+        Self::new(self.x + rhs.x, self.y + rhs.y, self.z + rhs.z)
+    }
+}
+
+impl AddAssign for FixedVec3 {
+    fn add_assign(&mut self, rhs: Self) {
+        *self = *self + rhs;
+    }
+}
+
+impl Sub for FixedVec3 {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self {
+        Self::new(self.x - rhs.x, self.y - rhs.y, self.z - rhs.z)
+    }
+}
+
+impl Mul<Fixed> for FixedVec3 {
+    type Output = Self;
+
+    fn mul(self, rhs: Fixed) -> Self {
+        Self::new(self.x * rhs, self.y * rhs, self.z * rhs)
+    }
+}
+
+impl Div<Fixed> for FixedVec3 {
+    type Output = Self;
+
+    fn div(self, rhs: Fixed) -> Self {
+        Self::new(self.x / rhs, self.y / rhs, self.z / rhs)
+    }
+}
+
+impl Neg for FixedVec3 {
+    type Output = Self;
+
+    fn neg(self) -> Self {
+        Self::new(-self.x, -self.y, -self.z)
+    }
+}
+
 fn integer_sqrt(value: u128) -> u128 {
     if value < 2 {
         return value;
@@ -238,6 +337,33 @@ mod tests {
         let diagonal = FixedVec2::new(Fixed::ONE, Fixed::ONE).normalize();
         assert_eq!(diagonal.length(), Fixed::ONE);
         assert!(diagonal.x.raw().abs_diff(diagonal.y.raw()) <= 1);
+    }
+
+    #[test]
+    fn vec3_dot_cross_and_normalize_are_fixed_point() {
+        let x = FixedVec3::new(Fixed::ONE, Fixed::ZERO, Fixed::ZERO);
+        let y = FixedVec3::new(Fixed::ZERO, Fixed::ONE, Fixed::ZERO);
+
+        assert_eq!(x.dot(y), Fixed::ZERO);
+        assert_eq!(x.dot(x), Fixed::ONE);
+        assert_eq!(
+            x.cross(y),
+            FixedVec3::new(Fixed::ZERO, Fixed::ZERO, Fixed::ONE)
+        );
+        assert_eq!(x.cross(y).dot(x), Fixed::ZERO);
+        assert_eq!(x.cross(y).dot(y), Fixed::ZERO);
+
+        let diagonal = FixedVec3::new(Fixed::ONE, Fixed::ONE, Fixed::ONE).normalize();
+        // Truncating multiply and sqrt can lose a few raw units on a unit vector.
+        assert!(diagonal.length().raw().abs_diff(Fixed::ONE.raw()) <= 4);
+        assert_eq!(diagonal.x, diagonal.y);
+        assert_eq!(diagonal.y, diagonal.z);
+        assert_eq!(FixedVec3::ZERO.normalize(), FixedVec3::ZERO);
+
+        assert_eq!(
+            FixedVec3::new(Fixed::ONE, Fixed::from_int(2), Fixed::from_int(3)).to_f32x3(),
+            [1.0, 2.0, 3.0]
+        );
     }
 
     #[test]
