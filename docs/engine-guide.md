@@ -361,11 +361,12 @@ Owned snapshot buffers are produced with `state_bytes()`, while per-tick state h
 via `state_hash()` using the zero-allocation `StateHasher` (a streaming FNV-1a 64-bit diagnostic sink),
 avoiding per-tick heap allocations during recording, playback, or resimulation.
 
-Snapshot validation is not yet a complete invariant check: world restoration
-currently accepts duplicate free-list IDs. The local networking client also does
-not cross-check the packet's `server_tick` against the tick in its restored state.
-Do not treat successful decoding or a matching checksum as proof that arbitrary
-external state is safe or authentic. These gaps are tracked in roadmap steps 1–2.
+Snapshot validation rejects duplicate free-list IDs and free lists that do not
+cover every dead slot exactly once. It remains a structural invariant check,
+not an authenticity check: successful decoding or a matching checksum does not
+prove that arbitrary external state is trustworthy. The local networking client
+also does not yet cross-check the packet's `server_tick` against the tick in its
+restored state; that contract is tracked in roadmap step 2.
 
 The fixed ECS component set and 2D systems are still small prototypes; projects
 choose which systems to call and how to interpret commands. The demo's
@@ -382,13 +383,14 @@ vector growth during normal slot reuse. Despawning is safe and idempotent.
 Checked setters (`World::set_position`, `set_velocity`, etc.) return
 `Err(EcsError::EntityNotAlive)` when given a dead or invalid entity handle.
 Columns validate the stored generation on `get`, `get_mut`, and `remove`.
-However, world columns and `Column::insert` are public: direct insertion bypasses
-world lifecycle checks and can overwrite a slot using a stale handle. Prefer
-checked world setters when attaching components; full mutation encapsulation is
-planned in [roadmap step 1](roadmap.md#step-1--harden-ecs-lifecycle-and-snapshot-restoration).
-This remains a lightweight indexed-column foundation; arbitrary component registration,
-query composition, archetype storage, and parallel scheduling are deferred to
-later milestones.
+Read attached components through `World::positions()`, `velocities()`,
+`rotations()`, and `spins()`, which expose read-only columns. Update attached
+values through `position_mut`, `velocity_mut`, `rotation_mut`, and `spin_mut`,
+which return `None` for dead or stale handles. The columns themselves are
+private, so direct insertion or replacement cannot bypass world lifecycle
+checks. This remains a lightweight indexed-column foundation; arbitrary
+component registration, query composition, archetype storage, and parallel
+scheduling are deferred to later milestones.
 
 `fate_sim::math::Fixed` is signed Q32.32. Arithmetic saturates on overflow;
 division truncates. `FixedVec2` and `FixedVec3` provide the current 2D and 3D

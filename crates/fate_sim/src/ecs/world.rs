@@ -204,15 +204,34 @@ pub struct Rotation(pub Fixed);
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Spin(pub Fixed);
 
+/// Entity storage with lifecycle-checked component attachment.
+///
+/// Columns are read-only to consumers; use `set_*` to attach components and
+/// the singular `*_mut` accessors to update existing values.
+///
+/// Direct column replacement is not part of the public API:
+/// ```compile_fail
+/// use fate_sim::ecs::{Column, World};
+/// let mut world = World::new();
+/// world.positions = Column::new();
+/// ```
+/// Nor can components be inserted through a read-only column:
+/// ```compile_fail
+/// use fate_sim::ecs::{Position, World};
+/// use fate_sim::math::FixedVec2;
+/// let mut world = World::new();
+/// let entity = world.spawn();
+/// world.positions().insert(entity, Position(FixedVec2::ZERO));
+/// ```
 pub struct World {
     next_id: u32,
     generations: Vec<u32>,
     alive: Vec<bool>,
     free_list: Vec<u32>,
-    pub positions: Column<Position>,
-    pub velocities: Column<Velocity>,
-    pub rotations: Column<Rotation>,
-    pub spins: Column<Spin>,
+    pub(super) positions: Column<Position>,
+    pub(super) velocities: Column<Velocity>,
+    pub(super) rotations: Column<Rotation>,
+    pub(super) spins: Column<Spin>,
 }
 
 impl Default for World {
@@ -342,6 +361,58 @@ impl World {
         Ok(())
     }
 
+    /// Read-only view of the position column.
+    pub fn positions(&self) -> &Column<Position> {
+        &self.positions
+    }
+
+    /// Read-only view of the velocity column.
+    pub fn velocities(&self) -> &Column<Velocity> {
+        &self.velocities
+    }
+
+    /// Read-only view of the rotation column.
+    pub fn rotations(&self) -> &Column<Rotation> {
+        &self.rotations
+    }
+
+    /// Read-only view of the spin column.
+    pub fn spins(&self) -> &Column<Spin> {
+        &self.spins
+    }
+
+    /// Mutable access to a live entity's position component.
+    pub fn position_mut(&mut self, entity: Entity) -> Option<&mut Position> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.positions.get_mut(entity)
+    }
+
+    /// Mutable access to a live entity's velocity component.
+    pub fn velocity_mut(&mut self, entity: Entity) -> Option<&mut Velocity> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.velocities.get_mut(entity)
+    }
+
+    /// Mutable access to a live entity's rotation component.
+    pub fn rotation_mut(&mut self, entity: Entity) -> Option<&mut Rotation> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.rotations.get_mut(entity)
+    }
+
+    /// Mutable access to a live entity's spin component.
+    pub fn spin_mut(&mut self, entity: Entity) -> Option<&mut Spin> {
+        if !self.is_alive(entity) {
+            return None;
+        }
+        self.spins.get_mut(entity)
+    }
+
     pub fn write_state<W: crate::simulation::StateWriter>(&self, writer: &mut W) {
         writer.write_u32(self.next_id);
         writer.write_u32(self.free_list.len() as u32);
@@ -407,7 +478,7 @@ impl World {
             return Err("free list length exceeds entity slot count");
         }
 
-        let mut free_list = Vec::with_capacity(free_list_len as usize);
+        let mut free_list = Vec::new();
         for _ in 0..free_list_len {
             let free_id = Self::read_u32(input, offset)?;
             if free_id >= next_id {
@@ -416,8 +487,8 @@ impl World {
             free_list.push(free_id);
         }
 
-        let mut generations = Vec::with_capacity(next_id as usize);
-        let mut alive = Vec::with_capacity(next_id as usize);
+        let mut generations = Vec::new();
+        let mut alive = Vec::new();
         let mut positions = Column::new();
         let mut velocities = Column::new();
         let mut rotations = Column::new();
@@ -470,9 +541,17 @@ impl World {
         if live_count + free_list.len() != next_id as usize {
             return Err("live entity count and free list size do not match total allocated slots");
         }
+        // The entity table has now been read, so the payload is large enough to
+        // justify a bitmap proportional to `next_id`. Reject duplicates so the
+        // free list covers every dead slot exactly once.
+        let mut seen_free = vec![false; next_id as usize];
         for &free_id in &free_list {
-            if alive[free_id as usize] {
+            let index = free_id as usize;
+            if alive[index] {
                 return Err("entity in free list is marked alive");
+            }
+            if std::mem::replace(&mut seen_free[index], true) {
+                return Err("duplicate entity in free list");
             }
         }
 
@@ -703,5 +782,124 @@ mod tests {
         assert_eq!(e4.id(), 1);
         assert_eq!(e4.generation(), 2);
         assert!(restored.is_alive(e4));
+    }
+
+    #[test]
+    fn decoder_rejects_declared_slot_counts_beyond_the_payload() {
+        // A hostile snapshot can declare a large entity count in a tiny
+        // payload. The decoder must reject it without trusting the count.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MAX_SNAPSHOT_ENTITIES.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let mut offset = 0;
+        assert!(World::decode_state(&bytes, &mut offset).is_err());
+    }
+
+    #[test]
+    fn decoder_rejects_duplicate_free_list_ids() {
+        let mut world = World::new();
+        let first = world.spawn();
+        let second = world.spawn();
+        assert!(world.despawn(first));
+        assert!(world.despawn(second));
+
+        let mut bytes = Vec::new();
+        world.encode_state(&mut bytes);
+
+        // Layout: next_id (4), free list length (4), then free-list ids.
+        let first_free = bytes[8..12].to_vec();
+        bytes[12..16].copy_from_slice(&first_free);
+
+        let mut offset = 0;
+        assert_eq!(
+            World::decode_state(&bytes, &mut offset).err(),
+            Some("duplicate entity in free list")
+        );
+    }
+
+    #[test]
+    fn decoder_rejects_free_list_that_skips_a_dead_slot() {
+        let mut world = World::new();
+        let first = world.spawn();
+        let second = world.spawn();
+        assert!(world.despawn(first));
+        assert!(world.despawn(second));
+
+        let mut bytes = Vec::new();
+        world.encode_state(&mut bytes);
+
+        // Claim a single free slot while two slots are dead, and remove the
+        // second free-list entry so the entity table stays aligned.
+        bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
+        bytes.drain(12..16);
+
+        let mut offset = 0;
+        assert_eq!(
+            World::decode_state(&bytes, &mut offset).err(),
+            Some("live entity count and free list size do not match total allocated slots")
+        );
+    }
+
+    #[test]
+    fn component_mutators_reject_dead_and_stale_handles() {
+        let mut world = World::new();
+        let stale = world.spawn();
+        world
+            .set_velocity(stale, Velocity(FixedVec2::ZERO))
+            .unwrap();
+        assert!(world.despawn(stale));
+
+        let fresh = world.spawn();
+        assert_eq!(fresh.id(), stale.id());
+        assert_ne!(fresh.generation(), stale.generation());
+        assert!(world.velocity_mut(stale).is_none());
+        assert!(world.position_mut(stale).is_none());
+
+        world
+            .set_velocity(fresh, Velocity(FixedVec2::new(Fixed::ONE, Fixed::ZERO)))
+            .unwrap();
+        assert_eq!(
+            world.velocity_mut(fresh).unwrap().0,
+            FixedVec2::new(Fixed::ONE, Fixed::ZERO)
+        );
+
+        assert!(world.despawn(fresh));
+        assert!(world.velocity_mut(fresh).is_none());
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_repeated_slot_reuse() {
+        let mut world = World::new();
+        let first = world.spawn();
+        assert!(world.despawn(first));
+        let second = world.spawn();
+        assert!(world.despawn(second));
+        let third = world.spawn();
+        assert_eq!(third.id(), first.id());
+        assert_eq!(third.generation(), 3);
+        world
+            .set_position(third, Position(FixedVec2::new(Fixed::ONE, Fixed::ZERO)))
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        world.encode_state(&mut bytes);
+        let mut offset = 0;
+        let restored = World::decode_state(&bytes, &mut offset).unwrap();
+        assert_eq!(offset, bytes.len());
+
+        assert!(!restored.is_alive(first));
+        assert!(!restored.is_alive(second));
+        assert!(restored.is_alive(third));
+        assert_eq!(
+            restored.positions.get(third).unwrap().0,
+            FixedVec2::new(Fixed::ONE, Fixed::ZERO)
+        );
+
+        let mut restored = restored;
+        assert!(restored.despawn(third));
+        let fourth = restored.spawn();
+        assert_eq!(fourth.id(), third.id());
+        assert_eq!(fourth.generation(), 4);
     }
 }

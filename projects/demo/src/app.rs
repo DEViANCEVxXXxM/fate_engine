@@ -188,7 +188,7 @@ impl App {
     fn player_camera_target(&self) -> Option<Vec2> {
         self.core
             .world
-            .positions
+            .positions()
             .get(self.core.player)
             .map(|position| Vec2::new(position.0.x.to_f32(), position.0.y.to_f32()))
     }
@@ -402,7 +402,7 @@ impl App {
         };
 
         let mut instances = Vec::new();
-        for (entity, position) in self.core.world.positions.iter() {
+        for (entity, position) in self.core.world.positions().iter() {
             let render_position = Vec2::new(position.0.x.to_f32(), position.0.y.to_f32());
             if !bounds.contains_point(render_position) {
                 continue;
@@ -411,7 +411,7 @@ impl App {
             let rotation = self
                 .core
                 .world
-                .rotations
+                .rotations()
                 .get(entity)
                 .map_or(0.0, |r| r.0.to_f32());
             instances.push(Instance2d {
@@ -804,12 +804,15 @@ mod tests {
         let hidden = app.core.world.spawn();
         app.core
             .world
-            .positions
-            .insert(visible, Position(FixedVec2::new(Fixed::ONE, Fixed::ONE)));
-        app.core.world.positions.insert(
-            hidden,
-            Position(FixedVec2::new(Fixed::from_int(30), Fixed::from_int(30))),
-        );
+            .set_position(visible, Position(FixedVec2::new(Fixed::ONE, Fixed::ONE)))
+            .unwrap();
+        app.core
+            .world
+            .set_position(
+                hidden,
+                Position(FixedVec2::new(Fixed::from_int(30), Fixed::from_int(30))),
+            )
+            .unwrap();
 
         let instances = app.instances();
 
@@ -844,7 +847,10 @@ mod tests {
         let mut app = App::new();
         let player = app.core.player;
         let target = FixedVec2::new(Fixed::from_int(4), Fixed::from_int(-3));
-        app.core.world.positions.insert(player, Position(target));
+        app.core
+            .world
+            .set_position(player, Position(target))
+            .unwrap();
 
         assert_eq!(
             app.player_camera_target(),
@@ -856,7 +862,7 @@ mod tests {
     fn player_is_visually_distinguished_from_demo_swarm() {
         let app = App::new();
         let instances = app.instances();
-        let fixed_player_position = app.core.world.positions.get(app.core.player).unwrap().0;
+        let fixed_player_position = app.core.world.positions().get(app.core.player).unwrap().0;
         let player_position = Vec2::new(
             fixed_player_position.x.to_f32(),
             fixed_player_position.y.to_f32(),

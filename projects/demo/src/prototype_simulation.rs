@@ -75,13 +75,19 @@ impl EngineCore {
     pub fn with_seed(seed: u64) -> Self {
         let mut world = World::new();
         let player = world.spawn();
-        world.positions.insert(player, Position(FixedVec2::ZERO));
-        world.velocities.insert(
-            player,
-            Velocity(FixedVec2::new(Fixed::from_int(4), Fixed::from_ratio(5, 2))),
-        );
-        world.rotations.insert(player, Rotation(Fixed::ZERO));
-        world.spins.insert(player, Spin(Fixed::from_ratio(9, 10)));
+        world
+            .set_position(player, Position(FixedVec2::ZERO))
+            .unwrap();
+        world
+            .set_velocity(
+                player,
+                Velocity(FixedVec2::new(Fixed::from_int(4), Fixed::from_ratio(5, 2))),
+            )
+            .unwrap();
+        world.set_rotation(player, Rotation(Fixed::ZERO)).unwrap();
+        world
+            .set_spin(player, Spin(Fixed::from_ratio(9, 10)))
+            .unwrap();
 
         Self {
             world,
@@ -210,7 +216,7 @@ impl EngineCore {
         } else {
             Fixed::ONE
         };
-        if let Some(velocity) = self.world.velocities.get_mut(self.player) {
+        if let Some(velocity) = self.world.velocity_mut(self.player) {
             velocity.0 += direction * (Fixed::from_int(40) * boost * FIXED_DELTA);
             let max_speed = Fixed::from_int(18) * boost;
             if velocity.0.length() > max_speed {
@@ -238,7 +244,7 @@ mod tests {
         });
 
         assert_eq!(sim.world.entity_count(), 1);
-        assert!(sim.world.positions.get(sim.player).unwrap().0.x > Fixed::ZERO);
+        assert!(sim.world.positions().get(sim.player).unwrap().0.x > Fixed::ZERO);
     }
 
     #[test]
@@ -298,9 +304,9 @@ mod tests {
             sim.fixed_update(input);
         }
 
-        let position = sim.world.positions.get(sim.player).unwrap().0;
-        let velocity = sim.world.velocities.get(sim.player).unwrap().0;
-        let rotation = sim.world.rotations.get(sim.player).unwrap().0;
+        let position = sim.world.positions().get(sim.player).unwrap().0;
+        let velocity = sim.world.velocities().get(sim.player).unwrap().0;
+        let rotation = sim.world.rotations().get(sim.player).unwrap().0;
         assert_eq!(
             (
                 position.x.raw(),
@@ -335,10 +341,13 @@ mod tests {
         assert_eq!(first.state_bytes(), first.state_bytes());
 
         let mut changed_component = EngineCore::new();
-        changed_component.world.velocities.insert(
-            changed_component.player,
-            Velocity(FixedVec2::new(Fixed::from_int(5), Fixed::from_ratio(5, 2))),
-        );
+        changed_component
+            .world
+            .set_velocity(
+                changed_component.player,
+                Velocity(FixedVec2::new(Fixed::from_int(5), Fixed::from_ratio(5, 2))),
+            )
+            .unwrap();
         assert_ne!(changed_component.state_hash(), second.state_hash());
     }
 
@@ -346,10 +355,13 @@ mod tests {
     fn snapshot_round_trip_preserves_world_and_tick() {
         let mut original = EngineCore::new();
         let extra_entity = original.world.spawn();
-        original.world.positions.insert(
-            extra_entity,
-            Position(FixedVec2::new(Fixed::from_int(3), Fixed::from_int(2))),
-        );
+        original
+            .world
+            .set_position(
+                extra_entity,
+                Position(FixedVec2::new(Fixed::from_int(3), Fixed::from_int(2))),
+            )
+            .unwrap();
         for _ in 0..240 {
             original.fixed_update(SimulationInput {
                 move_x: 1,
@@ -478,8 +490,8 @@ mod tests {
         normal.fixed_update(diagonal);
         boosted.fixed_update(boosted_diagonal);
 
-        let normal_velocity = normal.world.velocities.get(normal.player).unwrap().0;
-        let boosted_velocity = boosted.world.velocities.get(boosted.player).unwrap().0;
+        let normal_velocity = normal.world.velocities().get(normal.player).unwrap().0;
+        let boosted_velocity = boosted.world.velocities().get(boosted.player).unwrap().0;
         assert!(normal_velocity.length() <= Fixed::from_int(18));
         assert!(boosted_velocity.length() <= Fixed::from_int(36));
     }

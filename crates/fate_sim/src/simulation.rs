@@ -268,10 +268,13 @@ mod tests {
     fn state_round_trip_preserves_world_tick_and_future_random_stream() {
         let mut state = SimulationState::with_seed(1234);
         let entity = state.world.spawn();
-        state.world.positions.insert(
-            entity,
-            Position(FixedVec2::new(Fixed::from_int(2), Fixed::from_int(-3))),
-        );
+        state
+            .world
+            .set_position(
+                entity,
+                Position(FixedVec2::new(Fixed::from_int(2), Fixed::from_int(-3))),
+            )
+            .unwrap();
         state.advance_tick().unwrap();
         let snapshot = state.state_bytes();
         let mut restored = SimulationState::from_state_bytes(&snapshot).unwrap();

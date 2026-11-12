@@ -25,6 +25,13 @@
 
 **Goal:** Make entity/component invariants hold at every public entry point.
 
+**Status: done.** Component columns are private; consumers read through
+`World::positions()` and related accessors, attach components through checked
+setters, and update attached values through checked `*_mut` accessors. World
+snapshot decoding rejects duplicate free-list IDs and free lists that do not
+cover every dead slot exactly once. Regression tests cover dead and stale
+handles, repeated slot reuse, and snapshot round trips after reuse.
+
 - Reject duplicate free-list IDs during world snapshot decoding. Check that
   the free list covers every dead slot exactly once.
 - Prevent direct component-column mutations from bypassing world lifecycle

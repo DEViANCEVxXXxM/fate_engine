@@ -20,7 +20,7 @@ struct BenchmarkInput {
 }
 
 fn update(state: &mut SimulationState, player: fate_sim::ecs::Entity, input: BenchmarkInput) {
-    if let Some(velocity) = state.world.velocities.get_mut(player) {
+    if let Some(velocity) = state.world.velocity_mut(player) {
         let direction = FixedVec2::new(
             Fixed::from_int(i64::from(input.move_x)),
             Fixed::from_int(i64::from(input.move_y)),
@@ -78,14 +78,17 @@ impl BenchmarkScenario {
         let player = state.world.spawn();
         state
             .world
-            .positions
-            .insert(player, Position(FixedVec2::ZERO));
+            .set_position(player, Position(FixedVec2::ZERO))
+            .unwrap();
         state
             .world
-            .velocities
-            .insert(player, Velocity(FixedVec2::new(Fixed::ZERO, Fixed::ZERO)));
-        state.world.rotations.insert(player, Rotation(Fixed::ZERO));
-        state.world.spins.insert(player, Spin(Fixed::ZERO));
+            .set_velocity(player, Velocity(FixedVec2::new(Fixed::ZERO, Fixed::ZERO)))
+            .unwrap();
+        state
+            .world
+            .set_rotation(player, Rotation(Fixed::ZERO))
+            .unwrap();
+        state.world.set_spin(player, Spin(Fixed::ZERO)).unwrap();
         let input = match self {
             Self::Idle => BenchmarkInput::default(),
             Self::Movement => BenchmarkInput {
@@ -95,25 +98,31 @@ impl BenchmarkScenario {
             Self::EntityLoad { entities } => {
                 for index in 0..entities {
                     let entity = state.world.spawn();
-                    state.world.positions.insert(
-                        entity,
-                        Position(FixedVec2::new(
-                            Fixed::from_ratio(index as i64, 4),
-                            Fixed::from_ratio((index % 16) as i64, 4),
-                        )),
-                    );
-                    state.world.velocities.insert(
-                        entity,
-                        Velocity(FixedVec2::new(Fixed::from_int(2), Fixed::from_ratio(3, 2))),
-                    );
                     state
                         .world
-                        .rotations
-                        .insert(entity, Rotation(Fixed::from_ratio(index as i64, 10)));
+                        .set_position(
+                            entity,
+                            Position(FixedVec2::new(
+                                Fixed::from_ratio(index as i64, 4),
+                                Fixed::from_ratio((index % 16) as i64, 4),
+                            )),
+                        )
+                        .unwrap();
                     state
                         .world
-                        .spins
-                        .insert(entity, Spin(Fixed::from_ratio(1, 2)));
+                        .set_velocity(
+                            entity,
+                            Velocity(FixedVec2::new(Fixed::from_int(2), Fixed::from_ratio(3, 2))),
+                        )
+                        .unwrap();
+                    state
+                        .world
+                        .set_rotation(entity, Rotation(Fixed::from_ratio(index as i64, 10)))
+                        .unwrap();
+                    state
+                        .world
+                        .set_spin(entity, Spin(Fixed::from_ratio(1, 2)))
+                        .unwrap();
                 }
                 BenchmarkInput {
                     move_x: -1,

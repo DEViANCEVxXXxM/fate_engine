@@ -25,15 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let player = simulation.world.spawn();
     simulation
         .world
-        .positions
-        .insert(player, Position(FixedVec2::ZERO));
-    simulation.world.velocities.insert(
+        .set_position(player, Position(FixedVec2::ZERO))?;
+    simulation.world.set_velocity(
         player,
         Velocity(FixedVec2::new(
             Fixed::from_int(i64::from(input.action_down(GameAction::MoveRight))),
             Fixed::ZERO,
         )),
-    );
+    )?;
     movement_system(&mut simulation.world, Fixed::from_ratio(1, 120));
     simulation.advance_tick()?;
     input.end_frame();
@@ -42,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     input.release(GameButton::Right);
     assert!(input.action_just_released(GameAction::MoveRight));
 
-    simulation.world.velocities.get_mut(player).unwrap().0 = FixedVec2::new(
+    simulation.world.velocity_mut(player).unwrap().0 = FixedVec2::new(
         Fixed::from_int(i64::from(input.action_down(GameAction::MoveRight))),
         Fixed::ZERO,
     );
@@ -59,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(restored.world.is_alive(player));
     assert_eq!(restored.world.entity_count(), 1);
     assert_eq!(
-        restored.world.positions.get(player).unwrap().0,
+        restored.world.positions().get(player).unwrap().0,
         FixedVec2::new(Fixed::from_ratio(1, 120), Fixed::ZERO)
     );
 
@@ -67,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let despawned = SimulationState::from_state_bytes(&restored.state_bytes())?;
     assert!(!despawned.world.is_alive(player));
     assert_eq!(despawned.world.entity_count(), 0);
-    assert!(despawned.world.positions.get(player).is_none());
+    assert!(despawned.world.positions().get(player).is_none());
 
     println!(
         "consumer smoke test passed at simulation tick {}",

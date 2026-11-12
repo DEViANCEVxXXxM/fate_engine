@@ -56,24 +56,30 @@ impl DemoSimulation {
                 _ => FixedVec2::new(Fixed::ONE, -Fixed::ONE).normalize(),
             };
             let entity = self.core.world.spawn();
-            self.core.world.positions.insert(
-                entity,
-                Position(FixedVec2::new(
-                    Fixed::from_ratio((column as i64 * 2 - 15) * 11, 20),
-                    Fixed::from_ratio((row as i64 * 2 - 11) * 11, 20),
-                )),
-            );
             self.core
                 .world
-                .velocities
-                .insert(entity, Velocity(direction * Fixed::from_int(2)));
-            self.core.world.rotations.insert(entity, Rotation(angle));
+                .set_position(
+                    entity,
+                    Position(FixedVec2::new(
+                        Fixed::from_ratio((column as i64 * 2 - 15) * 11, 20),
+                        Fixed::from_ratio((row as i64 * 2 - 11) * 11, 20),
+                    )),
+                )
+                .unwrap();
+            self.core
+                .world
+                .set_velocity(entity, Velocity(direction * Fixed::from_int(2)))
+                .unwrap();
+            self.core
+                .world
+                .set_rotation(entity, Rotation(angle))
+                .unwrap();
             let spin = if self.core.random_range_u32(2) == 0 {
                 Fixed::from_ratio(45, 100)
             } else {
                 Fixed::from_ratio(-45, 100)
             };
-            self.core.world.spins.insert(entity, Spin(spin));
+            self.core.world.set_spin(entity, Spin(spin)).unwrap();
             self.demo_entities.push(entity);
         }
 
@@ -87,12 +93,12 @@ impl DemoSimulation {
             };
             self.core
                 .world
-                .positions
-                .insert(entity, Position(FixedVec2::new(x, Fixed::ZERO)));
+                .set_position(entity, Position(FixedVec2::new(x, Fixed::ZERO)))
+                .unwrap();
             self.core
                 .world
-                .rotations
-                .insert(entity, Rotation(Fixed::ZERO));
+                .set_rotation(entity, Rotation(Fixed::ZERO))
+                .unwrap();
             self.demo_entities.push(entity);
         }
 
