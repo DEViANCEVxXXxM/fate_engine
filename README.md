@@ -24,6 +24,9 @@ expanding content.
 - A transport-agnostic `fate_net` crate provides a versioned local protocol
   prototype with bounded payloads, ordered inputs, acknowledgement history, and
   snapshot validation. It does not open sockets.
+- Reusable frame diagnostics and metric sink/source seams live in
+  `fate_engine::diagnostics`; `fate_sim` and `fate_net` expose read-only
+  inspection snapshots. Consumers own presentation and export.
 
 ## Build and test
 

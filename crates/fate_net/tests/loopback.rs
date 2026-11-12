@@ -29,12 +29,9 @@ fn client_and_server_exchange_inputs_and_snapshots() {
         assert_eq!(info.acked_client_tick, acked);
         assert_eq!(info.server_tick, server.server_tick());
         assert_eq!(info.state_hash, server.state().state_hash());
-        assert_eq!(
-            SimulationState::from_state_bytes(&info.state)
-                .unwrap()
-                .state_hash(),
-            server.state().state_hash()
-        );
+        let restored = SimulationState::from_state_bytes(&info.state).unwrap();
+        assert_eq!(restored.tick(), info.server_tick);
+        assert_eq!(restored.state_hash(), server.state().state_hash());
         last_snapshot_state = info.state;
     }
 

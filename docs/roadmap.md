@@ -20,6 +20,10 @@
   and culling decisions; there is no general asset, material, or lighting system.
 - Headless and windowed smoke consumers exercise the public APIs independently
   of the demo. CPU benchmarks exist, but do not establish GPU performance.
+- `fate_engine::diagnostics` provides rolling frame reports, budget
+  classification, and metric sink/source seams. `fate_sim` and `fate_net`
+  expose read-only inspection snapshots. Presentation and export remain
+  consumer-owned.
 
 ## Step 1 — Harden ECS lifecycle and snapshot restoration
 
@@ -47,6 +51,12 @@ live handles.
 
 **Depends on:** Step 1.
 
+**Status: done.** The client requires the packet's `server_tick` to equal the
+tick encoded in the restored state and rejects contradictions before changing
+session state. Regression tests cover inconsistent metadata, stale snapshots,
+rejected packets leaving the session unchanged, and recovery by a subsequent
+valid packet.
+
 - Document the relationship between packet `server_tick` and the tick encoded
   in `SimulationState`; reject contradictions before accepting a snapshot.
 - Test inconsistent ticks, stale snapshots, and recovery by a subsequent valid
@@ -55,6 +65,24 @@ live handles.
 
 **Done when:** Accepted snapshots have an explicit, enforced tick contract and
 invalid metadata cannot advance the client's accepted server tick.
+
+## Diagnostics foundation
+
+**Status: done.** The demo's frame telemetry moved into
+`fate_engine::diagnostics`, preserving the existing report fields and text
+output. The module also defines structured sink/source seams for future
+exporters. `fate_sim` exposes world and simulation snapshots, and `fate_net`
+exposes client/server session snapshots; all are read-only inspection data.
+
+- Keep frame reporting reusable while leaving overlays, HUDs, and external
+  exporters to consumers.
+- Provide read-only snapshots for future renderer, simulation, and networking
+  tooling without adding speculative dependencies.
+- Demonstrate at least one source implementation in the demo and cover the
+  snapshot APIs with tests.
+
+**Done when:** Consumers can obtain frame and session diagnostics without
+duplicating demo-only telemetry, and the engine exposes no presentation policy.
 
 ## Step 3 — Automate the quality gate
 

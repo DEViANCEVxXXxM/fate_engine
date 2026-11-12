@@ -365,8 +365,8 @@ Snapshot validation rejects duplicate free-list IDs and free lists that do not
 cover every dead slot exactly once. It remains a structural invariant check,
 not an authenticity check: successful decoding or a matching checksum does not
 prove that arbitrary external state is trustworthy. The local networking client
-also does not yet cross-check the packet's `server_tick` against the tick in its
-restored state; that contract is tracked in roadmap step 2.
+also requires a snapshot packet's `server_tick` to match the tick encoded in its
+restored state before accepting it.
 
 The fixed ECS component set and 2D systems are still small prototypes; projects
 choose which systems to call and how to interpret commands. The demo's
@@ -460,16 +460,21 @@ inputs and server snapshots; it does not open sockets or authenticate peers.
 - `ServerSession::snapshot_bytes` produces a snapshot packet with the server
   tick, highest acknowledged input tick, and a diagnostic state hash.
 - `ClientSession::receive_snapshot` validates the snapshot schema and hash,
+  requires the packet's `server_tick` to match the tick encoded in the state,
   rejects stale or future acknowledgements and server ticks, and returns the
   accepted snapshot.
 
 Inputs must arrive in order; the transport is responsible for retransmission.
 Client input is untrusted until the application's applier validates it, and
 server snapshots are untrusted until `SimulationState::from_state_bytes`
-accepts them. State hashes are diagnostic only and must not be treated as
-authentication. The crate does not implement transport, encryption, peer
-identity, clock drift compensation, interpolation, ownership, or production
-server policy. `crates/fate_net/tests/loopback.rs` runs both roles end to end.
+accepts them. Snapshot acceptance has an explicit tick contract: `server_tick`
+must equal the tick encoded in `SimulationState`, and accepted server ticks and
+input acknowledgements must not move backwards. A rejected packet leaves the
+client session unchanged, so a later valid snapshot can recover. State hashes
+are diagnostic only and must not be treated as authentication. The crate does
+not implement transport, encryption, peer identity, clock drift compensation,
+interpolation, ownership, or production server policy.
+`crates/fate_net/tests/loopback.rs` runs both roles end to end.
 
 ## 8. Rendering
 
@@ -567,6 +572,38 @@ and do not assume future backend compatibility.
   out-of-order, or stale packets as rejected input, not as partial success;
   the server commits an input only when its applier returns `Ok`.
 
+### Frame diagnostics and metric sinks
+
+`fate_engine::diagnostics` provides reusable, consumer-owned diagnostics:
+
+- `FrameSample` describes one frame's simulation time, render time, and drawn
+  instance count. `FrameDiagnostics` keeps a rolling window and reports a
+  `FrameReport` with averages, worst case, budget headroom, draw pressure, and a
+  `BudgetPolicy` classification.
+- `FrameReport::summary()` returns a stable single-line text form for logs. The
+  structured fields are available for consumers that build their own HUD or
+  metrics output.
+- `DiagnosticSink` receives `(group, name, DiagnosticValue)` tuples;
+  `DiagnosticSource` lets a system contribute values on demand. `NullSink` and
+  `LogSink` are provided, and `Diagnostics` samples frame data and sources
+  together. Exported data is presentation-neutral; the engine does not draw an
+  overlay or choose an external metrics backend.
+
+Read-only inspection snapshots are available from the simulation and protocol
+crates:
+
+- `World::diagnostics()` returns `WorldDiagnostics`: live entities, allocated
+  capacity, free slots, and populated component counts. `Column::count()`
+  reports populated slots in one column.
+- `SimulationState::diagnostics()` returns `SimulationDiagnostics`: tick, world
+  counts, and the diagnostic state hash.
+- `ServerSession::diagnostics()` and `ClientSession::diagnostics()` return
+  session progress (ticks, acknowledgement history, snapshot state). Their
+  simulation/hash fields remain diagnostic checksums, not authentication.
+
+These snapshots are cheap read-only data. Consumers decide how to display,
+log, or export them, and tooling must not become a dependency of the engine.
+
 ## 10. Verification and examples
 
 Run the workspace quality gate after changing engine-facing behavior:
@@ -589,6 +626,8 @@ Useful source references:
   [`projects/demo/src/demo_input.rs`](../projects/demo/src/demo_input.rs) —
   generic input state and a platform-specific mapping.
 - [`src/time.rs`](../src/time.rs) — fixed-step clock.
+- [`src/diagnostics.rs`](../src/diagnostics.rs) — frame reports, budget
+  classification, and metric sink/source seams.
 - [`crates/fate_sim/src/simulation.rs`](../crates/fate_sim/src/simulation.rs)
   and [`crates/fate_sim/src/ecs/`](../crates/fate_sim/src/ecs/) — simulation
   and current ECS.

@@ -10,8 +10,10 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::demo_input::{self, Action, Axis, DemoInput};
 use crate::demo_simulation::DemoSimulation;
-use crate::performance::{FrameBudgetPolicy, FrameProfile, FrameTelemetry, PerformanceStats};
 use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
+use fate_engine::diagnostics::{
+    DiagnosticSink, DiagnosticSource, DiagnosticValue, FrameDiagnostics, FrameSample,
+};
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{Bounds2d, Camera3d, Draw3d, Instance2d, Mesh3d, Renderer};
 use fate_engine::time::Time;
@@ -21,44 +23,8 @@ const CAMERA_BOOST_SPEED: f32 = 8.0;
 const MAX_CAMERA_FRAME_DELTA: f32 = 0.05;
 
 impl App {
-    fn draw_pressure(&self) -> f32 {
-        let budget = Renderer::max_instance_budget() as f32;
-        if budget <= 0.0 {
-            0.0
-        } else {
-            (self.frame_profile.drawn_instances as f32 / budget).clamp(0.0, 1.0)
-        }
-    }
-
-    fn telemetry(&self) -> FrameTelemetry {
-        let (avg_ms, worst_ms) = self.performance.snapshot();
-        let total_ms = self.frame_profile.total_ms();
-        let target_ms = Time::frame_budget_ms() as f32;
-        let draw_limit = Renderer::max_instance_budget();
-        let draw_pressure = self.draw_pressure();
-        let policy = FrameBudgetPolicy::for_frame(total_ms, draw_pressure);
-        let (healthy_frames, warning_frames, critical_frames) = self.performance.budget_breakdown();
-
-        FrameTelemetry {
-            sim_ms: self.frame_profile.sim_ms,
-            render_ms: self.frame_profile.render_ms,
-            total_ms,
-            avg_ms,
-            worst_ms,
-            target_ms,
-            headroom_ms: target_ms - total_ms,
-            draw_count: self.frame_profile.drawn_instances,
-            draw_limit,
-            draw_pressure_pct: draw_pressure * 100.0,
-            healthy_frames,
-            warning_frames,
-            critical_frames,
-            policy,
-        }
-    }
-
-    fn performance_tier(&self) -> FrameBudgetPolicy {
-        FrameBudgetPolicy::for_frame(self.frame_profile.total_ms(), self.draw_pressure())
+    fn telemetry(&self) -> fate_engine::diagnostics::FrameReport {
+        self.frame_diagnostics.report()
     }
 
     fn performance_report(&self) -> String {
@@ -76,9 +42,40 @@ struct App {
     core: DemoSimulation,
     input: DemoInput,
     time: Time,
-    frame_profile: FrameProfile,
-    performance: PerformanceStats,
+    frame_diagnostics: FrameDiagnostics,
     title_timer: f32,
+}
+
+/// Demonstrates the engine's diagnostic-source seam without making the engine
+/// depend on demo types.
+impl DiagnosticSource for App {
+    fn record_diagnostics(&self, sink: &mut dyn DiagnosticSink) {
+        let world = self.core.world.diagnostics();
+        sink.record(
+            "world",
+            "live_entities",
+            DiagnosticValue::Count(world.live_entities as u64),
+        );
+        sink.record(
+            "world",
+            "capacity",
+            DiagnosticValue::Count(world.capacity as u64),
+        );
+        sink.record(
+            "world",
+            "free_slots",
+            DiagnosticValue::Count(world.free_slots as u64),
+        );
+
+        let frame = self.frame_diagnostics.report();
+        sink.record("frame", "total_ms", DiagnosticValue::Millis(frame.total_ms));
+        sink.record(
+            "frame",
+            "drawn",
+            DiagnosticValue::Count(frame.draw_count as u64),
+        );
+        sink.record("frame", "tier", DiagnosticValue::Text(frame.policy.label()));
+    }
 }
 
 impl App {
@@ -93,8 +90,9 @@ impl App {
             core: DemoSimulation::new(),
             input: demo_input::new(),
             time: Time::new(SIMULATION_HZ as f32),
-            frame_profile: FrameProfile::default(),
-            performance: PerformanceStats::default(),
+            frame_diagnostics: FrameDiagnostics::with_default_target(
+                Renderer::max_instance_budget(),
+            ),
             title_timer: 0.0,
         }
     }
@@ -141,25 +139,11 @@ impl App {
         };
         let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
 
-        self.frame_profile = FrameProfile {
-            sim_ms,
-            render_ms,
-            drawn_instances: draw_budget,
-        };
-        let policy = self.performance_tier();
-        self.performance
-            .record_budget(self.frame_profile.total_ms(), policy, self.draw_pressure());
+        let sample = FrameSample::new(sim_ms, render_ms, draw_budget);
+        let report = self.frame_diagnostics.record(sample);
 
-        if self.frame_profile.over_budget() {
-            let (avg_ms, worst_ms) = self.performance.snapshot();
-            let tier = self.performance_tier();
-            log::warn!(
-                "frame budget exceeded: {} avg={:.2}ms worst={:.2}ms tier={}",
-                self.performance_report(),
-                avg_ms,
-                worst_ms,
-                tier.label(),
-            );
+        if sample.total_ms() > Time::frame_budget_ms() as f32 {
+            log::warn!("frame budget exceeded: {}", report.summary());
         }
 
         self.update_title(frame_dt);
@@ -612,7 +596,7 @@ pub async fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::performance::PerformanceStats;
+    use fate_engine::diagnostics::BudgetPolicy;
     use fate_engine::renderer::Camera3d;
     use fate_sim::ecs::Position;
     use fate_sim::math::{Fixed, FixedVec2};
@@ -625,21 +609,18 @@ mod tests {
 
         assert!(!rendered);
         assert_eq!(app.core.world.entity_count(), 40);
-        assert!(app.frame_profile.sim_ms >= 0.0);
-        assert!(app.frame_profile.render_ms >= 0.0);
-        assert!(app.frame_profile.total_ms() >= 0.0);
+        let report = app.frame_diagnostics.report();
+        assert!(report.sim_ms >= 0.0);
+        assert!(report.render_ms >= 0.0);
+        assert!(report.total_ms >= 0.0);
     }
 
     #[test]
-    fn frame_profile_reports_budget_exceedance() {
-        let profile = FrameProfile {
-            sim_ms: 4.0,
-            render_ms: 5.0,
-            drawn_instances: 3,
-        };
+    fn frame_sample_reports_budget_exceedance() {
+        let sample = FrameSample::new(4.0, 5.0, 3);
 
-        assert!(profile.over_budget());
-        assert!((profile.total_ms() - 9.0).abs() < 1e-5);
+        assert!(sample.total_ms() > Time::frame_budget_ms() as f32);
+        assert!((sample.total_ms() - 9.0).abs() < 1e-5);
     }
 
     #[test]
@@ -675,97 +656,86 @@ mod tests {
     }
 
     #[test]
-    fn performance_stats_roll_and_average_recent_frames() {
-        let mut stats = PerformanceStats::default();
-        stats.add(4.0);
-        stats.add(6.0);
-        stats.add(8.0);
+    fn frame_diagnostics_roll_and_average_recent_frames() {
+        let mut diagnostics =
+            FrameDiagnostics::with_default_target(Renderer::max_instance_budget());
+        diagnostics.record(FrameSample::new(4.0, 0.0, 0));
+        diagnostics.record(FrameSample::new(6.0, 0.0, 0));
+        let report = diagnostics.record(FrameSample::new(8.0, 0.0, 0));
 
-        assert!((stats.average_ms() - 6.0).abs() < 1e-5);
-        assert!((stats.worst_ms() - 8.0).abs() < 1e-5);
-        assert_eq!(stats.recent_count, 3);
-        let (avg, worst) = stats.snapshot();
-        assert!((avg - 6.0).abs() < 1e-5);
-        assert!((worst - 8.0).abs() < 1e-5);
+        assert!((report.avg_ms - 6.0).abs() < 1e-5);
+        assert!((report.worst_ms - 8.0).abs() < 1e-5);
+        assert_eq!(diagnostics.stats().recent_count(), 3);
     }
 
     #[test]
-    fn performance_stats_track_budget_policy_breakdown() {
-        let mut stats = PerformanceStats::default();
+    fn frame_diagnostics_track_budget_policy_breakdown() {
+        let mut diagnostics = FrameDiagnostics::new(8.0, 256);
 
-        stats.record_budget(7.0, FrameBudgetPolicy::Healthy, 0.25);
-        stats.record_budget(9.0, FrameBudgetPolicy::Warning, 0.8);
-        stats.record_budget(12.0, FrameBudgetPolicy::Critical, 1.0);
+        diagnostics.record(FrameSample::new(7.0, 0.0, 64));
+        diagnostics.record(FrameSample::new(9.0, 0.0, 204));
+        let report = diagnostics.record(FrameSample::new(12.0, 0.0, 256));
 
-        let (healthy, warning, critical) = stats.budget_breakdown();
-        assert_eq!((healthy, warning, critical), (1, 1, 1));
-        assert!((stats.peak_draw_pressure_pct() - 100.0).abs() < 1e-5);
+        assert_eq!(
+            (
+                report.healthy_frames,
+                report.warning_frames,
+                report.critical_frames
+            ),
+            (1, 1, 1)
+        );
+        assert!((diagnostics.stats().peak_draw_pressure_pct() - 100.0).abs() < 1e-5);
     }
 
     #[test]
-    fn performance_report_contains_budget_summary() {
+    fn frame_report_contains_budget_summary() {
         let mut app = App::new();
-        app.frame_profile = FrameProfile {
-            sim_ms: 3.0,
-            render_ms: 4.0,
-            drawn_instances: 2,
-        };
-        app.performance.add(7.0);
-        app.performance.add(9.0);
+        let report = app.frame_diagnostics.record(FrameSample::new(3.0, 4.0, 2));
 
-        let report = app.performance_report();
-        assert!(report.contains("drawn=2/256"));
-        assert!(report.contains("load=0.8%"));
-        assert!(report.contains("total=7.0ms"));
-        assert!(report.contains("target=8.0ms"));
-        assert!(report.contains("headroom=1.0ms"));
-        assert!(report.contains("tier=healthy"));
+        let summary = report.summary();
+        assert!(summary.contains("drawn=2/256"));
+        assert!(summary.contains("load=0.8%"));
+        assert!(summary.contains("total=7.0ms"));
+        assert!(summary.contains("target=8.0ms"));
+        assert!(summary.contains("headroom=1.0ms"));
+        assert!(summary.contains("tier=healthy"));
     }
 
     #[test]
-    fn performance_tier_classifies_warning_and_critical_budget_slips() {
+    fn frame_diagnostics_classifies_warning_and_critical_budget_slips() {
         let mut app = App::new();
-        app.frame_profile = FrameProfile {
-            sim_ms: 8.0,
-            render_ms: 2.0,
-            drawn_instances: 4,
-        };
-        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Warning);
+        let report = app.frame_diagnostics.record(FrameSample::new(8.0, 2.0, 4));
+        assert_eq!(report.policy, BudgetPolicy::Warning);
 
-        app.frame_profile = FrameProfile {
-            sim_ms: 10.0,
-            render_ms: 10.0,
-            drawn_instances: 8,
-        };
-        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Critical);
+        let report = app
+            .frame_diagnostics
+            .record(FrameSample::new(10.0, 10.0, 8));
+        assert_eq!(report.policy, BudgetPolicy::Critical);
     }
 
     #[test]
     fn draw_pressure_tracks_budget_usage() {
         let mut app = App::new();
-        app.frame_profile.drawn_instances = 192;
-        assert!((app.draw_pressure() - 0.75).abs() < 1e-5);
+        app.frame_diagnostics
+            .record(FrameSample::new(0.0, 0.0, 192));
+        assert!((app.frame_diagnostics.draw_pressure() - 0.75).abs() < 1e-5);
 
-        app.frame_profile.drawn_instances = 256;
-        assert!((app.draw_pressure() - 1.0).abs() < 1e-5);
+        app.frame_diagnostics
+            .record(FrameSample::new(0.0, 0.0, 256));
+        assert!((app.frame_diagnostics.draw_pressure() - 1.0).abs() < 1e-5);
     }
 
     #[test]
     fn telemetry_snapshot_exposes_machine_readable_budget_data() {
         let mut app = App::new();
-        app.frame_profile = FrameProfile {
-            sim_ms: 3.0,
-            render_ms: 4.0,
-            drawn_instances: 128,
-        };
-        app.performance.add(7.0);
-        app.performance.add(9.0);
+        app.frame_diagnostics
+            .record(FrameSample::new(3.0, 4.0, 128));
 
         let telemetry = app.telemetry();
         assert_eq!(telemetry.draw_count, 128);
         assert_eq!(telemetry.draw_limit, Renderer::max_instance_budget());
         assert!(telemetry.draw_pressure_pct > 0.0);
-        assert_eq!(telemetry.policy, FrameBudgetPolicy::Healthy);
+        assert_eq!(telemetry.policy, BudgetPolicy::Healthy);
         assert!(telemetry.summary().contains("tier=healthy"));
     }
 
@@ -778,7 +748,7 @@ mod tests {
 
         assert!(!rendered);
         assert!(app.core.world.entity_count() >= 1);
-        assert!(app.frame_profile.total_ms() >= 0.0);
+        assert!(app.frame_diagnostics.report().total_ms >= 0.0);
         assert!(
             !app.input
                 .button_just_pressed(winit::keyboard::KeyCode::KeyA)
@@ -794,7 +764,7 @@ mod tests {
 
         assert!(!rendered);
         assert_eq!(app.core.world.entity_count(), 40);
-        assert!(app.frame_profile.total_ms() >= 0.0);
+        assert!(app.frame_diagnostics.report().total_ms >= 0.0);
     }
 
     #[test]
@@ -833,9 +803,11 @@ mod tests {
 
         assert_eq!(app.instances().len(), 192);
         assert_eq!(app.core.world.entity_count(), 200);
-        app.frame_profile.drawn_instances = app.instances().len();
-        assert!((app.draw_pressure() - 0.75).abs() < 1e-5);
-        assert_eq!(app.performance_tier(), FrameBudgetPolicy::Warning);
+        let drawn = app.instances().len();
+        app.frame_diagnostics
+            .record(FrameSample::new(0.0, 0.0, drawn));
+        assert!((app.frame_diagnostics.draw_pressure() - 0.75).abs() < 1e-5);
+        assert_eq!(app.frame_diagnostics.policy(), BudgetPolicy::Warning);
 
         app.core.set_demo_stress(false);
         assert_eq!(app.instances().len(), 32);
@@ -984,5 +956,39 @@ mod tests {
         app.input.press(KeyCode::KeyW);
 
         assert_eq!(app.simulation_input(), SimulationInput::default());
+    }
+
+    #[derive(Default)]
+    struct TestSink {
+        entries: Vec<(&'static str, &'static str, DiagnosticValue)>,
+    }
+
+    impl DiagnosticSink for TestSink {
+        fn record(&mut self, group: &'static str, name: &'static str, value: DiagnosticValue) {
+            self.entries.push((group, name, value));
+        }
+    }
+
+    #[test]
+    fn app_exposes_diagnostics_through_the_source_seam() {
+        let mut app = App::new();
+        app.frame_diagnostics.record(FrameSample::new(3.0, 4.0, 32));
+
+        let mut sink = TestSink::default();
+        app.record_diagnostics(&mut sink);
+
+        assert!(sink.entries.contains(&(
+            "world",
+            "live_entities",
+            DiagnosticValue::Count(app.core.world.entity_count() as u64)
+        )));
+        assert!(
+            sink.entries
+                .contains(&("frame", "total_ms", DiagnosticValue::Millis(7.0)))
+        );
+        assert!(
+            sink.entries
+                .contains(&("frame", "tier", DiagnosticValue::Text("healthy")))
+        );
     }
 }

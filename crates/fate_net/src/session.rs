@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::fmt;
 
-use fate_sim::simulation::{SimulationState, SimulationStateError};
+use fate_sim::simulation::{SimulationDiagnostics, SimulationState, SimulationStateError};
 
 use crate::protocol::{Limits, Packet, ProtocolError};
 
@@ -52,6 +52,19 @@ pub struct ServerSession {
     next_client_tick: u64,
 }
 
+/// Read-only snapshot of server session state for tooling and diagnostics.
+///
+/// `simulation.state_hash` is a diagnostic checksum, not authentication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ServerDiagnostics {
+    pub server_tick: u64,
+    pub next_client_tick: u64,
+    pub last_acked_client_tick: Option<u64>,
+    pub acked_history_len: usize,
+    pub max_ack_history: usize,
+    pub simulation: SimulationDiagnostics,
+}
+
 impl ServerSession {
     pub fn new(limits: Limits) -> Result<Self, ServerError> {
         Self::with_state(limits, SimulationState::new())
@@ -92,6 +105,18 @@ impl ServerSession {
 
     pub fn acked_history_len(&self) -> usize {
         self.applied_inputs.len()
+    }
+
+    /// Capture a read-only snapshot of session and simulation state.
+    pub fn diagnostics(&self) -> ServerDiagnostics {
+        ServerDiagnostics {
+            server_tick: self.state.tick(),
+            next_client_tick: self.next_client_tick,
+            last_acked_client_tick: self.last_acked_client_tick(),
+            acked_history_len: self.applied_inputs.len(),
+            max_ack_history: self.limits.max_ack_history,
+            simulation: self.state.diagnostics(),
+        }
     }
 
     /// Decode and validate an input packet, then apply it transactionally.
@@ -156,6 +181,7 @@ pub enum ClientError {
     UnexpectedPacket,
     InvalidSnapshot(SimulationStateError),
     InvalidStartTick,
+    TickMismatch { packet: u64, state: u64 },
     AckAheadOfInput { acked: u64, highest_sent: u64 },
     StaleAck { previous: u64, received: u64 },
     StaleServerTick { previous: u64, received: u64 },
@@ -169,6 +195,10 @@ impl fmt::Display for ClientError {
             Self::UnexpectedPacket => formatter.write_str("expected a snapshot packet"),
             Self::InvalidSnapshot(error) => write!(formatter, "invalid snapshot: {error}"),
             Self::InvalidStartTick => formatter.write_str("next input tick must be at least 1"),
+            Self::TickMismatch { packet, state } => write!(
+                formatter,
+                "snapshot server tick {packet} does not match encoded state tick {state}"
+            ),
             Self::AckAheadOfInput {
                 acked,
                 highest_sent,
@@ -211,6 +241,15 @@ pub struct ClientSession {
     has_snapshot: bool,
 }
 
+/// Read-only snapshot of client session state for tooling and diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClientDiagnostics {
+    pub next_input_tick: u64,
+    pub last_acked_input_tick: u64,
+    pub last_server_tick: u64,
+    pub has_snapshot: bool,
+}
+
 impl ClientSession {
     pub fn new(limits: Limits) -> Result<Self, ClientError> {
         Self::with_next_input_tick(limits, 1)
@@ -245,6 +284,16 @@ impl ClientSession {
         self.last_server_tick
     }
 
+    /// Capture a read-only snapshot of client session state.
+    pub fn diagnostics(&self) -> ClientDiagnostics {
+        ClientDiagnostics {
+            next_input_tick: self.next_input_tick,
+            last_acked_input_tick: self.last_acked_input_tick,
+            last_server_tick: self.last_server_tick,
+            has_snapshot: self.has_snapshot,
+        }
+    }
+
     /// Encode an input for the next client tick and advance the tick counter.
     pub fn make_input(&mut self, input: Vec<u8>) -> Result<Vec<u8>, ClientError> {
         let tick = self.next_input_tick;
@@ -260,9 +309,10 @@ impl ClientSession {
 
     /// Validate and accept a server snapshot.
     ///
-    /// The session is unchanged on error. The returned snapshot has already
-    /// passed `SimulationState::from_state_bytes`, but callers must still treat
-    /// its contents as untrusted application data.
+    /// The packet's `server_tick` must equal the tick encoded in the snapshot
+    /// state. The session is unchanged on error. The returned snapshot has
+    /// already passed `SimulationState::from_state_bytes`, but callers must
+    /// still treat its contents as untrusted application data.
     pub fn receive_snapshot(&mut self, bytes: &[u8]) -> Result<SnapshotInfo, ClientError> {
         let packet = Packet::decode(bytes, &self.limits).map_err(ClientError::Protocol)?;
         let Packet::Snapshot {
@@ -285,6 +335,13 @@ impl ClientSession {
                 expected: state_hash,
                 actual,
             }));
+        }
+        let state_tick = restored.tick();
+        if state_tick != server_tick {
+            return Err(ClientError::TickMismatch {
+                packet: server_tick,
+                state: state_tick,
+            });
         }
 
         let highest_sent = self.next_input_tick.saturating_sub(1);
@@ -462,17 +519,20 @@ mod tests {
             })
         );
 
+        // A stale server tick must carry a matching state tick; otherwise the
+        // tick-consistency check rejects it first.
+        let older = SimulationState::new();
         let stale_tick = Packet::Snapshot {
-            server_tick: server_tick - 1,
+            server_tick: 0,
             acked_client_tick,
-            state_hash,
-            state,
+            state_hash: older.state_hash(),
+            state: older.state_bytes(),
         };
         assert_eq!(
             client.receive_snapshot(&stale_tick.encode(&limits).unwrap()),
             Err(ClientError::StaleServerTick {
                 previous: server_tick,
-                received: server_tick - 1,
+                received: 0,
             })
         );
     }
@@ -534,6 +594,91 @@ mod tests {
     }
 
     #[test]
+    fn client_rejects_snapshot_tick_that_disagrees_with_state() {
+        let limits = Limits::default();
+        let mut server = ServerSession::new(limits).unwrap();
+        let mut client = ClientSession::new(limits).unwrap();
+        let input = client.make_input(vec![1]).unwrap();
+        server.accept_input(&input, apply_rng).unwrap();
+
+        let Packet::Snapshot {
+            server_tick,
+            acked_client_tick,
+            state_hash,
+            state,
+        } = server.snapshot()
+        else {
+            panic!("expected snapshot");
+        };
+
+        for claimed in [server_tick + 1, server_tick.saturating_sub(1)] {
+            let mismatched = Packet::Snapshot {
+                server_tick: claimed,
+                acked_client_tick,
+                state_hash,
+                state: state.clone(),
+            };
+            assert_eq!(
+                client.receive_snapshot(&mismatched.encode(&limits).unwrap()),
+                Err(ClientError::TickMismatch {
+                    packet: claimed,
+                    state: server_tick,
+                })
+            );
+        }
+
+        assert_eq!(client.last_server_tick(), 0);
+        assert_eq!(client.last_acked_input_tick(), 0);
+    }
+
+    #[test]
+    fn client_recovers_after_rejecting_an_inconsistent_snapshot() {
+        let limits = Limits::default();
+        let mut server = ServerSession::new(limits).unwrap();
+        let mut client = ClientSession::new(limits).unwrap();
+
+        let input = client.make_input(vec![1]).unwrap();
+        server.accept_input(&input, apply_rng).unwrap();
+        let accepted = client
+            .receive_snapshot(&server.snapshot_bytes().unwrap())
+            .unwrap();
+        assert_eq!(accepted.server_tick, 1);
+        assert_eq!(client.last_server_tick(), 1);
+        assert_eq!(client.last_acked_input_tick(), 1);
+
+        let Packet::Snapshot {
+            server_tick,
+            acked_client_tick,
+            state_hash,
+            state,
+        } = server.snapshot()
+        else {
+            panic!("expected snapshot");
+        };
+        let inconsistent = Packet::Snapshot {
+            server_tick: server_tick + 2,
+            acked_client_tick,
+            state_hash,
+            state,
+        };
+        assert!(matches!(
+            client.receive_snapshot(&inconsistent.encode(&limits).unwrap()),
+            Err(ClientError::TickMismatch { .. })
+        ));
+        assert_eq!(client.last_server_tick(), 1);
+        assert_eq!(client.last_acked_input_tick(), 1);
+
+        let input = client.make_input(vec![1]).unwrap();
+        server.accept_input(&input, apply_rng).unwrap();
+        let accepted = client
+            .receive_snapshot(&server.snapshot_bytes().unwrap())
+            .unwrap();
+        assert_eq!(accepted.server_tick, 2);
+        assert_eq!(client.last_server_tick(), 2);
+        assert_eq!(client.last_acked_input_tick(), 2);
+    }
+
+    #[test]
     fn server_and_client_resume_from_an_aligned_tick() {
         let limits = Limits::default();
         let mut state = SimulationState::with_seed(99);
@@ -560,5 +705,56 @@ mod tests {
             ClientSession::with_next_input_tick(Limits::default(), 0).err(),
             Some(ClientError::InvalidStartTick)
         );
+    }
+
+    #[test]
+    fn server_diagnostics_track_ticks_ack_history_and_simulation() {
+        let limits = Limits::default();
+        let mut server = ServerSession::new(limits).unwrap();
+        let mut client = ClientSession::new(limits).unwrap();
+
+        let initial = server.diagnostics();
+        assert_eq!(initial.server_tick, 0);
+        assert_eq!(initial.next_client_tick, 1);
+        assert_eq!(initial.last_acked_client_tick, None);
+        assert_eq!(initial.acked_history_len, 0);
+        assert_eq!(initial.max_ack_history, limits.max_ack_history);
+        assert_eq!(initial.simulation.state_hash, server.state().state_hash());
+
+        let input = client.make_input(vec![2]).unwrap();
+        server.accept_input(&input, apply_rng).unwrap();
+
+        let updated = server.diagnostics();
+        assert_eq!(updated.server_tick, 1);
+        assert_eq!(updated.next_client_tick, 2);
+        assert_eq!(updated.last_acked_client_tick, Some(1));
+        assert_eq!(updated.acked_history_len, 1);
+        assert_eq!(updated.simulation.tick, 1);
+        assert_eq!(updated.simulation.state_hash, server.state().state_hash());
+    }
+
+    #[test]
+    fn client_diagnostics_track_input_and_snapshot_progress() {
+        let limits = Limits::default();
+        let mut server = ServerSession::new(limits).unwrap();
+        let mut client = ClientSession::new(limits).unwrap();
+
+        let initial = client.diagnostics();
+        assert_eq!(initial.next_input_tick, 1);
+        assert_eq!(initial.last_acked_input_tick, 0);
+        assert_eq!(initial.last_server_tick, 0);
+        assert!(!initial.has_snapshot);
+
+        let input = client.make_input(vec![1]).unwrap();
+        server.accept_input(&input, apply_rng).unwrap();
+        client
+            .receive_snapshot(&server.snapshot_bytes().unwrap())
+            .unwrap();
+
+        let updated = client.diagnostics();
+        assert_eq!(updated.next_input_tick, 2);
+        assert_eq!(updated.last_acked_input_tick, 1);
+        assert_eq!(updated.last_server_tick, 1);
+        assert!(updated.has_snapshot);
     }
 }

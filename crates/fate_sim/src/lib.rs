@@ -5,4 +5,6 @@ pub mod math;
 pub mod rng;
 pub mod simulation;
 
-pub use simulation::{SimulationState, SimulationStateError, StateHasher, StateWriter};
+pub use simulation::{
+    SimulationDiagnostics, SimulationState, SimulationStateError, StateHasher, StateWriter,
+};

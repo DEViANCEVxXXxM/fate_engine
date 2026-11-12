@@ -157,6 +157,14 @@ impl<T: Copy> Column<T> {
         self.data.len()
     }
 
+    /// Number of populated component slots.
+    ///
+    /// This counts live entries only; slots retained for dead or never-populated
+    /// entity IDs are not included.
+    pub fn count(&self) -> usize {
+        self.data.iter().filter(|slot| slot.is_some()).count()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -232,6 +240,28 @@ pub struct World {
     pub(super) velocities: Column<Velocity>,
     pub(super) rotations: Column<Rotation>,
     pub(super) spins: Column<Spin>,
+}
+
+/// Read-only snapshot of world storage and component occupancy.
+///
+/// This is inspection data for tooling and diagnostics. It deliberately has no
+/// behavior and does not expose mutable storage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WorldDiagnostics {
+    /// Entities that are currently alive.
+    pub live_entities: usize,
+    /// Entity slots allocated so far, including dead and recycled slots.
+    pub capacity: usize,
+    /// Slots waiting in the free list for reuse.
+    pub free_slots: usize,
+    /// Populated position components.
+    pub positions: usize,
+    /// Populated velocity components.
+    pub velocities: usize,
+    /// Populated rotation components.
+    pub rotations: usize,
+    /// Populated spin components.
+    pub spins: usize,
 }
 
 impl Default for World {
@@ -322,6 +352,19 @@ impl World {
     /// Return the total number of entity slots allocated so far.
     pub fn capacity(&self) -> usize {
         self.next_id as usize
+    }
+
+    /// Capture a read-only snapshot of world storage and component occupancy.
+    pub fn diagnostics(&self) -> WorldDiagnostics {
+        WorldDiagnostics {
+            live_entities: self.entity_count(),
+            capacity: self.capacity(),
+            free_slots: self.free_list.len(),
+            positions: self.positions.count(),
+            velocities: self.velocities.count(),
+            rotations: self.rotations.count(),
+            spins: self.spins.count(),
+        }
     }
 
     /// Return the current generation of an entity slot.
@@ -647,6 +690,35 @@ mod tests {
         assert!(!world.despawn(e));
         assert_eq!(world.entity_count(), 0);
         assert_eq!(world.free_list.len(), 1);
+    }
+
+    #[test]
+    fn diagnostics_report_live_entities_and_component_occupancy() {
+        let mut world = World::new();
+        let first = world.spawn();
+        let second = world.spawn();
+        let dead = world.spawn();
+        world
+            .set_position(first, Position(FixedVec2::ZERO))
+            .unwrap();
+        world
+            .set_velocity(first, Velocity(FixedVec2::ZERO))
+            .unwrap();
+        world
+            .set_position(second, Position(FixedVec2::ZERO))
+            .unwrap();
+        world.set_rotation(second, Rotation(Fixed::ZERO)).unwrap();
+        world.despawn(dead);
+
+        let diagnostics = world.diagnostics();
+        assert_eq!(diagnostics.live_entities, 2);
+        assert_eq!(diagnostics.capacity, 3);
+        assert_eq!(diagnostics.free_slots, 1);
+        assert_eq!(diagnostics.positions, 2);
+        assert_eq!(diagnostics.velocities, 1);
+        assert_eq!(diagnostics.rotations, 1);
+        assert_eq!(diagnostics.spins, 0);
+        assert_eq!(world.positions().count(), 2);
     }
 
     #[test]

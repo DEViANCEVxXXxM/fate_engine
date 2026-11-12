@@ -8,4 +8,4 @@ mod system;
 mod world;
 
 pub use system::{bounds_system, movement_system, spin_system};
-pub use world::{EcsError, Entity, Position, Rotation, Spin, Velocity, World};
+pub use world::{EcsError, Entity, Position, Rotation, Spin, Velocity, World, WorldDiagnostics};

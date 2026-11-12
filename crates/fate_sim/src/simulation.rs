@@ -96,6 +96,17 @@ pub struct SimulationState {
     rng: DeterministicRng,
 }
 
+/// Read-only snapshot of simulation state for tooling and diagnostics.
+///
+/// `state_hash` is the same diagnostic checksum as
+/// [`SimulationState::state_hash`]; it is not authentication.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimulationDiagnostics {
+    pub tick: u64,
+    pub world: crate::ecs::WorldDiagnostics,
+    pub state_hash: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimulationStateError {
     BadMagic,
@@ -219,6 +230,18 @@ impl SimulationState {
         hasher.finish()
     }
 
+    /// Capture a read-only snapshot of simulation and world state.
+    ///
+    /// The hash is the same diagnostic checksum as [`Self::state_hash`]; it
+    /// detects deterministic divergence but does not authenticate data.
+    pub fn diagnostics(&self) -> SimulationDiagnostics {
+        SimulationDiagnostics {
+            tick: self.tick,
+            world: self.world.diagnostics(),
+            state_hash: self.state_hash(),
+        }
+    }
+
     fn read_bytes<const N: usize>(
         bytes: &[u8],
         offset: &mut usize,
@@ -262,6 +285,24 @@ mod tests {
         });
 
         assert_eq!(streamed_hash, manual_hash);
+    }
+
+    #[test]
+    fn diagnostics_report_tick_world_and_state_hash() {
+        let mut state = SimulationState::with_seed(7);
+        let entity = state.world.spawn();
+        state
+            .world
+            .set_position(entity, Position(FixedVec2::ZERO))
+            .unwrap();
+        state.advance_tick().unwrap();
+
+        let diagnostics = state.diagnostics();
+        assert_eq!(diagnostics.tick, 1);
+        assert_eq!(diagnostics.state_hash, state.state_hash());
+        assert_eq!(diagnostics.world.live_entities, 1);
+        assert_eq!(diagnostics.world.positions, 1);
+        assert_eq!(diagnostics.world.velocities, 0);
     }
 
     #[test]
