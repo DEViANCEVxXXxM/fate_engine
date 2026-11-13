@@ -614,6 +614,39 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Automated quality gate
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same
+CPU-only checks on pull requests, branch pushes, and manual dispatches. CI
+uses the current stable Rust toolchain with `rustfmt` and `clippy` on
+`ubuntu-latest`. The local development baseline is Rust 1.99.1 on Windows
+(`x86_64-pc-windows-gnu`); edition 2024 requires Rust 1.85 or newer. CI installs
+the latest stable release, so a newer toolchain may report additional lints.
+
+The workflow runs, in order:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo run -p fate_consumer_smoke --locked
+```
+
+The consumer smoke run is a headless integration check: it exercises input,
+simulation, movement, snapshots, and restoration through the public APIs. It
+does not initialize a window or GPU.
+
+Renderer tests request a test adapter when one is available and skip the GPU
+cases when none exists, so the headless test job still passes on machines
+without graphics hardware. A skipped renderer test is not evidence that
+rendering works.
+
+Windowed and GPU checks are intentionally separate from the required CI job.
+Run `cargo run -p fate_window_smoke` and `cargo run -p fate_demo` manually on a
+machine with a window and graphics adapter when renderer changes need visual
+verification, and record what was exercised. They are not headless checks and
+are not part of the automated gate.
+
 Useful source references:
 
 - [`src/lib.rs`](../src/lib.rs) — engine library module surface.

@@ -89,6 +89,12 @@ duplicating demo-only telemetry, and the engine exposes no presentation policy.
 **Depends on:** Steps 1–2 for the new regression cases; existing checks can be
 added to CI independently.
 
+**Status: done.** `.github/workflows/ci.yml` runs formatting, strict Clippy,
+workspace tests, and the headless consumer smoke check on pull requests, branch
+pushes, and manual dispatches. The workflow uses the stable Rust toolchain on
+`ubuntu-latest`; the local baseline and the separation from windowed/GPU checks
+are documented in the engine guide.
+
 - Add CI for `cargo test --workspace`, `cargo fmt --all -- --check`, and
   `cargo clippy --workspace --all-targets -- -D warnings`.
 - Run the headless smoke consumer as an integration check.

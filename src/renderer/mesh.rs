@@ -281,16 +281,14 @@ mod tests {
     use super::*;
     use crate::math::Vec3;
     use crate::renderer::Camera3d;
+    use crate::renderer::test_support::{skip_without_adapter, test_device};
 
     #[test]
     fn mesh_creation_rejects_empty_and_out_of_bounds_data() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .expect("no adapter available");
-        let (device, _) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .expect("no device available");
+        let Some((device, _queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
 
         assert!(matches!(
             Mesh3d::new(&device, "empty", &[], &[0]),
@@ -315,13 +313,10 @@ mod tests {
 
     #[test]
     fn indexed_meshes_use_depth_testing() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .expect("no adapter available");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .expect("no device available");
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
 
         let triangle = |color| {
             [

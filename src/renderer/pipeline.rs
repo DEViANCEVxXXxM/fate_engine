@@ -202,19 +202,17 @@ impl TrianglePipeline {
 mod tests {
     use super::*;
     use crate::math::{Mat4, Vec3};
+    use crate::renderer::test_support::{skip_without_adapter, test_device};
 
     /// Render the triangle into an offscreen texture and make sure it actually
     /// produced coloured pixels. This is the regression test for the whole
     /// window -> pipeline -> shader path minus the swapchain.
     #[test]
     fn triangle_is_visible_offscreen() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .expect("no adapter available");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .expect("no device available");
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
 
         let size: u32 = 64;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -334,19 +332,17 @@ mod camera_scale_tests {
     use super::*;
     use crate::renderer::Camera2d;
     use crate::renderer::Instance2d;
+    use crate::renderer::test_support::{skip_without_adapter, test_device};
 
     /// Same matrices the app uses on the first frame: default camera, one
     /// instance near the origin. The triangle is small in world units, so this
     /// guards against the ortho projection being wrong.
     #[test]
     fn default_camera_draws_the_triangle() {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let adapter =
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-                .expect("no adapter available");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-                .expect("no device available");
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
 
         let width = 1280u32;
         let height = 720u32;

@@ -4,6 +4,8 @@ mod camera;
 mod gpu;
 mod mesh;
 mod pipeline;
+#[cfg(test)]
+mod test_support;
 mod visibility;
 
 use std::sync::Arc;

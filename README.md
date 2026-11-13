@@ -37,6 +37,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p fate_demo
 ```
 
+CI runs the headless parts of this gate (formatting, Clippy, workspace tests,
+and the consumer smoke test) on pull requests and branch pushes. Windowed and
+GPU checks stay manual; see the
+[engine guide](docs/engine-guide.md#automated-quality-gate).
+
 The CPU-only simulation benchmark does not initialize a window or GPU:
 
 ```powershell
