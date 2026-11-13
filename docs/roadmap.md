@@ -106,6 +106,14 @@ required CPU-only checks do not need a window or GPU adapter.
 
 ## Step 4 — Clarify timing and performance measurements
 
+**Status: done.** `Time::frame_period_ms()` exposes the exact 120 Hz period,
+while `frame_budget_ms()` is documented and tested as the conservative integer
+scheduling value. Presentation-delta clamping, retained backlog, and the
+per-frame step cap are documented and covered by tests.
+`FrameSample`/`FrameReport` now separate simulation, CPU draw-list preparation,
+and CPU render submission; GPU execution is explicitly unmeasured. The
+release-mode `draw_list_bench` provides the repeatable CPU draw-list baseline.
+
 - Distinguish the exact 120 Hz period (approximately 8.333 ms) from the current
   conservative integer 8 ms scheduling/budget value.
 - Document presentation-delta clamping separately from retained simulation

@@ -1,7 +1,8 @@
 //! CPU-side baseline for preparing an indexed-mesh draw list.
 //!
-//! Measures frustum culling and draw-record assembly for a fixed box grid.
-//! It never initializes a GPU, so driver-side submission cost is not included.
+//! Measures frustum culling and draw-record assembly for a fixed box grid. It
+//! never initializes a GPU, so driver-side submission cost and GPU execution
+//! are not included. Run this baseline before choosing batching or instancing.
 //!
 //! Run with:
 //!
@@ -74,16 +75,20 @@ fn main() {
     let candidate_checks = frames * candidates.len() as f64;
     let visible_per_frame = visible_total as f64 / frames;
 
+    println!("grid: {GRID}^3, frames: {FRAMES}, warmup: {WARMUP}");
     println!("candidates: {}", candidates.len());
     println!("visible/frame: {visible_per_frame:.0}");
     println!(
-        "cull+list: {:.1} ns/candidate, {:.1} ns/visible",
+        "draw-list prep: {:.3} ms/frame, {:.1} ns/candidate, {:.1} ns/visible",
+        cull_elapsed.as_secs_f64() * 1000.0 / frames,
         cull_elapsed.as_nanos() as f64 / candidate_checks,
         cull_elapsed.as_nanos() as f64 / black_box(visible_total).max(1) as f64,
     );
     println!(
-        "copy-only: {:.1} ns/candidate, entries {}",
+        "copy-only: {:.3} ms/frame, {:.1} ns/candidate, entries {}",
+        copy_elapsed.as_secs_f64() * 1000.0 / frames,
         copy_elapsed.as_nanos() as f64 / candidate_checks,
         all.len(),
     );
+    println!("note: CPU draw-list baseline only; render submission and GPU execution are excluded");
 }

@@ -114,35 +114,53 @@ impl App {
             return false;
         }
 
-        let render_start = Instant::now();
-        let (rendered, draw_budget) = if self.three_d_mode {
-            if let (Some(renderer), Some(mesh)) = (&mut self.renderer, &self.demo_mesh) {
+        let (rendered, draw_budget, draw_list_ms, submit_ms) = if self.three_d_mode {
+            let draw_start = Instant::now();
+            let (draws, count) = if let (Some(renderer), Some(mesh)) =
+                (&self.renderer, &self.demo_mesh)
+            {
                 let draws = Self::three_d_demo_draws(mesh, &renderer.camera_3d, renderer.aspect());
                 let count = renderer.budgeted_instance_count(draws.len());
-                (renderer.render_meshes(&draws), count)
+                (Some(draws), count)
             } else {
-                (false, 0)
-            }
+                (None, 0)
+            };
+            let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+
+            let submit_start = Instant::now();
+            let rendered =
+                if let (Some(renderer), Some(draws)) = (&mut self.renderer, draws.as_ref()) {
+                    renderer.render_meshes(draws)
+                } else {
+                    false
+                };
+            let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+            (rendered, count, draw_list_ms, submit_ms)
         } else {
+            let draw_start = Instant::now();
             let instances = self.instances();
             let count = self
                 .renderer
                 .as_ref()
                 .map(|renderer| renderer.budgeted_instance_count(instances.len()))
                 .unwrap_or(0);
+            let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+
+            let submit_start = Instant::now();
             let rendered = if let Some(renderer) = &mut self.renderer {
                 renderer.render(&instances)
             } else {
                 false
             };
-            (rendered, count)
+            let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+            (rendered, count, draw_list_ms, submit_ms)
         };
-        let render_ms = render_start.elapsed().as_secs_f32() * 1000.0;
 
-        let sample = FrameSample::new(sim_ms, render_ms, draw_budget);
+        let sample =
+            FrameSample::new(sim_ms, submit_ms, draw_budget).with_draw_list_ms(draw_list_ms);
         let report = self.frame_diagnostics.record(sample);
 
-        if sample.total_ms() > Time::frame_budget_ms() as f32 {
+        if report.total_ms > report.target_ms {
             log::warn!("frame budget exceeded: {}", report.summary());
         }
 
@@ -428,11 +446,12 @@ impl App {
             };
 
             window.set_title(&format!(
-                "fate | {mode_text} | WASD/arrows move, Shift boost, F2 stress {}, F3 3d | {:.0} fps - {} entities - {} / budget {}",
+                "fate | {mode_text} | WASD/arrows move, Shift boost, F2 stress {}, F3 3d | {:.0} fps - {} entities - {} | frame_delta {:.1}ms budget {}",
                 if self.core.demo_stress_enabled() { "on" } else { "off" },
                 self.time.fps(),
                 self.core.world.entity_count(),
                 self.performance_report(),
+                self.time.frame_time_ms(),
                 budget_text,
             ));
         }

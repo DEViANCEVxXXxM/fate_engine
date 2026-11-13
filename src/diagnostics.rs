@@ -17,24 +17,42 @@ use crate::time::Time;
 pub const DEFAULT_FRAME_WINDOW: usize = 60;
 
 /// Timing for one frame, in milliseconds.
+///
+/// The phases are deliberately separate: `sim_ms` is fixed-step simulation
+/// work, `draw_list_ms` is CPU draw-list preparation/culling, and `render_ms`
+/// is CPU render submission. GPU execution time is not measured here.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameSample {
     pub sim_ms: f32,
+    pub draw_list_ms: f32,
     pub render_ms: f32,
     pub drawn_instances: usize,
 }
 
 impl FrameSample {
+    /// Build a sample without a separate draw-list phase.
+    ///
+    /// `render_ms` covers CPU render submission. Use
+    /// [`Self::with_draw_list_ms`] when draw-list preparation is measured
+    /// separately.
     pub const fn new(sim_ms: f32, render_ms: f32, drawn_instances: usize) -> Self {
         Self {
             sim_ms,
+            draw_list_ms: 0.0,
             render_ms,
             drawn_instances,
         }
     }
 
+    /// Attach a separate CPU draw-list preparation measurement.
+    pub const fn with_draw_list_ms(mut self, draw_list_ms: f32) -> Self {
+        self.draw_list_ms = draw_list_ms;
+        self
+    }
+
+    /// Total measured CPU work, excluding GPU execution.
     pub fn total_ms(self) -> f32 {
-        self.sim_ms + self.render_ms
+        self.sim_ms + self.draw_list_ms + self.render_ms
     }
 }
 
@@ -170,6 +188,7 @@ impl FrameStats {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrameReport {
     pub sim_ms: f32,
+    pub draw_list_ms: f32,
     pub render_ms: f32,
     pub total_ms: f32,
     pub avg_ms: f32,
@@ -188,8 +207,9 @@ pub struct FrameReport {
 impl FrameReport {
     pub fn summary(&self) -> String {
         format!(
-            "sim={:.1}ms render={:.1}ms drawn={}/{} load={:.1}% total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms budget=healthy:{}/warning:{}/critical:{} tier={}",
+            "sim={:.1}ms draw_list={:.1}ms render={:.1}ms drawn={}/{} load={:.1}% total={:.1}ms avg={:.1}ms worst={:.1}ms target={:.1}ms headroom={:.1}ms budget=healthy:{}/warning:{}/critical:{} tier={}",
             self.sim_ms,
+            self.draw_list_ms,
             self.render_ms,
             self.draw_count,
             self.draw_limit,
@@ -272,6 +292,7 @@ impl FrameDiagnostics {
 
         FrameReport {
             sim_ms: self.last.sim_ms,
+            draw_list_ms: self.last.draw_list_ms,
             render_ms: self.last.render_ms,
             total_ms,
             avg_ms,
@@ -410,6 +431,11 @@ impl<S: DiagnosticSink> Diagnostics<S> {
             .record("frame", "sim_ms", DiagnosticValue::Millis(report.sim_ms));
         self.sink.record(
             "frame",
+            "draw_list_ms",
+            DiagnosticValue::Millis(report.draw_list_ms),
+        );
+        self.sink.record(
+            "frame",
             "render_ms",
             DiagnosticValue::Millis(report.render_ms),
         );
@@ -525,6 +551,15 @@ mod tests {
     }
 
     #[test]
+    fn frame_sample_keeps_draw_list_and_submission_time_separate() {
+        let sample = FrameSample::new(3.0, 1.5, 12).with_draw_list_ms(2.0);
+        assert!((sample.sim_ms - 3.0).abs() < 1e-6);
+        assert!((sample.draw_list_ms - 2.0).abs() < 1e-6);
+        assert!((sample.render_ms - 1.5).abs() < 1e-6);
+        assert!((sample.total_ms() - 6.5).abs() < 1e-6);
+    }
+
+    #[test]
     fn budget_policy_classifies_time_and_draw_pressure() {
         assert_eq!(
             BudgetPolicy::classify(7.0, 8.0, 0.25),
@@ -602,6 +637,7 @@ mod tests {
         let report = diagnostics.record(FrameSample::new(3.0, 4.0, 2));
 
         let summary = report.summary();
+        assert!(summary.contains("draw_list=0.0ms"));
         assert!(summary.contains("drawn=2/256"));
         assert!(summary.contains("load=0.8%"));
         assert!(summary.contains("total=7.0ms"));
@@ -617,6 +653,11 @@ mod tests {
         diagnostics.record_frame(FrameSample::new(3.0, 4.0, 128));
 
         assert_eq!(diagnostics.sink().flushes, 1);
+        assert!(diagnostics.sink().entries.contains(&(
+            "frame",
+            "draw_list_ms",
+            DiagnosticValue::Millis(0.0)
+        )));
         assert!(diagnostics.sink().entries.contains(&(
             "frame",
             "total_ms",

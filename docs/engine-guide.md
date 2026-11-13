@@ -297,19 +297,21 @@ fn main() {
 }
 ```
 
-`tick()` returns a frame delta clamped to 0.1 seconds for presentation work,
-but adds the full wall-clock delta to the fixed accumulator. This prevents a
-long frame from silently discarding simulation time. `next_fixed_step()` runs
-at most eight ticks per frame; any backlog is preserved for subsequent frames.
-Use `is_catching_up()` or `pending_fixed_steps()` to observe that backlog.
-`alpha()` remains the fractional remainder for interpolation and excludes
-queued whole ticks, so the rendered state can temporarily lag wall time while
-the simulation catches up.
+`tick()` returns a frame delta clamped to `MAX_FRAME_DELTA_SECONDS` (0.1 s) for
+presentation work, but adds the full wall-clock delta to the fixed accumulator.
+This prevents a long frame from silently discarding simulation time. The
+retained backlog is separate from the clamped presentation delta:
+`next_fixed_step()` runs at most `MAX_FIXED_STEPS_PER_FRAME` (eight) ticks per
+frame, and any remaining backlog stays queued for subsequent frames. Use
+`is_catching_up()` or `pending_fixed_steps()` to observe that backlog. `alpha()`
+remains the fractional remainder for interpolation and excludes queued whole
+ticks, so the rendered state can temporarily lag wall time while the simulation
+catches up.
 
-The exact period at 120 Hz is approximately 8.333 ms. The current
-`Time::frame_budget_ms()` helper returns a conservative integer 8 ms value for
-scheduling and budget checks; it is not the exact tick period or a guarantee of
-120 presented frames per second.
+`Time::frame_period_ms()` returns the exact target period at 120 Hz
+(approximately 8.333 ms). `Time::frame_budget_ms()` returns a deliberately
+conservative integer 8 ms value for scheduling and budget checks; it is not the
+exact tick period and does not guarantee 120 presented frames per second.
 
 The demo keeps its simulation active after focus loss, clears held input and
 mouse motion to avoid stuck controls, skips rendering, and throttles redraws to
@@ -576,10 +578,11 @@ and do not assume future backend compatibility.
 
 `fate_engine::diagnostics` provides reusable, consumer-owned diagnostics:
 
-- `FrameSample` describes one frame's simulation time, render time, and drawn
-  instance count. `FrameDiagnostics` keeps a rolling window and reports a
+- `FrameSample` describes one frame's measured CPU phases: fixed-step
+  simulation, draw-list preparation, and render submission. It also carries the
+  drawn instance count. `FrameDiagnostics` keeps a rolling window and reports a
   `FrameReport` with averages, worst case, budget headroom, draw pressure, and a
-  `BudgetPolicy` classification.
+  `BudgetPolicy` classification. GPU execution time is not measured.
 - `FrameReport::summary()` returns a stable single-line text form for logs. The
   structured fields are available for consumers that build their own HUD or
   metrics output.
@@ -647,6 +650,31 @@ machine with a window and graphics adapter when renderer changes need visual
 verification, and record what was exercised. They are not headless checks and
 are not part of the automated gate.
 
+### Performance measurement
+
+Keep these measurements distinct; they answer different questions:
+
+- `fate_sim_bench` measures fixed-step simulation work only.
+- `draw_list_bench` measures CPU frustum culling and draw-list assembly only.
+  It does not initialize a GPU, so render submission and GPU execution are
+  excluded.
+- `FrameSample`/`FrameReport` separate simulation, CPU draw-list preparation,
+  and CPU render submission. GPU execution time is not measured; adding it
+  would require backend timestamp queries.
+
+Run performance commands in release mode against a fixed workload:
+
+```powershell
+cargo run --release -p fate_sim_bench -- --ticks 10000
+cargo run --release -p fate_engine --example draw_list_bench
+```
+
+Record the toolchain, platform, workload, and build profile with any result.
+Do not compare numbers across machines or claim a full-frame/GPU improvement
+from a simulation-only or draw-list-only baseline. Establish a repeatable
+draw-list/submission baseline before choosing batching, instancing, or other
+submission changes.
+
 Useful source references:
 
 - [`src/lib.rs`](../src/lib.rs) — engine library module surface.
@@ -658,9 +686,12 @@ Useful source references:
 - [`src/input.rs`](../src/input.rs) and
   [`projects/demo/src/demo_input.rs`](../projects/demo/src/demo_input.rs) —
   generic input state and a platform-specific mapping.
-- [`src/time.rs`](../src/time.rs) — fixed-step clock.
-- [`src/diagnostics.rs`](../src/diagnostics.rs) — frame reports, budget
+- [`src/time.rs`](../src/time.rs) — fixed-step clock, exact frame period, and
+  conservative scheduling budget.
+- [`src/diagnostics.rs`](../src/diagnostics.rs) — frame phase reports, budget
   classification, and metric sink/source seams.
+- [`examples/draw_list_bench.rs`](../examples/draw_list_bench.rs) — repeatable
+  CPU draw-list baseline.
 - [`crates/fate_sim/src/simulation.rs`](../crates/fate_sim/src/simulation.rs)
   and [`crates/fate_sim/src/ecs/`](../crates/fate_sim/src/ecs/) — simulation
   and current ECS.

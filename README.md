@@ -53,6 +53,15 @@ and entity-load scenarios against the 120 Hz simulation budget. Use `--release`
 for less noisy results; this is simulation-only timing, not a full-frame or GPU
 performance guarantee.
 
+The CPU draw-list baseline is separate and does not initialize a GPU:
+
+```powershell
+cargo run --release -p fate_engine --example draw_list_bench
+```
+
+It measures frustum culling and draw-record assembly only. Render submission
+and GPU execution are excluded, so it is not a full-frame measurement.
+
 ## Documentation
 
 - [Engine guide](docs/engine-guide.md) — workspace setup, library usage, and the

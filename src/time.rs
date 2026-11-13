@@ -3,10 +3,17 @@ use std::time::Instant;
 pub const TARGET_FPS: f32 = 120.0;
 pub const MAX_FIXED_STEPS_PER_FRAME: usize = 8;
 
+/// Maximum wall-clock delta applied to presentation/frame work, in seconds.
+///
+/// The fixed-step accumulator still receives the unclamped delta, so this only
+/// bounds per-frame presentation work and never discards simulation time.
+pub const MAX_FRAME_DELTA_SECONDS: f32 = 0.1;
+
 /// Frame clock plus a fixed-timestep accumulator.
 ///
-/// `delta` is clamped so that a paused or minimized window cannot produce a
-/// giant simulation step when it comes back.
+/// `delta` is clamped to [`MAX_FRAME_DELTA_SECONDS`] so that a paused or
+/// minimized window cannot produce a giant presentation step when it comes
+/// back. The fixed accumulator receives the unclamped wall-clock delta.
 pub struct Time {
     last: Instant,
     delta: f32,
@@ -28,14 +35,16 @@ impl Time {
             fixed_delta: 1.0 / safe_hz as f64,
             accumulator: 0.0,
             steps_this_frame: 0,
-            max_delta: 0.1,
+            max_delta: MAX_FRAME_DELTA_SECONDS,
         }
     }
 
     /// Advance the clock and return a clamped delta for frame/presentation work.
     ///
-    /// The fixed-step accumulator receives the full wall-clock delta; excess
-    /// simulation time is retained and processed in later frames.
+    /// `delta` is limited to [`MAX_FRAME_DELTA_SECONDS`]. The fixed-step
+    /// accumulator receives the full wall-clock delta, so excess simulation
+    /// time is retained as backlog and processed in later frames rather than
+    /// discarded.
     pub fn tick(&mut self) -> f32 {
         let now = Instant::now();
         let raw = (now - self.last).as_secs_f64();
@@ -103,9 +112,22 @@ impl Time {
         }
     }
 
-    /// The ideal sleep budget between redraws for a stable 120 FPS target.
+    /// Exact target frame period in milliseconds (approximately 8.333 ms at
+    /// 120 FPS).
+    ///
+    /// Use this for analysis and reporting. Scheduling and budget checks use
+    /// [`Self::frame_budget_ms`], which is deliberately conservative.
+    pub fn frame_period_ms() -> f32 {
+        1000.0 / TARGET_FPS
+    }
+
+    /// Conservative integer sleep/budget value for the 120 FPS target.
+    ///
+    /// This is the floor of [`Self::frame_period_ms`] (currently 8 ms). It is
+    /// not the exact tick period and does not guarantee 120 presented frames per
+    /// second.
     pub fn frame_budget_ms() -> u64 {
-        ((1000.0 / TARGET_FPS).floor() as u64).max(1)
+        (Self::frame_period_ms().floor() as u64).max(1)
     }
 
     /// Wall-clock frame time in milliseconds for the latest tick.
@@ -113,7 +135,11 @@ impl Time {
         self.delta * 1000.0
     }
 
-    /// Remaining margin within the target frame budget.
+    /// Remaining margin within the conservative integer frame budget.
+    ///
+    /// Uses [`Self::frame_budget_ms`], not the exact 120 Hz period. A positive
+    /// value means the latest clamped frame delta fits the scheduling budget; it
+    /// is not a GPU-completion measurement.
     pub fn budget_headroom_ms(&self) -> f32 {
         Self::frame_budget_ms() as f32 - self.frame_time_ms()
     }
@@ -123,7 +149,7 @@ impl Time {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{MAX_FIXED_STEPS_PER_FRAME, TARGET_FPS, Time};
+    use super::{MAX_FIXED_STEPS_PER_FRAME, MAX_FRAME_DELTA_SECONDS, TARGET_FPS, Time};
 
     #[test]
     fn zero_or_negative_fixed_hz_is_clamped() {
@@ -201,6 +227,21 @@ mod tests {
     fn target_frame_budget_matches_120_fps_policy() {
         assert_eq!(Time::frame_budget_ms(), 8);
         assert!((TARGET_FPS - 120.0).abs() < 1e-6);
+        assert!((Time::frame_period_ms() - (1000.0 / 120.0)).abs() < 1e-5);
+        assert!(Time::frame_period_ms() > Time::frame_budget_ms() as f32);
+    }
+
+    #[test]
+    fn presentation_delta_is_clamped_while_simulation_backlog_is_retained() {
+        let mut clock = Time::new(120.0);
+        clock.last = Instant::now() - Duration::from_secs(1);
+
+        let delta = clock.tick();
+
+        assert!((delta - MAX_FRAME_DELTA_SECONDS).abs() < 1e-6);
+        assert!(clock.elapsed() >= 1.0);
+        assert!(clock.is_catching_up());
+        assert!(clock.pending_fixed_steps() >= 100);
     }
 
     #[test]
