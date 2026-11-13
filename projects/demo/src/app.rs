@@ -1,3 +1,10 @@
+//! Windowed capability showcase: deterministic simulation, 3D rendering,
+//! culling, diagnostics, replay/rollback verification, and frame timing.
+//!
+//! This app intentionally has no gameplay loop. It advances a scripted input
+//! pattern at a fixed rate, renders the resulting cube grid, and continuously
+//! verifies the engine features it is demonstrating.
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,307 +16,358 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::demo_input::{self, Action, Axis, DemoInput};
-use crate::demo_simulation::DemoSimulation;
-use crate::prototype_simulation::{SIMULATION_HZ, SimulationInput};
-use fate_engine::diagnostics::{
-    DiagnosticSink, DiagnosticSource, DiagnosticValue, FrameDiagnostics, FrameSample,
-};
-use fate_engine::math::{Mat4, Vec2, Vec3};
-use fate_engine::renderer::{Bounds2d, Camera3d, Draw3d, Instance2d, Mesh3d, Renderer};
+use crate::diagnostics_panel::{ShowcaseSink, ShowcaseSource};
+use crate::prototype_simulation::SIMULATION_HZ;
+use crate::scene;
+use crate::showcase::{ShowcaseSim, VerificationState, scripted_input};
+use fate_engine::diagnostics::{Diagnostics, FrameDiagnostics, FrameReport, FrameSample};
+use fate_engine::math::Vec3;
+use fate_engine::renderer::{Camera3d, Mesh3d, Renderer};
 use fate_engine::time::Time;
+
 const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
 const CAMERA_MOVE_SPEED: f32 = 4.0;
 const CAMERA_BOOST_SPEED: f32 = 8.0;
 const MAX_CAMERA_FRAME_DELTA: f32 = 0.05;
 
-impl App {
-    fn telemetry(&self) -> fate_engine::diagnostics::FrameReport {
-        self.frame_diagnostics.report()
-    }
+const ORBIT_RADIUS: f32 = 11.0;
+const ORBIT_HEIGHT: f32 = 7.5;
+const ORBIT_SPEED: f32 = 0.15;
+const ORBIT_TARGET: Vec3 = Vec3::new(0.0, 1.2, 0.0);
 
-    fn performance_report(&self) -> String {
-        self.telemetry().summary()
-    }
+const TITLE_INTERVAL: f32 = 0.5;
+const STATUS_LOG_INTERVAL: f32 = 2.0;
+
+/// One frame's render work, kept separate so simulation and verification time
+/// are never folded into the render phases.
+#[derive(Clone, Copy, Debug, Default)]
+struct RenderFrame {
+    rendered: bool,
+    draw_list_ms: f32,
+    submit_ms: f32,
+    visible: usize,
+    drawn: usize,
 }
 
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    demo_mesh: Option<Mesh3d>,
-    three_d_mode: bool,
-    cursor_captured: bool,
-    focused: bool,
-    core: DemoSimulation,
+    mesh: Option<Mesh3d>,
+    sim: ShowcaseSim,
+    verification: VerificationState,
+    source: ShowcaseSource,
     input: DemoInput,
     time: Time,
-    frame_diagnostics: FrameDiagnostics,
+    diagnostics: Diagnostics<ShowcaseSink>,
+    last_report: FrameReport,
+    last_verify_ms: f32,
+    orbit_mode: bool,
+    orbit_angle: f32,
+    cursor_captured: bool,
+    focused: bool,
+    paused: bool,
     title_timer: f32,
-}
-
-/// Demonstrates the engine's diagnostic-source seam without making the engine
-/// depend on demo types.
-impl DiagnosticSource for App {
-    fn record_diagnostics(&self, sink: &mut dyn DiagnosticSink) {
-        let world = self.core.world.diagnostics();
-        sink.record(
-            "world",
-            "live_entities",
-            DiagnosticValue::Count(world.live_entities as u64),
-        );
-        sink.record(
-            "world",
-            "capacity",
-            DiagnosticValue::Count(world.capacity as u64),
-        );
-        sink.record(
-            "world",
-            "free_slots",
-            DiagnosticValue::Count(world.free_slots as u64),
-        );
-
-        let frame = self.frame_diagnostics.report();
-        sink.record("frame", "total_ms", DiagnosticValue::Millis(frame.total_ms));
-        sink.record(
-            "frame",
-            "drawn",
-            DiagnosticValue::Count(frame.draw_count as u64),
-        );
-        sink.record("frame", "tier", DiagnosticValue::Text(frame.policy.label()));
-    }
+    status_timer: f32,
 }
 
 impl App {
     fn new() -> Self {
+        let sim = ShowcaseSim::new();
+        let verification = VerificationState::new(&sim);
+        let diagnostics = Diagnostics::new(
+            FrameDiagnostics::with_default_target(Renderer::max_instance_budget()),
+            ShowcaseSink::new(true),
+        );
+        let last_report = diagnostics.frame().report();
+
         Self {
             window: None,
             renderer: None,
-            demo_mesh: None,
-            three_d_mode: false,
-            cursor_captured: false,
-            focused: true,
-            core: DemoSimulation::new(),
+            mesh: None,
+            sim,
+            verification,
+            source: ShowcaseSource::default(),
             input: demo_input::new(),
             time: Time::new(SIMULATION_HZ as f32),
-            frame_diagnostics: FrameDiagnostics::with_default_target(
-                Renderer::max_instance_budget(),
-            ),
+            diagnostics,
+            last_report,
+            last_verify_ms: 0.0,
+            orbit_mode: true,
+            orbit_angle: 0.0,
+            cursor_captured: false,
+            focused: true,
+            paused: false,
             title_timer: 0.0,
+            status_timer: 0.0,
         }
     }
 
+    /// Advance the clock, simulation, verification, camera, and presentation.
+    ///
+    /// Returns whether a frame was submitted to the renderer.
     fn step_frame(&mut self) -> bool {
         let frame_dt = self.time.tick();
-        let input = self.simulation_input();
-        let sim_start = Instant::now();
-        while self.time.next_fixed_step().is_some() {
-            self.core.fixed_update(input);
-        }
-        let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
-        self.update_3d_camera(frame_dt);
-        self.input.end_frame();
-        self.update_camera();
+        let (sim_ms, verify_ms) = self.advance_simulation();
+        self.last_verify_ms = verify_ms;
+        self.update_camera(frame_dt);
 
         if !self.focused {
-            self.update_title(frame_dt);
+            self.input.end_frame();
+            self.update_presentation(frame_dt);
             return false;
         }
 
-        let (rendered, draw_budget, draw_list_ms, submit_ms) = if self.three_d_mode {
-            let draw_start = Instant::now();
-            let (draws, count) = if let (Some(renderer), Some(mesh)) =
-                (&self.renderer, &self.demo_mesh)
-            {
-                let draws = Self::three_d_demo_draws(mesh, &renderer.camera_3d, renderer.aspect());
-                let count = renderer.budgeted_instance_count(draws.len());
-                (Some(draws), count)
-            } else {
-                (None, 0)
-            };
-            let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+        let alpha = self.interpolation_alpha();
+        let frame = self.render_frame(alpha);
 
-            let submit_start = Instant::now();
-            let rendered =
-                if let (Some(renderer), Some(draws)) = (&mut self.renderer, draws.as_ref()) {
-                    renderer.render_meshes(draws)
-                } else {
-                    false
-                };
-            let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
-            (rendered, count, draw_list_ms, submit_ms)
+        let sample = FrameSample::new(sim_ms, frame.submit_ms, frame.drawn)
+            .with_draw_list_ms(frame.draw_list_ms);
+        self.last_report = self.diagnostics.record_frame(sample);
+        self.refresh_source(alpha, frame.drawn, frame.visible);
+        self.sample_source();
+
+        if self.last_report.total_ms > self.last_report.target_ms {
+            log::warn!(
+                target: "fate.showcase",
+                "frame budget exceeded: {}",
+                self.last_report.summary()
+            );
+        }
+
+        self.input.end_frame();
+        self.update_presentation(frame_dt);
+        frame.rendered
+    }
+
+    /// Run every queued fixed step, timing simulation and verification apart.
+    fn advance_simulation(&mut self) -> (f32, f32) {
+        let mut sim_ms = 0.0;
+        let mut verify_ms = 0.0;
+
+        if self.paused {
+            return (sim_ms, verify_ms);
+        }
+
+        while self.time.next_fixed_step().is_some() {
+            let (sim, verify) = self.tick_once();
+            sim_ms += sim;
+            verify_ms += verify;
+        }
+
+        (sim_ms, verify_ms)
+    }
+
+    /// Advance one deterministic tick and its replay/rollback/snapshot checks.
+    fn tick_once(&mut self) -> (f32, f32) {
+        let input = scripted_input(self.sim.tick());
+
+        let verify_start = Instant::now();
+        self.verification.begin_tick(&self.sim, input);
+        let mut verify_ms = verify_start.elapsed().as_secs_f32() * 1000.0;
+
+        let sim_start = Instant::now();
+        self.sim.advance(input);
+        let sim_ms = sim_start.elapsed().as_secs_f32() * 1000.0;
+
+        let verify_start = Instant::now();
+        self.verification.end_tick(&self.sim);
+        verify_ms += verify_start.elapsed().as_secs_f32() * 1000.0;
+
+        (sim_ms, verify_ms)
+    }
+
+    /// Interpolation factor between the previous and current fixed states.
+    ///
+    /// A paused simulation renders the latest completed tick instead of cycling
+    /// through the fractional remainder, which would jitter in place.
+    fn interpolation_alpha(&self) -> f32 {
+        if self.paused { 1.0 } else { self.time.alpha() }
+    }
+
+    fn render_frame(&mut self, alpha: f32) -> RenderFrame {
+        let Some(renderer) = &self.renderer else {
+            return RenderFrame::default();
+        };
+        let Some(mesh) = &self.mesh else {
+            return RenderFrame::default();
+        };
+
+        let draw_start = Instant::now();
+        let mut instances = Vec::with_capacity(scene::ARENA.len() + self.sim.tracked_count());
+        instances.extend_from_slice(&scene::ARENA);
+        instances.extend(self.sim.render_instances(alpha));
+        let (draws, visible) =
+            scene::build_draws(mesh, &renderer.camera_3d, renderer.aspect(), &instances);
+        let drawn = renderer.budgeted_instance_count(draws.len());
+        let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
+
+        let submit_start = Instant::now();
+        let rendered = self
+            .renderer
+            .as_mut()
+            .is_some_and(|renderer| renderer.render_meshes(&draws));
+        let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+
+        RenderFrame {
+            rendered,
+            draw_list_ms,
+            submit_ms,
+            visible,
+            drawn,
+        }
+    }
+
+    fn update_camera(&mut self, frame_dt: f32) {
+        let dt = if frame_dt.is_finite() {
+            frame_dt.max(0.0)
         } else {
-            let draw_start = Instant::now();
-            let instances = self.instances();
-            let count = self
-                .renderer
-                .as_ref()
-                .map(|renderer| renderer.budgeted_instance_count(instances.len()))
-                .unwrap_or(0);
-            let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
-
-            let submit_start = Instant::now();
-            let rendered = if let Some(renderer) = &mut self.renderer {
-                renderer.render(&instances)
-            } else {
-                false
-            };
-            let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
-            (rendered, count, draw_list_ms, submit_ms)
+            0.0
         };
 
-        let sample =
-            FrameSample::new(sim_ms, submit_ms, draw_budget).with_draw_list_ms(draw_list_ms);
-        let report = self.frame_diagnostics.record(sample);
-
-        if report.total_ms > report.target_ms {
-            log::warn!("frame budget exceeded: {}", report.summary());
-        }
-
-        self.update_title(frame_dt);
-        rendered
-    }
-
-    #[allow(dead_code)]
-    fn headless_step(&mut self) -> bool {
-        self.step_frame()
-    }
-
-    fn simulation_input(&self) -> SimulationInput {
-        if self.three_d_mode {
-            return SimulationInput::default();
-        }
-        let axis = |positive, negative| {
-            self.input.action_down(positive) as i8 - self.input.action_down(negative) as i8
-        };
-        SimulationInput {
-            move_x: axis(Action::MoveRight, Action::MoveLeft),
-            move_y: axis(Action::MoveUp, Action::MoveDown),
-            boost: self.input.action_down(Action::Boost),
-        }
-    }
-
-    fn player_camera_target(&self) -> Option<Vec2> {
-        self.core
-            .world
-            .positions()
-            .get(self.core.player)
-            .map(|position| Vec2::new(position.0.x.to_f32(), position.0.y.to_f32()))
-    }
-
-    fn update_camera(&mut self) {
-        let Some(target) = self.player_camera_target() else {
+        if self.orbit_mode {
+            self.orbit_angle = (self.orbit_angle + ORBIT_SPEED * dt) % std::f32::consts::TAU;
+            if let Some(renderer) = &mut self.renderer {
+                renderer.camera_3d = orbit_camera(self.orbit_angle);
+            }
             return;
-        };
+        }
+
+        let mouse_delta = (
+            self.input.axis_delta(Axis::MouseX) as f64,
+            self.input.axis_delta(Axis::MouseY) as f64,
+        );
         if let Some(renderer) = &mut self.renderer {
-            renderer.camera.center = target;
+            update_fps_camera(
+                &mut renderer.camera_3d,
+                FpsCameraInput {
+                    forward: self.input.action_down(Action::MoveUp),
+                    backward: self.input.action_down(Action::MoveDown),
+                    left: self.input.action_down(Action::MoveLeft),
+                    right: self.input.action_down(Action::MoveRight),
+                    boost: self.input.action_down(Action::Boost),
+                    mouse_delta,
+                    dt,
+                },
+            );
         }
     }
 
-    fn three_d_demo_draws<'a>(mesh: &'a Mesh3d, camera: &Camera3d, aspect: f32) -> Vec<Draw3d<'a>> {
-        let frustum = camera.frustum(aspect);
-        let mut draws = Vec::with_capacity(19);
+    fn refresh_source(&mut self, alpha: f32, drawn: usize, visible: usize) {
+        let world = self.sim.world_diagnostics();
+        let verification = &self.verification;
 
-        let mut add_box = |position: Vec3, scale: Vec3, rotation: f32, tint: [f32; 3]| {
-            // The demo mesh is a unit cube, so this sphere encloses the box
-            // regardless of rotation.
-            let radius = scale.length() * 0.5;
-            if !frustum.intersects_sphere(position, radius) {
-                return;
-            }
-
-            let model = Mat4::translation(position)
-                .mul(Mat4::rotation_y(rotation))
-                .mul(Mat4::rotation_x(rotation * 0.5))
-                .mul(Mat4::scale(scale));
-            draws.push(Draw3d { mesh, model, tint });
+        self.source = ShowcaseSource {
+            tick: self.sim.tick(),
+            alpha,
+            paused: self.paused,
+            state_hash: self.sim.state_hash(),
+            verify_ms: self.last_verify_ms,
+            replay_enabled: verification.replay_enabled,
+            replay: verification.replay_result.label(),
+            rollback: verification.rollback_result.label(),
+            snapshot: verification.snapshot_result.label(),
+            live_entities: world.live_entities,
+            capacity: world.capacity,
+            free_slots: world.free_slots,
+            positions: world.positions,
+            visible,
+            drawn,
         };
-
-        add_box(
-            Vec3::new(0.0, -0.15, -1.0),
-            Vec3::new(12.0, 0.3, 16.0),
-            0.0,
-            [0.22, 0.28, 0.38],
-        );
-        add_box(
-            Vec3::new(0.0, 1.5, -8.0),
-            Vec3::new(12.0, 3.0, 0.3),
-            0.0,
-            [0.30, 0.40, 0.55],
-        );
-        add_box(
-            Vec3::new(-6.0, 1.5, -1.0),
-            Vec3::new(0.3, 3.0, 14.0),
-            0.0,
-            [0.30, 0.40, 0.55],
-        );
-        add_box(
-            Vec3::new(6.0, 1.5, -1.0),
-            Vec3::new(0.3, 3.0, 14.0),
-            0.0,
-            [0.30, 0.40, 0.55],
-        );
-
-        for x in [-4.0, 4.0] {
-            for z in [-6.0, -2.0, 2.0] {
-                add_box(
-                    Vec3::new(x, 1.0, z),
-                    Vec3::new(0.8, 2.0, 0.8),
-                    0.0,
-                    [0.20, 0.62, 0.58],
-                );
-            }
-        }
-
-        let cube_colors = [
-            [0.95, 0.28, 0.22],
-            [0.98, 0.58, 0.18],
-            [0.95, 0.82, 0.22],
-            [0.34, 0.78, 0.34],
-            [0.18, 0.72, 0.78],
-            [0.22, 0.45, 0.95],
-            [0.55, 0.32, 0.90],
-            [0.90, 0.30, 0.62],
-            [0.88, 0.88, 0.92],
-        ];
-        for row in 0..3 {
-            for column in 0..3 {
-                let x = (column as f32 - 1.0) * 1.6;
-                let z = -(row as f32) * 1.6;
-                add_box(
-                    Vec3::new(x, 0.8, z),
-                    Vec3::new(0.9, 1.2, 0.9),
-                    (row + column) as f32 * 0.18,
-                    cube_colors[row * 3 + column],
-                );
-            }
-        }
-        draws
     }
 
-    fn update_3d_camera(&mut self, dt: f32) {
-        let mouse_dx = self.input.axis_delta(Axis::MouseX) as f64;
-        let mouse_dy = self.input.axis_delta(Axis::MouseY) as f64;
-        let Some(renderer) = &mut self.renderer else {
-            return;
-        };
-        if !self.three_d_mode {
-            return;
-        }
+    fn sample_source(&mut self) {
+        let source = &self.source;
+        self.diagnostics.sample_sources(&[source]);
+    }
 
-        update_fps_camera(
-            &mut renderer.camera_3d,
-            FpsCameraInput {
-                forward: self.input.button_down(KeyCode::KeyW)
-                    || self.input.button_down(KeyCode::ArrowUp),
-                backward: self.input.button_down(KeyCode::KeyS)
-                    || self.input.button_down(KeyCode::ArrowDown),
-                left: self.input.button_down(KeyCode::KeyA)
-                    || self.input.button_down(KeyCode::ArrowLeft),
-                right: self.input.button_down(KeyCode::KeyD)
-                    || self.input.button_down(KeyCode::ArrowRight),
-                boost: self.input.action_down(Action::Boost),
-                mouse_delta: (mouse_dx, mouse_dy),
-                dt,
-            },
+    fn update_presentation(&mut self, frame_dt: f32) {
+        let dt = if frame_dt.is_finite() {
+            frame_dt.max(0.0)
+        } else {
+            0.0
+        };
+        self.title_timer += dt;
+        self.status_timer += dt;
+
+        if self.title_timer >= TITLE_INTERVAL {
+            self.title_timer = 0.0;
+            self.update_title();
+        }
+        if self.status_timer >= STATUS_LOG_INTERVAL {
+            self.status_timer = 0.0;
+            self.log_status();
+        }
+    }
+
+    fn replay_label(&self) -> &'static str {
+        if self.verification.replay_enabled {
+            self.verification.replay_result.label()
+        } else {
+            "off"
+        }
+    }
+
+    fn title_text(&self) -> String {
+        let report = self.last_report;
+        let camera = if self.orbit_mode { "orbit" } else { "free" };
+        let state = if self.paused { "paused" } else { "running" };
+
+        format!(
+            "fate showcase | {camera} | {state} | {:.0} fps | frame {:.1}ms | tick {} | \
+             sim {:.2} draw {:.2} submit {:.2} total {:.2} avg {:.2} worst {:.2} ms | \
+             target {:.1} headroom {:+.2} | draw {}/{} {:.1}% tier={} | verify {:.2}ms \
+             replay {} rollback {} snapshot {} | hash {:016x}",
+            self.time.fps(),
+            self.time.frame_time_ms(),
+            self.sim.tick(),
+            report.sim_ms,
+            report.draw_list_ms,
+            report.render_ms,
+            report.total_ms,
+            report.avg_ms,
+            report.worst_ms,
+            report.target_ms,
+            report.headroom_ms,
+            report.draw_count,
+            report.draw_limit,
+            report.draw_pressure_pct,
+            report.policy.label(),
+            self.last_verify_ms,
+            self.replay_label(),
+            self.verification.rollback_result.label(),
+            self.verification.snapshot_result.label(),
+            self.sim.state_hash(),
+        )
+    }
+
+    fn update_title(&self) {
+        if let Some(window) = &self.window {
+            window.set_title(&self.title_text());
+        }
+    }
+
+    fn log_status(&self) {
+        let report = self.last_report;
+        log::info!(
+            target: "fate.showcase",
+            "status tick={} camera={} paused={} fps={:.0} frame_ms={:.2} sim_ms={:.3} draw_list_ms={:.3} submit_ms={:.3} verify_ms={:.3} total_ms={:.3} drawn={}/{} tier={} replay={} rollback={} snapshot={} hash={:016x}",
+            self.sim.tick(),
+            if self.orbit_mode { "orbit" } else { "free" },
+            self.paused,
+            self.time.fps(),
+            self.time.frame_time_ms(),
+            report.sim_ms,
+            report.draw_list_ms,
+            report.render_ms,
+            self.last_verify_ms,
+            report.total_ms,
+            report.draw_count,
+            report.draw_limit,
+            report.policy.label(),
+            self.replay_label(),
+            self.verification.rollback_result.label(),
+            self.verification.snapshot_result.label(),
+            self.sim.state_hash(),
         );
     }
 
@@ -327,7 +385,7 @@ impl App {
                 true
             }
             Err(error) => {
-                log::error!("failed to capture cursor for 3d camera: {error}");
+                log::error!(target: "fate.showcase", "failed to capture cursor: {error}");
                 self.cursor_captured = false;
                 false
             }
@@ -338,26 +396,76 @@ impl App {
         if let Some(window) = &self.window {
             window.set_cursor_visible(true);
             if let Err(error) = window.set_cursor_grab(CursorGrabMode::None) {
-                log::warn!("failed to release cursor: {error}");
+                log::warn!(target: "fate.showcase", "failed to release cursor: {error}");
             }
         }
         self.cursor_captured = false;
     }
 
-    fn set_3d_mode(&mut self, enabled: bool) {
-        if enabled {
-            if self.demo_mesh.is_none() {
-                log::warn!("3d demo mesh is unavailable");
-                return;
-            }
-            self.three_d_mode = true;
-            if self.focused {
-                self.capture_cursor();
-            }
-        } else {
-            self.three_d_mode = false;
-            self.release_cursor();
+    fn set_orbit_mode(&mut self, orbit: bool) {
+        if self.orbit_mode == orbit {
+            return;
         }
+        self.orbit_mode = orbit;
+        if orbit {
+            self.release_cursor();
+        } else if self.focused {
+            self.capture_cursor();
+        }
+        log::info!(
+            target: "fate.showcase",
+            "camera mode: {}",
+            if orbit { "orbit" } else { "free" }
+        );
+    }
+
+    fn set_paused(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        self.paused = paused;
+        if !paused {
+            // Drop wall-clock time accumulated while paused so resuming does not
+            // replay a long backlog of fixed steps.
+            self.time = Time::new(SIMULATION_HZ as f32);
+        }
+        log::info!(
+            target: "fate.showcase",
+            "simulation {}",
+            if paused { "paused" } else { "running" }
+        );
+    }
+
+    fn toggle_verbose(&mut self) {
+        let verbose = !self.diagnostics.sink().is_verbose();
+        self.diagnostics.sink_mut().set_verbose(verbose);
+        log::info!(
+            target: "fate.showcase",
+            "verbose diagnostics {}",
+            if verbose { "on" } else { "off" }
+        );
+    }
+
+    fn toggle_replay(&mut self) {
+        let enabled = !self.verification.replay_enabled;
+        self.verification.set_replay_enabled(enabled, &self.sim);
+        log::info!(
+            target: "fate.showcase",
+            "replay verification {}",
+            if enabled { "on" } else { "off" }
+        );
+    }
+
+    fn force_snapshot_check(&mut self) {
+        let start = Instant::now();
+        self.verification.force_snapshot_check(&self.sim);
+        let elapsed = start.elapsed().as_secs_f32() * 1000.0;
+        log::info!(
+            target: "fate.showcase",
+            "snapshot round-trip {} in {:.3}ms",
+            self.verification.snapshot_result.label(),
+            elapsed
+        );
     }
 
     fn handle_key(
@@ -371,89 +479,43 @@ impl App {
             return;
         };
 
-        if code == KeyCode::Escape && state == ElementState::Pressed {
-            if self.three_d_mode {
-                self.set_3d_mode(false);
-            } else {
-                event_loop.exit();
+        if state == ElementState::Pressed && !repeat {
+            match code {
+                KeyCode::Escape => {
+                    if self.cursor_captured {
+                        self.release_cursor();
+                    } else {
+                        event_loop.exit();
+                    }
+                    return;
+                }
+                KeyCode::Tab => {
+                    self.set_orbit_mode(!self.orbit_mode);
+                    return;
+                }
+                KeyCode::Space => {
+                    self.set_paused(!self.paused);
+                    return;
+                }
+                KeyCode::F1 => {
+                    self.toggle_verbose();
+                    return;
+                }
+                KeyCode::F2 => {
+                    self.toggle_replay();
+                    return;
+                }
+                KeyCode::F4 => {
+                    self.force_snapshot_check();
+                    return;
+                }
+                _ => {}
             }
-            return;
-        }
-
-        if code == KeyCode::F2 && state == ElementState::Pressed && !repeat {
-            let enable_stress = !self.core.demo_stress_enabled();
-            self.core.set_demo_stress(enable_stress);
-            return;
-        }
-
-        if code == KeyCode::F3 && state == ElementState::Pressed && !repeat {
-            self.set_3d_mode(!self.three_d_mode);
-            return;
         }
 
         match state {
             ElementState::Pressed => self.input.press(code),
             ElementState::Released => self.input.release(code),
-        }
-    }
-
-    fn instances(&self) -> Vec<Instance2d> {
-        let bounds = match &self.renderer {
-            Some(renderer) => renderer.camera.visible_bounds(renderer.gpu.aspect()),
-            None => Bounds2d::new(Vec2::ZERO, Vec2::new(10.0, 10.0)),
-        };
-
-        let mut instances = Vec::new();
-        for (entity, position) in self.core.world.positions().iter() {
-            let render_position = Vec2::new(position.0.x.to_f32(), position.0.y.to_f32());
-            if !bounds.contains_point(render_position) {
-                continue;
-            }
-
-            let rotation = self
-                .core
-                .world
-                .rotations()
-                .get(entity)
-                .map_or(0.0, |r| r.0.to_f32());
-            instances.push(Instance2d {
-                position: render_position,
-                rotation,
-                scale: if entity == self.core.player { 1.7 } else { 1.0 },
-            });
-        }
-        instances
-    }
-
-    fn update_title(&mut self, dt: f32) {
-        self.title_timer += dt;
-        if self.title_timer < 0.5 {
-            return;
-        }
-        self.title_timer = 0.0;
-
-        if let Some(window) = &self.window {
-            let headroom = self.time.budget_headroom_ms();
-            let mode_text = if self.three_d_mode {
-                "3d mesh demo"
-            } else {
-                "2d simulation demo"
-            };
-            let budget_text = if headroom >= 0.0 {
-                format!("+{headroom:.1}ms")
-            } else {
-                format!("{headroom:.1}ms")
-            };
-
-            window.set_title(&format!(
-                "fate | {mode_text} | WASD/arrows move, Shift boost, F2 stress {}, F3 3d | {:.0} fps - {} entities - {} | frame_delta {:.1}ms budget {}",
-                if self.core.demo_stress_enabled() { "on" } else { "off" },
-                self.time.fps(),
-                self.core.world.entity_count(),
-                self.performance_report(),
-                self.time.frame_time_ms(),
-                budget_text,
-            ));
         }
     }
 }
@@ -465,7 +527,7 @@ impl ApplicationHandler for App {
         }
 
         let attributes = Window::default_attributes()
-            .with_title("fate")
+            .with_title("fate showcase")
             .with_inner_size(LogicalSize::new(1280.0, 720.0));
 
         let window = Arc::new(
@@ -474,19 +536,21 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
 
-        let renderer = pollster::block_on(Renderer::new(window.clone()))
+        let mut renderer = pollster::block_on(Renderer::new(window.clone()))
             .expect("failed to initialize renderer");
-        let demo_mesh = match renderer.cube_mesh() {
+        renderer.camera_3d = orbit_camera(self.orbit_angle);
+
+        let mesh = match renderer.cube_mesh() {
             Ok(mesh) => Some(mesh),
             Err(error) => {
-                log::error!("failed to create 3d demo mesh: {error}");
+                log::error!(target: "fate.showcase", "failed to create cube mesh: {error}");
                 None
             }
         };
 
         self.window = Some(window);
         self.renderer = Some(renderer);
-        self.demo_mesh = demo_mesh;
+        self.mesh = mesh;
     }
 
     fn window_event(
@@ -499,7 +563,7 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(focused) => {
                 self.focused = focused;
-                if focused && self.three_d_mode {
+                if focused && !self.orbit_mode {
                     self.capture_cursor();
                 } else if !focused {
                     self.release_cursor();
@@ -527,7 +591,7 @@ impl ApplicationHandler for App {
         _device_id: winit::event::DeviceId,
         event: DeviceEvent,
     ) {
-        if self.three_d_mode
+        if !self.orbit_mode
             && self.cursor_captured
             && let DeviceEvent::MouseMotion { delta } = event
         {
@@ -547,6 +611,22 @@ impl ApplicationHandler for App {
         if let Some(window) = &self.window {
             window.request_redraw();
         }
+    }
+}
+
+fn orbit_camera(angle: f32) -> Camera3d {
+    let position = Vec3::new(
+        ORBIT_TARGET.x + ORBIT_RADIUS * angle.cos(),
+        ORBIT_HEIGHT,
+        ORBIT_TARGET.z + ORBIT_RADIUS * angle.sin(),
+    );
+    let direction = (ORBIT_TARGET - position).normalize();
+
+    Camera3d {
+        position,
+        yaw: direction.x.atan2(-direction.z),
+        pitch: direction.y.asin(),
+        ..Camera3d::default()
     }
 }
 
@@ -615,23 +695,77 @@ pub async fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::showcase::REPLAY_WINDOW;
     use fate_engine::diagnostics::BudgetPolicy;
-    use fate_engine::renderer::Camera3d;
-    use fate_sim::ecs::Position;
-    use fate_sim::math::{Fixed, FixedVec2};
 
     #[test]
-    fn step_frame_without_renderer_is_skipped_cleanly() {
+    fn new_app_starts_with_the_showcase_world_and_no_renderer() {
+        let app = App::new();
+
+        assert!(app.renderer.is_none());
+        assert!(app.mesh.is_none());
+        assert_eq!(app.sim.tracked_count(), 161);
+        assert_eq!(app.sim.tracked_count(), 161);
+        assert_eq!(app.sim.tick(), 0);
+        assert!(app.orbit_mode);
+        assert!(!app.paused);
+        assert!(app.diagnostics.sink().is_verbose());
+    }
+
+    #[test]
+    fn tick_once_advances_simulation_and_verification() {
+        let mut app = App::new();
+
+        let (sim_ms, verify_ms) = app.tick_once();
+
+        assert_eq!(app.sim.tick(), 1);
+        assert!(sim_ms >= 0.0);
+        assert!(verify_ms >= 0.0);
+    }
+
+    #[test]
+    fn headless_step_is_skipped_cleanly_without_a_renderer() {
         let mut app = App::new();
 
         let rendered = app.step_frame();
 
         assert!(!rendered);
-        assert_eq!(app.core.world.entity_count(), 40);
-        let report = app.frame_diagnostics.report();
-        assert!(report.sim_ms >= 0.0);
-        assert!(report.render_ms >= 0.0);
+        let report = app.diagnostics.frame().report();
+        assert_eq!(report.draw_limit, Renderer::max_instance_budget());
         assert!(report.total_ms >= 0.0);
+        assert!(app.last_report.total_ms >= 0.0);
+    }
+
+    #[test]
+    fn paused_steps_do_not_advance_the_simulation() {
+        let mut app = App::new();
+        app.set_paused(true);
+
+        let rendered = app.step_frame();
+
+        assert!(!rendered);
+        assert_eq!(app.sim.tick(), 0);
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn paused_simulation_renders_the_latest_completed_tick() {
+        let mut app = App::new();
+        assert!((0.0..=1.0).contains(&app.interpolation_alpha()));
+
+        app.set_paused(true);
+
+        assert_eq!(app.interpolation_alpha(), 1.0);
+    }
+
+    #[test]
+    fn step_frame_clears_input_edge_state_even_without_renderer() {
+        let mut app = App::new();
+        app.input.press(KeyCode::KeyW);
+
+        let _ = app.step_frame();
+
+        assert!(!app.input.button_just_pressed(KeyCode::KeyW));
     }
 
     #[test]
@@ -643,73 +777,9 @@ mod tests {
     }
 
     #[test]
-    fn step_frame_clears_input_edge_state_even_without_renderer() {
-        let mut app = App::new();
-        app.input.press(winit::keyboard::KeyCode::KeyA);
-        app.input.end_frame();
-
-        app.input.press(winit::keyboard::KeyCode::KeyA);
-        let _ = app.step_frame();
-
-        assert!(
-            !app.input
-                .button_just_pressed(winit::keyboard::KeyCode::KeyA)
-        );
-    }
-
-    #[test]
-    fn platform_key_bindings_become_platform_independent_simulation_input() {
-        let mut app = App::new();
-        app.input.press(KeyCode::ArrowRight);
-        app.input.press(KeyCode::KeyW);
-        app.input.press(KeyCode::ShiftLeft);
-
-        assert_eq!(
-            app.simulation_input(),
-            SimulationInput {
-                move_x: 1,
-                move_y: 1,
-                boost: true,
-            }
-        );
-    }
-
-    #[test]
-    fn frame_diagnostics_roll_and_average_recent_frames() {
-        let mut diagnostics =
-            FrameDiagnostics::with_default_target(Renderer::max_instance_budget());
-        diagnostics.record(FrameSample::new(4.0, 0.0, 0));
-        diagnostics.record(FrameSample::new(6.0, 0.0, 0));
-        let report = diagnostics.record(FrameSample::new(8.0, 0.0, 0));
-
-        assert!((report.avg_ms - 6.0).abs() < 1e-5);
-        assert!((report.worst_ms - 8.0).abs() < 1e-5);
-        assert_eq!(diagnostics.stats().recent_count(), 3);
-    }
-
-    #[test]
-    fn frame_diagnostics_track_budget_policy_breakdown() {
-        let mut diagnostics = FrameDiagnostics::new(8.0, 256);
-
-        diagnostics.record(FrameSample::new(7.0, 0.0, 64));
-        diagnostics.record(FrameSample::new(9.0, 0.0, 204));
-        let report = diagnostics.record(FrameSample::new(12.0, 0.0, 256));
-
-        assert_eq!(
-            (
-                report.healthy_frames,
-                report.warning_frames,
-                report.critical_frames
-            ),
-            (1, 1, 1)
-        );
-        assert!((diagnostics.stats().peak_draw_pressure_pct() - 100.0).abs() < 1e-5);
-    }
-
-    #[test]
     fn frame_report_contains_budget_summary() {
         let mut app = App::new();
-        let report = app.frame_diagnostics.record(FrameSample::new(3.0, 4.0, 2));
+        let report = app.diagnostics.record_frame(FrameSample::new(3.0, 4.0, 2));
 
         let summary = report.summary();
         assert!(summary.contains("drawn=2/256"));
@@ -721,155 +791,96 @@ mod tests {
     }
 
     #[test]
-    fn frame_diagnostics_classifies_warning_and_critical_budget_slips() {
+    fn title_summarizes_simulation_render_and_verification_state() {
         let mut app = App::new();
-        let report = app.frame_diagnostics.record(FrameSample::new(8.0, 2.0, 4));
-        assert_eq!(report.policy, BudgetPolicy::Warning);
+        app.tick_once();
+        app.refresh_source(0.5, 10, 12);
 
-        let report = app
-            .frame_diagnostics
-            .record(FrameSample::new(10.0, 10.0, 8));
-        assert_eq!(report.policy, BudgetPolicy::Critical);
+        let title = app.title_text();
+
+        assert!(title.contains("fate showcase"));
+        assert!(title.contains("orbit"));
+        assert!(title.contains("tick 1"));
+        assert!(title.contains("tier="));
+        assert!(title.contains("replay pending"));
+        assert!(title.contains("hash "));
     }
 
     #[test]
-    fn draw_pressure_tracks_budget_usage() {
+    fn diagnostics_source_tracks_simulation_state() {
         let mut app = App::new();
-        app.frame_diagnostics
-            .record(FrameSample::new(0.0, 0.0, 192));
-        assert!((app.frame_diagnostics.draw_pressure() - 0.75).abs() < 1e-5);
+        app.tick_once();
+        app.refresh_source(0.25, 12, 20);
 
-        app.frame_diagnostics
-            .record(FrameSample::new(0.0, 0.0, 256));
-        assert!((app.frame_diagnostics.draw_pressure() - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn telemetry_snapshot_exposes_machine_readable_budget_data() {
-        let mut app = App::new();
-        app.frame_diagnostics
-            .record(FrameSample::new(3.0, 4.0, 128));
-
-        let telemetry = app.telemetry();
-        assert_eq!(telemetry.draw_count, 128);
-        assert_eq!(telemetry.draw_limit, Renderer::max_instance_budget());
-        assert!(telemetry.draw_pressure_pct > 0.0);
-        assert_eq!(telemetry.policy, BudgetPolicy::Healthy);
-        assert!(telemetry.summary().contains("tier=healthy"));
-    }
-
-    #[test]
-    fn headless_simulation_runs_without_window_or_renderer() {
-        let mut app = App::new();
-        app.input.press(winit::keyboard::KeyCode::KeyA);
-
-        let rendered = app.headless_step();
-
-        assert!(!rendered);
-        assert!(app.core.world.entity_count() >= 1);
-        assert!(app.frame_diagnostics.report().total_ms >= 0.0);
-        assert!(
-            !app.input
-                .button_just_pressed(winit::keyboard::KeyCode::KeyA)
-        );
-    }
-
-    #[test]
-    fn app_can_step_through_headless_simulation_isolation() {
-        let mut app = App::new();
-        app.input.press(winit::keyboard::KeyCode::KeyD);
-
-        let rendered = app.headless_step();
-
-        assert!(!rendered);
-        assert_eq!(app.core.world.entity_count(), 40);
-        assert!(app.frame_diagnostics.report().total_ms >= 0.0);
-    }
-
-    #[test]
-    fn instances_only_include_entities_in_camera_view() {
-        let mut app = App::new();
-        let visible = app.core.world.spawn();
-        let hidden = app.core.world.spawn();
-        app.core
-            .world
-            .set_position(visible, Position(FixedVec2::new(Fixed::ONE, Fixed::ONE)))
-            .unwrap();
-        app.core
-            .world
-            .set_position(
-                hidden,
-                Position(FixedVec2::new(Fixed::from_int(30), Fixed::from_int(30))),
-            )
-            .unwrap();
-
-        let instances = app.instances();
-
-        assert_eq!(instances.len(), 33);
-        assert!(
-            instances
-                .iter()
-                .all(|instance| instance.position != Vec2::new(30.0, 30.0))
-        );
-    }
-
-    #[test]
-    fn demo_stress_mode_shows_culling_and_budget_warning() {
-        let mut app = App::new();
-        assert_eq!(app.instances().len(), 32);
-
-        app.core.set_demo_stress(true);
-
-        assert_eq!(app.instances().len(), 192);
-        assert_eq!(app.core.world.entity_count(), 200);
-        let drawn = app.instances().len();
-        app.frame_diagnostics
-            .record(FrameSample::new(0.0, 0.0, drawn));
-        assert!((app.frame_diagnostics.draw_pressure() - 0.75).abs() < 1e-5);
-        assert_eq!(app.frame_diagnostics.policy(), BudgetPolicy::Warning);
-
-        app.core.set_demo_stress(false);
-        assert_eq!(app.instances().len(), 32);
-        assert_eq!(app.core.world.entity_count(), 40);
-    }
-
-    #[test]
-    fn player_camera_target_tracks_player_position() {
-        let mut app = App::new();
-        let player = app.core.player;
-        let target = FixedVec2::new(Fixed::from_int(4), Fixed::from_int(-3));
-        app.core
-            .world
-            .set_position(player, Position(target))
-            .unwrap();
-
+        assert_eq!(app.source.tick, 1);
         assert_eq!(
-            app.player_camera_target(),
-            Some(Vec2::new(target.x.to_f32(), target.y.to_f32()))
+            app.source.live_entities,
+            app.sim.world_diagnostics().live_entities
         );
+        assert_eq!(app.source.positions, app.sim.tracked_count());
+        assert_eq!(app.source.drawn, 12);
+        assert_eq!(app.source.visible, 20);
+        assert_eq!(app.source.replay, "pending");
     }
 
     #[test]
-    fn player_is_visually_distinguished_from_demo_swarm() {
-        let app = App::new();
-        let instances = app.instances();
-        let fixed_player_position = app.core.world.positions().get(app.core.player).unwrap().0;
-        let player_position = Vec2::new(
-            fixed_player_position.x.to_f32(),
-            fixed_player_position.y.to_f32(),
-        );
-        let player_instance = instances
-            .iter()
-            .find(|instance| instance.position == player_position)
-            .unwrap();
+    fn verbose_toggle_flips_the_sink() {
+        let mut app = App::new();
+        assert!(app.diagnostics.sink().is_verbose());
 
-        assert_eq!(player_instance.scale, 1.7);
-        assert!(
-            instances
-                .iter()
-                .filter(|instance| instance.position != player_position)
-                .all(|instance| instance.scale == 1.0)
-        );
+        app.toggle_verbose();
+
+        assert!(!app.diagnostics.sink().is_verbose());
+    }
+
+    #[test]
+    fn replay_toggle_restarts_the_verification_window() {
+        let mut app = App::new();
+        app.toggle_replay();
+        assert!(!app.verification.replay_enabled);
+        assert!(app.title_text().contains("replay off"));
+
+        for _ in 0..10 {
+            app.tick_once();
+        }
+        assert_eq!(app.verification.replay_result.label(), "pending");
+
+        app.toggle_replay();
+        assert!(app.verification.replay_enabled);
+        for _ in 0..REPLAY_WINDOW {
+            app.tick_once();
+        }
+        assert_eq!(app.verification.replay_result.label(), "ok");
+    }
+
+    #[test]
+    fn forced_snapshot_check_reports_ok() {
+        let mut app = App::new();
+        for _ in 0..30 {
+            app.tick_once();
+        }
+
+        app.force_snapshot_check();
+
+        assert_eq!(app.verification.snapshot_result.label(), "ok");
+    }
+
+    #[test]
+    fn orbit_camera_faces_the_arena_center() {
+        let camera = orbit_camera(0.0);
+
+        assert!((camera.position.y - ORBIT_HEIGHT).abs() < 1e-6);
+        let expected = (ORBIT_TARGET - camera.position).normalize();
+        assert!((camera.forward() - expected).length() < 1e-4);
+    }
+
+    #[test]
+    fn orbit_camera_moves_around_the_target() {
+        let start = orbit_camera(0.0);
+        let quarter = orbit_camera(std::f32::consts::FRAC_PI_2);
+
+        assert!((start.position - quarter.position).length() > 1.0);
+        assert!((quarter.position.y - ORBIT_HEIGHT).abs() < 1e-6);
     }
 
     #[test]
@@ -969,45 +980,14 @@ mod tests {
     }
 
     #[test]
-    fn first_person_controls_do_not_feed_the_2d_simulation() {
+    fn frame_diagnostics_classifies_warning_and_critical_budget_slips() {
         let mut app = App::new();
-        app.three_d_mode = true;
-        app.input.press(KeyCode::KeyW);
+        let report = app.diagnostics.record_frame(FrameSample::new(8.0, 2.0, 4));
+        assert_eq!(report.policy, BudgetPolicy::Warning);
 
-        assert_eq!(app.simulation_input(), SimulationInput::default());
-    }
-
-    #[derive(Default)]
-    struct TestSink {
-        entries: Vec<(&'static str, &'static str, DiagnosticValue)>,
-    }
-
-    impl DiagnosticSink for TestSink {
-        fn record(&mut self, group: &'static str, name: &'static str, value: DiagnosticValue) {
-            self.entries.push((group, name, value));
-        }
-    }
-
-    #[test]
-    fn app_exposes_diagnostics_through_the_source_seam() {
-        let mut app = App::new();
-        app.frame_diagnostics.record(FrameSample::new(3.0, 4.0, 32));
-
-        let mut sink = TestSink::default();
-        app.record_diagnostics(&mut sink);
-
-        assert!(sink.entries.contains(&(
-            "world",
-            "live_entities",
-            DiagnosticValue::Count(app.core.world.entity_count() as u64)
-        )));
-        assert!(
-            sink.entries
-                .contains(&("frame", "total_ms", DiagnosticValue::Millis(7.0)))
-        );
-        assert!(
-            sink.entries
-                .contains(&("frame", "tier", DiagnosticValue::Text("healthy")))
-        );
+        let report = app
+            .diagnostics
+            .record_frame(FrameSample::new(10.0, 10.0, 8));
+        assert_eq!(report.policy, BudgetPolicy::Critical);
     }
 }

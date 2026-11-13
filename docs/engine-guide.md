@@ -56,8 +56,9 @@ Responsibilities are intentionally split:
   dependencies and forbids unsafe code.
 - **`fate_net`** — transport-agnostic packet encoding and client/server session
   state machines built on `fate_sim` snapshots. It does not open sockets.
-- **`fate_demo`** — window/event loop, platform bindings, demo scene setup,
-  demo simulation population, controls, and presentation/telemetry.
+- **`fate_demo`** — window/event loop, platform bindings, showcase scene setup,
+  deterministic simulation driving, controls, and consumer-owned diagnostics
+  presentation.
 - **`fate_sim_bench`** — headless simulation measurements. Its timings do not
   measure rendering, GPU work, or full-frame performance.
 
@@ -372,8 +373,8 @@ restored state before accepting it.
 
 The fixed ECS component set and 2D systems are still small prototypes; projects
 choose which systems to call and how to interpret commands. The demo's
-`EngineCore`, movement/boost rules, playfield, and swarm/stress-scene
-population live under `projects/demo/src`.
+`EngineCore`, scripted cube-grid simulation, replay/rollback checks, and arena
+scene live under `projects/demo/src`.
 
 ### ECS and fixed-point math
 
@@ -523,9 +524,9 @@ returns a `renderer::Bounds2d` matching the camera projection. For 3D,
 view-projection matrix (wgpu `0..=1` depth); test candidates with
 `intersects_bounds(Bounds3d)` or `intersects_sphere`. `Bounds2d` and `Bounds3d`
 also provide `contains_point`, `intersects`, `expanded`, `min`, and `max`. The
-demo uses these helpers for both draw lists but still owns scene traversal and
-object selection. Culling is not automatic, and the demo's performance HUD
-remains project code.
+demo uses the 3D helpers to cull arena and cube instances before submission,
+but still owns scene traversal and object selection. Culling is not automatic,
+and the demo's diagnostics presentation remains project code.
 
 For a repeatable CPU-side baseline, run
 `cargo run --release -p fate_engine --example draw_list_bench`. It reports the

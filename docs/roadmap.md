@@ -10,7 +10,7 @@
 - Dependency-free `fate_sim` provides fixed-point scalar/vector math, a seeded
   RNG, generational entity handles with slot reuse, fixed component columns,
   and a rule-neutral state container with versioned snapshots.
-- Concrete commands, gameplay tick policy, replay, and rollback belong to
+- Concrete commands, tick policy, replay, and rollback belong to
   `projects/demo`; they are not reusable `fate_sim` APIs.
 - `fate_net` provides a transport-agnostic local protocol and ordered
   client/server sessions. It does not provide sockets, authentication,

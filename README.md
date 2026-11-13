@@ -14,7 +14,7 @@ expanding content.
 - The renderer provides 2D and indexed-mesh 3D paths with depth testing.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
   fixed-point math, an indexed-column ECS, seeded RNG, and versioned snapshots.
-  Concrete gameplay commands, replay, and rollback currently live in the demo.
+  Concrete input commands, replay, and rollback currently live in the demo.
 - The headless consumer smoke test in
   [`projects/consumer_smoke/`](projects/consumer_smoke/) validates the public
   APIs outside the demo.

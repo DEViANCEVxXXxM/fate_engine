@@ -9,7 +9,7 @@ This document defines the engineering constraints for the Phase 1 engine milesto
 - Treat backend, transport, tick-rate, and data-layout choices as replaceable or configurable when a real consumer needs it; do not generalize without evidence.
 - The current 120 Hz simulation rate and fixed-point implementation are Phase 1 defaults, not universal requirements for every game built on the engine.
 - Keep the runnable demo, its scene setup, and its configuration under `projects/demo`; it should consume engine crates through path dependencies rather than live in the engine library.
-- Reusable crates must not own demo-specific entities, stress-scene setup, or presentation behavior.
+- Reusable crates must not own demo-specific entities, scene setup, or presentation behavior.
 
 ## 1. Deterministic fixed-step simulation
 
