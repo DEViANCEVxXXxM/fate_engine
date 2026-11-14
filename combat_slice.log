@@ -1,0 +1,17 @@
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+     Running `C:\cargo-targets\fate_engine\debug\fate_combat_slice.exe`
+[2026-11-14T20:52:54Z WARN  wgpu_hal::vulkan::instance] GENERAL [Loader Message (0x0)]
+    	windows_read_data_files_in_registry: Registry lookup failed to get layer manifest files.
+[2026-11-14T20:52:54Z WARN  wgpu_hal::vulkan::instance] 	objects: (type: INSTANCE, hndl: 0xe1013e2050, name: ?)
+[2026-11-14T20:52:54Z WARN  wgpu_hal::vulkan::instance] GENERAL [Loader Message (0x0)]
+    	Removing layer VK_LAYER_OBS_HOOK (C:\ProgramData\obs-studio-hook\obs-vulkan32.json) because it is a duplicate of VK_LAYER_OBS_HOOK (C:\ProgramData\obs-studio-hook\obs-vulkan64.json)
+[2026-11-14T20:52:54Z WARN  wgpu_hal::vulkan::instance] 	objects: (type: INSTANCE, hndl: 0xe1013e2050, name: ?)
+[2026-11-14T20:52:55Z INFO  fate.combat] controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit
+[2026-11-14T20:52:57Z INFO  fate.combat] status tick=316 outcome=running health=100 ammo=6/10 enemies=6 shots=4 hits=2 kills=0 paused=false fps=121 sim_ms=0.012 draw_list_ms=0.062 submit_ms=8.052 verify_ms=0.001 drawn=12/256 visible=12 replay=ok snapshot=ok hash=f3760dfa90aa0200
+[2026-11-14T20:52:59Z INFO  fate.combat] status tick=556 outcome=running health=100 ammo=2/10 enemies=5 shots=8 hits=3 kills=1 paused=false fps=114 sim_ms=0.012 draw_list_ms=0.037 submit_ms=7.665 verify_ms=0.001 drawn=11/256 visible=11 replay=ok snapshot=ok hash=29de62788fd07a6c
+[2026-11-14T20:53:01Z INFO  fate.combat] status tick=797 outcome=running health=100 ammo=0/10 enemies=4 shots=10 hits=5 kills=2 paused=false fps=119 sim_ms=0.011 draw_list_ms=0.034 submit_ms=10.019 verify_ms=0.001 drawn=10/256 visible=10 replay=ok snapshot=ok hash=336fd5486f68772e
+[2026-11-14T20:53:03Z INFO  fate.combat] status tick=1037 outcome=running health=100 ammo=0/10 enemies=4 shots=10 hits=5 kills=2 paused=false fps=126 sim_ms=0.011 draw_list_ms=0.030 submit_ms=8.288 verify_ms=0.001 drawn=10/256 visible=10 replay=ok snapshot=ok hash=3aad89c49103b059
+[2026-11-14T20:53:05Z INFO  fate.combat] status tick=1277 outcome=running health=100 ammo=2/10 enemies=1 shots=18 hits=11 kills=5 paused=false fps=121 sim_ms=0.008 draw_list_ms=0.025 submit_ms=8.084 verify_ms=0.001 drawn=7/256 visible=7 replay=ok snapshot=ok hash=aeff529350daaef8
+[2026-11-14T20:53:05Z INFO  fate.combat] victory at tick 1298 with 100 health and 79.2s remaining
+[2026-11-14T20:53:07Z INFO  fate.combat] status tick=1298 outcome=victory health=100 ammo=0/10 enemies=0 shots=20 hits=12 kills=6 paused=false fps=119 sim_ms=0.000 draw_list_ms=0.026 submit_ms=8.503 verify_ms=0.000 drawn=7/256 visible=7 replay=ok snapshot=ok hash=1c7c5ec72e4bcc39
+[2026-11-14T20:53:09Z INFO  fate.combat] status tick=1298 outcome=victory health=100 ammo=0/10 enemies=0 shots=20 hits=12 kills=6 paused=false fps=37594 sim_ms=0.000 draw_list_ms=0.027 submit_ms=8.675 verify_ms=0.000 drawn=7/256 visible=7 replay=ok snapshot=ok hash=1c7c5ec72e4bcc39

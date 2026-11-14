@@ -42,6 +42,7 @@ fate_engine/
     fate_sim/                # headless deterministic simulation crate
     fate_sim_bench/          # CPU-only simulation benchmark
   projects/
+    combat_slice/            # small playable first-person consumer
     consumer_smoke/          # headless example consumer
     demo/                    # separate runnable consumer application
   docs/
@@ -59,6 +60,9 @@ Responsibilities are intentionally split:
 - **`fate_demo`** — window/event loop, platform bindings, showcase scene setup,
   deterministic simulation driving, controls, and consumer-owned diagnostics
   presentation.
+- **`fate_combat_slice`** — small playable first-person arena scenario. It owns
+  its rules, input mapping, scene content, and log/title presentation, and uses
+  the engine only through public APIs.
 - **`fate_sim_bench`** — headless simulation measurements. Its timings do not
   measure rendering, GPU work, or full-frame performance.
 
@@ -76,14 +80,17 @@ From the repository root:
 
 ```powershell
 cargo run -p fate_demo
+cargo run -p fate_combat_slice
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 The demo's key bindings, modes, and known scene limitations are in
-[`projects/demo/README.md`](../projects/demo/README.md). To run only the
-dependency-free simulation tests:
+[`projects/demo/README.md`](../projects/demo/README.md). The playable slice's
+controls, rules, and limitations are in
+[`projects/combat_slice/README.md`](../projects/combat_slice/README.md). To run
+only the dependency-free simulation tests:
 
 ```powershell
 cargo test -p fate_sim
@@ -434,6 +441,15 @@ the demo command schema and bounded input history. Its replay serialization is
 versioned but has no authentication or encryption; treat replay files as
 untrusted input.
 
+The playable slice keeps its own in-memory replay window in
+[`projects/combat_slice/src/replay.rs`](../projects/combat_slice/src/replay.rs).
+It records one input per fixed tick, replays the window from a snapshot, and
+compares the final hash with the live state every 240 ticks. The slice's
+snapshot codec and verification loop live in
+[`projects/combat_slice/src/sim.rs`](../projects/combat_slice/src/sim.rs) and
+[`projects/combat_slice/src/verification.rs`](../projects/combat_slice/src/verification.rs).
+Both are project-owned rather than reusable engine APIs.
+
 ### Rollback
 
 The demo-specific `RollbackSession` in
@@ -646,10 +662,11 @@ without graphics hardware. A skipped renderer test is not evidence that
 rendering works.
 
 Windowed and GPU checks are intentionally separate from the required CI job.
-Run `cargo run -p fate_window_smoke` and `cargo run -p fate_demo` manually on a
-machine with a window and graphics adapter when renderer changes need visual
-verification, and record what was exercised. They are not headless checks and
-are not part of the automated gate.
+Run `cargo run -p fate_window_smoke`, `cargo run -p fate_demo`, and
+`cargo run -p fate_combat_slice` manually on a machine with a window and
+graphics adapter when renderer changes need visual verification, and record what
+was exercised. They are not headless checks and are not part of the automated
+gate.
 
 ### Performance measurement
 
@@ -681,6 +698,8 @@ Useful source references:
 - [`src/lib.rs`](../src/lib.rs) — engine library module surface.
 - [`projects/consumer_smoke/`](../projects/consumer_smoke/) — minimal
   independent consumer package and invocation.
+- [`projects/combat_slice/`](../projects/combat_slice/) — small playable
+  first-person consumer with project-owned rules, replay, and snapshots.
 - [`projects/window_smoke/`](../projects/window_smoke/) — minimal independent
   windowed consumer that exercises the renderer seam without a direct `wgpu`
   dependency.

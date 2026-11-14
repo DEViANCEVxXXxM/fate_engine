@@ -10,8 +10,9 @@
 - Dependency-free `fate_sim` provides fixed-point scalar/vector math, a seeded
   RNG, generational entity handles with slot reuse, fixed component columns,
   and a rule-neutral state container with versioned snapshots.
-- Concrete commands, tick policy, replay, and rollback belong to
-  `projects/demo`; they are not reusable `fate_sim` APIs.
+- Concrete commands, tick policy, replay, and rollback belong to the consumer
+  projects (`projects/demo` and `projects/combat_slice`); they are not reusable
+  `fate_sim` APIs.
 - `fate_net` provides a transport-agnostic local protocol and ordered
   client/server sessions. It does not provide sockets, authentication,
   encryption, clock synchronization, or prediction/reconciliation.
@@ -128,6 +129,22 @@ explicit and tested, and performance claims include workload/build conditions.
 ## Step 5 — Validate with a small playable consumer
 
 **Depends on:** Steps 1–3; use Step 4 measurements where relevant.
+
+**Status: done.** [`projects/combat_slice/`](../projects/combat_slice/) is a
+small playable first-person arena scenario with movement, mouse look, hitscan
+shooting, enemy and player health, and explicit victory/defeat conditions. Its
+rules, input mapping, scene content, and presentation live in the project; no
+gameplay policy moved into a reusable crate. The simulation is fixed-step and
+fixed-point, and the project verifies a 240-tick replay window and periodic
+snapshot round trips against the live state. Headless tests cover the rules,
+replay, snapshot codec, interpolation, culling, and app behavior.
+
+The slice recorded two concrete gaps. `fate_sim` has no fixed-point
+trigonometric functions, so the project stores aim as unit yaw/pitch vectors and
+rotates them with its own small-angle polynomials before converting to float for
+the camera. The engine also has no text or HUD renderer, so the project presents
+player and verification state through the window title and `log`. Both
+workarounds are project-owned; neither changed the reusable crates.
 
 - Choose one compact original gameplay scenario with movement, an interaction,
   and a clear success/failure condition.

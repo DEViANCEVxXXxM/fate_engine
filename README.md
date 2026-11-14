@@ -11,6 +11,10 @@ expanding content.
 - The engine is a library crate at the repository root.
 - A standalone demo application lives in [`projects/demo/`](projects/demo/); it
   depends on the engine and is not part of the reusable library.
+- A small playable consumer lives in
+  [`projects/combat_slice/`](projects/combat_slice/); it exercises the engine
+  through a fixed-step first-person arena scenario and is also not part of the
+  reusable library.
 - The renderer provides 2D and indexed-mesh 3D paths with depth testing.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
   fixed-point math, an indexed-column ECS, seeded RNG, and versioned snapshots.
@@ -35,6 +39,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p fate_demo
+cargo run -p fate_combat_slice
 ```
 
 CI runs the headless parts of this gate (formatting, Clippy, workspace tests,
