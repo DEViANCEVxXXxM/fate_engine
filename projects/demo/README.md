@@ -55,9 +55,14 @@ is owned by the demo:
 
 - The window title refreshes twice per second with frame timings, draw load,
   budget tier, simulation tick, state hash, and verification status.
-- A status line is logged every two seconds.
-- With verbose logging enabled, buffered `key=value` diagnostics are published
-  about once per second through the `fate.showcase` log target.
+- A status line is logged every two seconds regardless of the verbose setting.
+- **F1** gates only the verbose structured sink: while it is enabled, buffered
+  `key=value` diagnostics are published about once per second through the
+  `fate.showcase` log target.
+- Verification failures are always logged with their detailed error message,
+  even when verbose diagnostics are off.
+- Frame-budget tier changes are logged as they happen: warnings for `warning`
+  or `critical`, and an info line when the frame returns to `healthy`.
 
 The default `env_logger` filter is `fate.showcase=info,warn`. Override it with
 `RUST_LOG` when running, for example:

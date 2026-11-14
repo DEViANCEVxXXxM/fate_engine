@@ -150,7 +150,11 @@ impl ShowcaseSim {
 
     /// Build interpolated cube instances for the renderer.
     pub fn render_instances(&self, alpha: f32) -> Vec<CubeInstance> {
-        let alpha = alpha.clamp(0.0, 1.0);
+        let alpha = if alpha.is_finite() {
+            alpha.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
         let tick = self.tick() as f32;
         let mut instances = Vec::with_capacity(self.tracked.len());
 
@@ -164,7 +168,9 @@ impl ShowcaseSim {
                 .world
                 .rotations()
                 .get(*entity)
-                .map_or(0.0, |rotation| rotation.0.to_f32());
+                .map_or(0.0, |rotation| {
+                    rotation.0.to_f32().rem_euclid(std::f32::consts::TAU)
+                });
             let is_player = *entity == self.core.player;
             let bob = if is_player {
                 0.0
@@ -238,6 +244,19 @@ impl VerifyResult {
     }
 }
 
+/// Store a verification result, logging the details whenever it fails.
+///
+/// Failures are exceptional, so each one is logged rather than only the first.
+fn store_result(label: &'static str, tick: u64, slot: &mut VerifyResult, result: VerifyResult) {
+    if let VerifyResult::Failed(message) = &result {
+        log::error!(
+            target: "fate.showcase",
+            "{label} verification failed at tick {tick}: {message}"
+        );
+    }
+    *slot = result;
+}
+
 /// Runs replay, rollback, and snapshot checks against the live simulation.
 pub struct VerificationState {
     pub replay_enabled: bool,
@@ -285,7 +304,12 @@ impl VerificationState {
 
         let advance_result = self.rollback.as_mut().map(|session| session.advance(input));
         if let Some(Err(error)) = advance_result {
-            self.rollback_result = VerifyResult::Failed(error.to_string());
+            store_result(
+                "rollback",
+                sim.tick(),
+                &mut self.rollback_result,
+                VerifyResult::Failed(error.to_string()),
+            );
             self.rollback = None;
         }
     }
@@ -331,10 +355,11 @@ impl VerificationState {
     fn verify_replay(&mut self, sim: &ShowcaseSim) {
         let initial = self.replay_initial.take();
         let inputs = std::mem::take(&mut self.replay_inputs);
-        self.replay_result = match initial {
+        let result = match initial {
             Some(initial) => verify_replay_window(&initial, &inputs, sim),
             None => VerifyResult::Failed("replay window has no initial state".to_string()),
         };
+        store_result("replay", sim.tick(), &mut self.replay_result, result);
         self.replay_initial = Some(sim.state_bytes());
     }
 
@@ -370,12 +395,12 @@ impl VerificationState {
             }
             Err(error) => VerifyResult::Failed(error.to_string()),
         };
-        self.rollback_result = result;
+        store_result("rollback", sim.tick(), &mut self.rollback_result, result);
     }
 
     fn verify_snapshot(&mut self, sim: &ShowcaseSim) {
         let bytes = sim.state_bytes();
-        self.snapshot_result = match EngineCore::from_state_bytes(&bytes) {
+        let result = match EngineCore::from_state_bytes(&bytes) {
             Ok(restored) => {
                 let hash = restored.state_hash();
                 if restored.state_bytes() == bytes && hash == sim.state_hash() {
@@ -389,6 +414,7 @@ impl VerificationState {
             }
             Err(error) => VerifyResult::Failed(error.to_string()),
         };
+        store_result("snapshot", sim.tick(), &mut self.snapshot_result, result);
     }
 }
 
@@ -481,6 +507,40 @@ mod tests {
                 .zip(&at_one)
                 .any(|(start, end)| { (start.position - end.position).length() > 1e-6 })
         );
+    }
+
+    #[test]
+    fn render_instances_sanitizes_invalid_alpha() {
+        let mut sim = ShowcaseSim::new();
+        sim.advance(scripted_input(0));
+
+        let nan = sim.render_instances(f32::NAN);
+        let clamped_high = sim.render_instances(f32::INFINITY);
+        let one = sim.render_instances(1.0);
+
+        assert_eq!(nan.len(), one.len());
+        for ((nan, high), one) in nan.iter().zip(&clamped_high).zip(&one) {
+            assert_eq!(nan.position, one.position);
+            assert_eq!(nan.rotation, one.rotation);
+            assert_eq!(high.position, one.position);
+            assert_eq!(high.rotation, one.rotation);
+        }
+    }
+
+    #[test]
+    fn render_rotations_stay_bounded_over_long_runs() {
+        let mut sim = ShowcaseSim::new();
+        for _ in 0..5_000 {
+            sim.advance(scripted_input(sim.tick()));
+        }
+
+        for instance in sim.render_instances(1.0) {
+            assert!(
+                (0.0..std::f32::consts::TAU).contains(&instance.rotation),
+                "rotation {} is outside [0, TAU)",
+                instance.rotation
+            );
+        }
     }
 
     #[test]

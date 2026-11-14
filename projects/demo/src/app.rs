@@ -20,7 +20,9 @@ use crate::diagnostics_panel::{ShowcaseSink, ShowcaseSource};
 use crate::prototype_simulation::SIMULATION_HZ;
 use crate::scene;
 use crate::showcase::{ShowcaseSim, VerificationState, scripted_input};
-use fate_engine::diagnostics::{Diagnostics, FrameDiagnostics, FrameReport, FrameSample};
+use fate_engine::diagnostics::{
+    BudgetPolicy, Diagnostics, FrameDiagnostics, FrameReport, FrameSample,
+};
 use fate_engine::math::Vec3;
 use fate_engine::renderer::{Camera3d, Mesh3d, Renderer};
 use fate_engine::time::Time;
@@ -60,6 +62,7 @@ struct App {
     time: Time,
     diagnostics: Diagnostics<ShowcaseSink>,
     last_report: FrameReport,
+    last_policy: BudgetPolicy,
     last_verify_ms: f32,
     orbit_mode: bool,
     orbit_angle: f32,
@@ -91,6 +94,7 @@ impl App {
             time: Time::new(SIMULATION_HZ as f32),
             diagnostics,
             last_report,
+            last_policy: last_report.policy,
             last_verify_ms: 0.0,
             orbit_mode: true,
             orbit_angle: 0.0,
@@ -122,16 +126,27 @@ impl App {
 
         let sample = FrameSample::new(sim_ms, frame.submit_ms, frame.drawn)
             .with_draw_list_ms(frame.draw_list_ms);
+        self.diagnostics.sink_mut().begin_frame();
         self.last_report = self.diagnostics.record_frame(sample);
         self.refresh_source(alpha, frame.drawn, frame.visible);
         self.sample_source();
 
-        if self.last_report.total_ms > self.last_report.target_ms {
-            log::warn!(
-                target: "fate.showcase",
-                "frame budget exceeded: {}",
-                self.last_report.summary()
-            );
+        if self.last_report.policy != self.last_policy {
+            if self.last_report.policy == BudgetPolicy::Healthy {
+                log::info!(
+                    target: "fate.showcase",
+                    "frame budget recovered: {}",
+                    self.last_report.summary()
+                );
+            } else {
+                log::warn!(
+                    target: "fate.showcase",
+                    "frame budget {}: {}",
+                    self.last_report.policy.label(),
+                    self.last_report.summary()
+                );
+            }
+            self.last_policy = self.last_report.policy;
         }
 
         self.input.end_frame();
@@ -551,6 +566,11 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.mesh = mesh;
+
+        log::info!(
+            target: "fate.showcase",
+            "controls: Tab camera, WASD/arrows move, mouse look, Shift boost, Space pause, F1 verbose, F2 replay, F4 snapshot, Escape release/quit"
+        );
     }
 
     fn window_event(
@@ -704,7 +724,6 @@ mod tests {
 
         assert!(app.renderer.is_none());
         assert!(app.mesh.is_none());
-        assert_eq!(app.sim.tracked_count(), 161);
         assert_eq!(app.sim.tracked_count(), 161);
         assert_eq!(app.sim.tick(), 0);
         assert!(app.orbit_mode);

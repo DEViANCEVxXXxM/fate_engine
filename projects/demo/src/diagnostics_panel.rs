@@ -17,31 +17,39 @@ pub const LOG_INTERVAL: u64 = 120;
 
 /// Sink that batches values into one `key=value` line and logs it periodically.
 ///
-/// The buffered line is only published when verbose logging is enabled. Frames
-/// between publications are discarded rather than queued, so a stalled consumer
-/// cannot grow memory without bound.
+/// The app calls [`ShowcaseSink::begin_frame`] before recording frame values,
+/// so a publication contains the most recent complete frame snapshot rather
+/// than a history of every frame since the last publication. The buffered line
+/// is only published when verbose logging is enabled.
 #[derive(Debug, Default)]
 pub struct ShowcaseSink {
     line: String,
-    pending: String,
+    latest: String,
     verbose: bool,
     flushes: u64,
+    replace_latest: bool,
 }
 
 impl ShowcaseSink {
     pub fn new(verbose: bool) -> Self {
         Self {
             line: String::new(),
-            pending: String::new(),
+            latest: String::new(),
             verbose,
             flushes: 0,
+            replace_latest: false,
         }
+    }
+
+    /// Mark the next flush as the start of a new frame snapshot.
+    pub fn begin_frame(&mut self) {
+        self.replace_latest = true;
     }
 
     pub fn set_verbose(&mut self, verbose: bool) {
         self.verbose = verbose;
         if !verbose {
-            self.pending.clear();
+            self.latest.clear();
         }
     }
 
@@ -61,10 +69,10 @@ impl ShowcaseSink {
         &self.line
     }
 
-    /// Values buffered for the next publication.
+    /// Most recent complete snapshot, waiting for the next publication.
     #[cfg(test)]
-    pub fn pending(&self) -> &str {
-        &self.pending
+    pub fn latest(&self) -> &str {
+        &self.latest
     }
 }
 
@@ -78,19 +86,23 @@ impl DiagnosticSink for ShowcaseSink {
 
     fn flush(&mut self) {
         if !self.line.is_empty() {
-            if !self.pending.is_empty() {
-                self.pending.push(' ');
+            if self.replace_latest {
+                self.latest.clear();
+                self.replace_latest = false;
             }
-            self.pending.push_str(&self.line);
+            if !self.latest.is_empty() {
+                self.latest.push(' ');
+            }
+            self.latest.push_str(&self.line);
             self.line.clear();
         }
 
         self.flushes = self.flushes.wrapping_add(1);
         if self.flushes.is_multiple_of(LOG_INTERVAL) {
-            if self.verbose && !self.pending.is_empty() {
-                log::info!(target: "fate.showcase", "{}", self.pending);
+            if self.verbose && !self.latest.is_empty() {
+                log::info!(target: "fate.showcase", "{}", self.latest);
             }
-            self.pending.clear();
+            self.latest.clear();
         }
     }
 }
@@ -206,6 +218,7 @@ mod tests {
     #[test]
     fn sink_batches_values_into_one_line() {
         let mut sink = ShowcaseSink::new(true);
+        sink.begin_frame();
         sink.record("frame", "sim_ms", DiagnosticValue::Millis(1.5));
         sink.record("frame", "drawn", DiagnosticValue::Count(7));
 
@@ -214,22 +227,46 @@ mod tests {
         sink.flush();
 
         assert!(sink.line().is_empty());
-        assert_eq!(sink.pending(), "frame.sim_ms=1.500ms frame.drawn=7");
+        assert_eq!(sink.latest(), "frame.sim_ms=1.500ms frame.drawn=7");
         assert_eq!(sink.flushes(), 1);
     }
 
     #[test]
-    fn verbose_toggle_controls_publication_and_clears_pending() {
+    fn begin_frame_replaces_the_previous_snapshot() {
+        let mut sink = ShowcaseSink::new(true);
+
+        sink.begin_frame();
+        sink.record("frame", "sim_ms", DiagnosticValue::Millis(1.0));
+        sink.flush();
+        sink.record("verify", "ms", DiagnosticValue::Millis(0.5));
+        sink.flush();
+        assert!(sink.latest().contains("frame.sim_ms=1.000ms"));
+        assert!(sink.latest().contains("verify.ms=0.500ms"));
+
+        sink.begin_frame();
+        sink.record("frame", "sim_ms", DiagnosticValue::Millis(2.0));
+        sink.flush();
+        sink.record("verify", "ms", DiagnosticValue::Millis(0.1));
+        sink.flush();
+
+        assert!(sink.latest().contains("frame.sim_ms=2.000ms"));
+        assert!(sink.latest().contains("verify.ms=0.100ms"));
+        assert!(!sink.latest().contains("1.000ms"));
+    }
+
+    #[test]
+    fn verbose_toggle_controls_publication_and_clears_latest() {
         let mut sink = ShowcaseSink::new(true);
         assert!(sink.is_verbose());
 
+        sink.begin_frame();
         sink.record("frame", "total_ms", DiagnosticValue::Millis(2.0));
         sink.flush();
-        assert!(!sink.pending().is_empty());
+        assert!(!sink.latest().is_empty());
 
         sink.set_verbose(false);
         assert!(!sink.is_verbose());
-        assert!(sink.pending().is_empty());
+        assert!(sink.latest().is_empty());
     }
 
     #[test]
@@ -237,12 +274,13 @@ mod tests {
         let mut sink = ShowcaseSink::new(true);
 
         for _ in 0..LOG_INTERVAL {
+            sink.begin_frame();
             sink.record("frame", "drawn", DiagnosticValue::Count(1));
             sink.flush();
         }
 
         assert_eq!(sink.flushes(), LOG_INTERVAL);
-        assert!(sink.pending().is_empty());
+        assert!(sink.latest().is_empty());
     }
 
     #[test]
