@@ -47,6 +47,13 @@ and the consumer smoke test) on pull requests and branch pushes. Windowed and
 GPU checks stay manual; see the
 [engine guide](docs/engine-guide.md#automated-quality-gate).
 
+On Linux, building the workspace needs the `libudev` development package,
+because the combat slice's controller support links against it:
+
+```sh
+sudo apt-get install -y libudev-dev
+```
+
 The CPU-only simulation benchmark does not initialize a window or GPU:
 
 ```powershell

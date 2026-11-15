@@ -652,6 +652,11 @@ cargo test --workspace --locked
 cargo run -p fate_consumer_smoke --locked
 ```
 
+Before the first build step it installs `libudev-dev`, because the combat
+slice's Linux controller support links against the system `libudev` through
+`pkg-config`. The windowing and rendering dependencies load their system
+libraries at runtime, so they need no development packages.
+
 The consumer smoke run is a headless integration check: it exercises input,
 simulation, movement, snapshots, and restoration through the public APIs. It
 does not initialize a window or GPU.

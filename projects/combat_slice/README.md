@@ -18,6 +18,13 @@ Or run `cargo run` from this directory. Frame timings are only representative in
 an optimized build; use `cargo run --release -p fate_combat_slice` when
 evaluating the reported timings.
 
+On Linux, building the slice needs the `libudev` development package, because the
+controller backend links against it:
+
+```sh
+sudo apt-get install -y libudev-dev
+```
+
 ## What it demonstrates
 
 - A 120 Hz fixed-step simulation built on `fate_sim` fixed-point math, with no
