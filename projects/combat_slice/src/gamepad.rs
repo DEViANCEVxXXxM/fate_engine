@@ -152,6 +152,9 @@ impl PadState {
 ///
 /// USB reports use ID `0x01` and start with the stick axes. Bluetooth reports
 /// use ID `0x31` and insert one flag byte before the axes.
+// The Windows HID fallback is the only caller, and the tests below keep this
+// parser covered on other platforms.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn parse_sony_report(report_id: u8, data: &[u8]) -> Option<PadState> {
     let axes_offset = match report_id {
         0x01 => 1,
@@ -206,6 +209,8 @@ pub(crate) fn parse_sony_report(report_id: u8, data: &[u8]) -> Option<PadState> 
 }
 
 /// Decode the low nibble of a DualSense D-pad byte.
+// Only `parse_sony_report` calls this, and that caller is Windows-only.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn dpad_directions(nibble: u8) -> (bool, bool, bool, bool) {
     // 0 = up, then clockwise in 45-degree steps; 8 means neutral.
     let left = matches!(nibble, 5..=7);
