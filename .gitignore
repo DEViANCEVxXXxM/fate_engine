@@ -1,3 +1,4 @@
 /target
 /docs/private/
 run.*
+*.log
