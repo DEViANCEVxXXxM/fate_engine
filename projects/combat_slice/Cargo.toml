@@ -11,3 +11,15 @@ gilrs = "0.11.2"
 log = "0.4.35"
 pollster = "1.0.1"
 winit = "0.30.13"
+
+# The DualSense HID fallback reads pads through WinRT, which needs no C
+# compiler and no `unsafe`. Xbox pads keep using `gilrs`.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Devices_Enumeration",
+    "Devices_HumanInterfaceDevice",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage",
+    "Storage_Streams",
+] }

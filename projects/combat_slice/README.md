@@ -48,18 +48,20 @@ Keyboard and mouse:
 
 Controller (Xbox and DualSense):
 
-- **Left stick** or **D-pad** — move.
-- **Right stick** — look.
-- **Right trigger (RT / R2)** — fire.
-- **Left trigger (LT / L2)** or **left stick click** — sprint.
-- **X (Xbox)** / **Square (DualSense)** — reload.
-- **Start (Xbox)** / **Options (DualSense)** — pause or resume.
-- **View (Xbox)** / **Create (DualSense)** — restart after victory or defeat.
-- **Y (Xbox)** / **Triangle (DualSense)** — toggle verbose status logging.
+- **Left stick** or **D-pad** - move.
+- **Right stick** - look.
+- **Right trigger (RT / R2)** or **right bumper (RB / R1)** - fire.
+- **Left trigger (LT / L2)**, **left bumper (LB / L1)**, or **left stick click** -
+  sprint.
+- **X (Xbox)** / **Square (DualSense)** - reload.
+- **Start (Xbox)** / **Options (DualSense)** - pause or resume.
+- **View (Xbox)** / **Create (DualSense)** - restart after victory or defeat.
+- **Y (Xbox)** / **Triangle (DualSense)** - toggle verbose status logging.
 
 Controllers are optional and can be connected or disconnected while the slice
 runs. The first connected pad drives the slice; if it disconnects, another
-connected pad takes over.
+connected pad takes over. The slice logs every pad it finds together with the
+backend that is reading it.
 
 Clicking the window recaptures the cursor after it has been released. Losing
 window focus releases the cursor and clears held input.
@@ -108,16 +110,26 @@ The simulation is deterministic and independent of the window and GPU:
 
 Results appear in the window title and the status log. `cargo test -p
 fate_combat_slice` runs the headless tests for simulation rules, replay,
-snapshot codec, interpolation, culling, input bindings, controller mapping, and
-app behavior. Those tests do not need a window, GPU adapter, or controller.
+snapshot codec, interpolation, culling, input bindings, controller mapping and
+DualSense report parsing, and app behavior. Those tests do not need a window,
+GPU adapter, or controller.
 
 ## Limitations
 
 - Rendering requires a working window-system backend and a GPU adapter supported
   by `wgpu`; windowed checks are manual.
-- Controller support uses `gilrs`: Windows uses Windows Gaming Input and Linux
-  uses evdev. Unusual pads may need an SDL-style mapping that `gilrs` does not
-  ship. Rumble, rebinding, and per-pad sensitivity are not implemented.
+- Xbox pads are read through `gilrs`: Windows Gaming Input on Windows and evdev
+  on Linux. Unusual pads may need an SDL-style mapping that `gilrs` does not
+  ship.
+- On Windows, DualSense and DualSense Edge pads are read directly through the
+  WinRT HID API, over USB or Bluetooth. Both report layouts are parsed; only the
+  USB layout has been checked against hardware. This keeps Sony pads working when
+  Windows Gaming Input reports no controllers at all, which happens when the
+  `XBOX Synthetic Gamepad Bus` device fails to start, for example because a HID
+  filter driver is attached above it. DualShock 4 pads are not covered by that
+  fallback.
+- Rumble, light bar, touchpad, and motion sensors are not implemented, and there
+  is no rebinding or per-pad sensitivity.
 - Controller stick movement is converted to the simulation's digital
   `-1`/`0`/`1` move axis, so it does not offer analog walk speed.
 - There is no text or HUD renderer, so all player-facing status is presented

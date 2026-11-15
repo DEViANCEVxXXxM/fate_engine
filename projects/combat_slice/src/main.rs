@@ -7,6 +7,8 @@ mod interpolation;
 mod replay;
 mod scene;
 mod sim;
+#[cfg(target_os = "windows")]
+mod sony_hid;
 mod verification;
 
 fn main() {
