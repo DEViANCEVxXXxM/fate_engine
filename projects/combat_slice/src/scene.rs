@@ -121,14 +121,6 @@ const MUZZLE_FORWARD: f32 = 1.10;
 const MUZZLE_RIGHT: f32 = 0.28;
 const MUZZLE_DOWN: f32 = 0.18;
 
-/// Camera forward, right, and up vectors, matching `Camera3d::forward`.
-fn camera_basis(camera: &Camera3d) -> (Vec3, Vec3, Vec3) {
-    let forward = camera.forward();
-    let right = forward.cross(Vec3::Y).normalize();
-    let up = right.cross(forward);
-    (forward, right, up)
-}
-
 /// Model matrix for a cube at a fixed offset in camera space.
 fn viewmodel_model(
     camera: &Camera3d,
@@ -137,7 +129,7 @@ fn viewmodel_model(
     down_offset: f32,
     scale: Vec3,
 ) -> Mat4 {
-    let (forward, right, up) = camera_basis(camera);
+    let (forward, right, up) = camera.basis();
     let position =
         camera.position + forward * forward_offset + right * right_offset + up * (-down_offset);
     let rotation = Mat4::from_cols_array([
@@ -300,7 +292,7 @@ mod tests {
     }
 
     fn viewmodel_offset(camera: &Camera3d, model: Mat4) -> Vec3 {
-        let (forward, right, up) = camera_basis(camera);
+        let (forward, right, up) = camera.basis();
         let cols = model.to_cols_array();
         let offset = Vec3::new(cols[12], cols[13], cols[14]) - camera.position;
         Vec3::new(offset.dot(right), offset.dot(up), offset.dot(forward))
@@ -339,5 +331,42 @@ mod tests {
         assert!((camera.position.y - PLAYER_EYE_HEIGHT.to_f32()).abs() < 1e-6);
         assert!((camera.yaw - sim.player.look.yaw_angle()).abs() < 1e-6);
         assert!((camera.pitch - sim.player.look.pitch_angle()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn camera_basis_matches_camera_at_helper() {
+        let sim = Sim::new();
+        let eye = Vec3::new(2.0, 1.6, -4.0);
+        let cam = camera_at(eye, &sim);
+
+        assert_eq!(cam.position, eye);
+        let (forward, right, up) = cam.basis();
+        assert!((forward.dot(right)).abs() < 1e-5);
+        assert!((forward.dot(up)).abs() < 1e-5);
+        assert!((right.dot(up)).abs() < 1e-5);
+        assert!((forward.length() - 1.0).abs() < 1e-5);
+        assert!((right.length() - 1.0).abs() < 1e-5);
+        assert!((up.length() - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn visible_indices_filters_behind_camera() {
+        let sim = Sim::new();
+        let camera = camera_for(&sim); // looking along -Z or forward aim
+        let in_front = CubeInstance {
+            position: camera.position + camera.forward() * 10.0,
+            scale: Vec3::new(1.0, 1.0, 1.0),
+            rotation: 0.0,
+            tint: [1.0, 1.0, 1.0],
+        };
+        let behind = CubeInstance {
+            position: camera.position - camera.forward() * 10.0,
+            scale: Vec3::new(1.0, 1.0, 1.0),
+            rotation: 0.0,
+            tint: [1.0, 1.0, 1.0],
+        };
+        let instances = [in_front, behind];
+        let visible = visible_indices(&camera, 16.0 / 9.0, &instances);
+        assert_eq!(visible, vec![0]);
     }
 }

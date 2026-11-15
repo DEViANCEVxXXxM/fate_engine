@@ -403,13 +403,21 @@ component registration, query composition, archetype storage, and parallel
 scheduling are deferred to later milestones.
 
 `fate_sim::math::Fixed` is signed Q32.32. Arithmetic saturates on overflow;
-division truncates. `FixedVec2` and `FixedVec3` provide the current 2D and 3D
-vector operations: addition, scaling, dot product, 3D cross product, length,
-and normalization. `FixedVec3::to_f32x3()` converts a vector to a
-renderer-facing float triple.
+division truncates. `Fixed` provides deterministic constants (`PI`, `TAU`,
+`FRAC_PI_2`, `FRAC_PI_4`) and polynomial trigonometric functions (`sin_cos()`,
+`sin()`, `cos()`). `FixedVec2` and `FixedVec3` provide 2D and 3D vector operations:
+addition, scaling, dot product, 3D cross product, length, and normalization.
+`FixedQuat` represents unit quaternions with axis-angle constructors, Euler angles
+(`from_yaw_pitch_roll`), quaternion composition, and vector rotation (`rotate_vec3`).
+`FixedTransform` composes fixed-point position, orientation, and uniform scale,
+transforming points and vectors. `FixedVec3::to_f32x3()` and `FixedQuat::to_f32x4()`
+convert vectors and rotations to renderer-facing float primitives.
+
 Convert to `f32` only when preparing renderer-facing values; converting back
 does not preserve deterministic precision. The engine's renderer-facing
-`fate_engine::math::{Vec2, Vec3, Mat4}` uses `f32`.
+`fate_engine::math::{Vec2, Vec3, Mat4}` uses `f32`. `Camera3d` exposes
+its orthonormal basis (`forward()`, `right()`, `up()`, `basis()`) and separate
+`view_matrix()` and `projection_matrix()` helpers.
 
 ### Deterministic randomness
 

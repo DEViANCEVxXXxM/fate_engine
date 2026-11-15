@@ -171,4 +171,35 @@ mod tests {
             Err(ReplayError::InvalidInput)
         );
     }
+
+    #[test]
+    fn playback_detects_tampered_expected_hash() {
+        let initial = Sim::new();
+        let inputs = sample_inputs(5);
+        let mut tape = ReplayTape::record(&initial, &inputs).unwrap();
+
+        // Alter expected hash without changing input
+        tape.frames[2].expected_hash ^= 0xDEAD_BEEF;
+
+        match tape.playback() {
+            Err(ReplayError::Diverged { tick, .. }) => assert_eq!(tick, 3),
+            Err(err) => panic!("expected divergence at tick 3, got error {err:?}"),
+            Ok(_) => panic!("expected divergence at tick 3, got Ok"),
+        }
+    }
+
+    #[test]
+    fn playback_handles_corrupted_snapshot() {
+        let initial = Sim::new();
+        let inputs = sample_inputs(2);
+        let mut tape = ReplayTape::record(&initial, &inputs).unwrap();
+
+        // Corrupt initial state header magic
+        tape.initial_state[0] ^= 0xFF;
+
+        assert!(matches!(
+            tape.playback(),
+            Err(ReplayError::InvalidSnapshot(_))
+        ));
+    }
 }

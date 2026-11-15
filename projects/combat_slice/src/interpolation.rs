@@ -129,4 +129,31 @@ mod tests {
             interpolation.enemy_position(0, 1.0)
         );
     }
+
+    #[test]
+    fn enemy_position_out_of_bounds_falls_back_safely() {
+        let sim = Sim::new();
+        let interpolation = Interpolation::new(&sim);
+        // Valid enemy has Y = ENEMY_CENTER_Y
+        let valid_pos = interpolation.enemy_position(0, 0.5);
+        assert!((valid_pos.y - ENEMY_CENTER_Y.to_f32()).abs() < 1e-6);
+
+        // Out-of-bounds enemy index falls back to (0, ENEMY_CENTER_Y, 0)
+        let out_pos = interpolation.enemy_position(9999, 0.5);
+        assert_eq!(out_pos, Vec3::new(0.0, ENEMY_CENTER_Y.to_f32(), 0.0));
+    }
+
+    #[test]
+    fn enemy_count_change_reinitializes_interpolation() {
+        let mut sim = Sim::new();
+        let mut interpolation = Interpolation::new(&sim);
+        interpolation.begin_step();
+
+        // Simulate killing all enemies or clearing enemy list
+        sim.enemies.clear();
+        interpolation.end_step(&sim);
+
+        assert_eq!(interpolation.current_enemies.len(), 0);
+        assert_eq!(interpolation.previous_enemies.len(), 0);
+    }
 }

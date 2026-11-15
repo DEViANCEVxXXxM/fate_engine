@@ -174,12 +174,34 @@ impl Camera3d {
         Vec3::new(yaw.sin() * cos_pitch, pitch.sin(), -yaw.cos() * cos_pitch).normalize()
     }
 
-    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+    pub fn right(&self) -> Vec3 {
+        self.forward().cross(Vec3::Y).normalize()
+    }
+
+    pub fn up(&self) -> Vec3 {
+        self.right().cross(self.forward())
+    }
+
+    /// Full camera basis `(forward, right, up)`.
+    pub fn basis(&self) -> (Vec3, Vec3, Vec3) {
+        let forward = self.forward();
+        let right = forward.cross(Vec3::Y).normalize();
+        let up = right.cross(forward);
+        (forward, right, up)
+    }
+
+    pub fn view_matrix(&self) -> Mat4 {
         let position = self.safe_position();
-        let view = Mat4::look_at(position, position + self.forward(), Vec3::Y);
+        Mat4::look_at(position, position + self.forward(), Vec3::Y)
+    }
+
+    pub fn projection_matrix(&self, aspect: f32) -> Mat4 {
         let (near, far) = self.safe_clip_planes();
-        let projection = Mat4::perspective(self.safe_fov_y(), Self::safe_aspect(aspect), near, far);
-        projection.mul(view)
+        Mat4::perspective(self.safe_fov_y(), Self::safe_aspect(aspect), near, far)
+    }
+
+    pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        self.projection_matrix(aspect).mul(self.view_matrix())
     }
 
     /// View frustum matching `view_projection(aspect)`.
@@ -472,5 +494,35 @@ mod tests {
 
         assert!(projected_depth(camera.near).abs() < 1e-5);
         assert!((projected_depth(camera.far) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn camera_3d_basis_and_matrices_are_consistent() {
+        let camera = Camera3d {
+            position: Vec3::new(1.0, 2.0, 3.0),
+            yaw: 0.5,
+            pitch: -0.2,
+            ..Default::default()
+        };
+        let (forward, right, up) = camera.basis();
+        assert_eq!(camera.forward(), forward);
+        assert_eq!(camera.right(), right);
+        assert_eq!(camera.up(), up);
+
+        // Basis vectors are orthonormal
+        assert!((forward.length() - 1.0).abs() < 1e-5);
+        assert!((right.length() - 1.0).abs() < 1e-5);
+        assert!((up.length() - 1.0).abs() < 1e-5);
+        assert!(forward.dot(right).abs() < 1e-5);
+        assert!(forward.dot(up).abs() < 1e-5);
+        assert!(right.dot(up).abs() < 1e-5);
+
+        // view_projection matches projection * view
+        let aspect = 16.0 / 9.0;
+        let vp = camera.view_projection(aspect);
+        let manual_vp = camera.projection_matrix(aspect).mul(camera.view_matrix());
+        for i in 0..16 {
+            assert!((vp.m[i] - manual_vp.m[i]).abs() < 1e-5);
+        }
     }
 }

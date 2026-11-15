@@ -139,12 +139,13 @@ fixed-point, and the project verifies a 240-tick replay window and periodic
 snapshot round trips against the live state. Headless tests cover the rules,
 replay, snapshot codec, interpolation, culling, and app behavior.
 
-The slice recorded two concrete gaps. `fate_sim` has no fixed-point
-trigonometric functions, so the project stores aim as unit yaw/pitch vectors and
-rotates them with its own small-angle polynomials before converting to float for
-the camera. The engine also has no text or HUD renderer, so the project presents
-player and verification state through the window title and `log`. Both
-workarounds are project-owned; neither changed the reusable crates.
+The slice recorded two concrete gaps. First, `fate_sim` had no fixed-point
+trigonometric functions, so the project initially rotated aim with local small-angle
+polynomials. This gap is now resolved: `fate_sim::math` provides deterministic
+`sin_cos()`, `FixedQuat`, and `FixedTransform`, and `combat_slice` was updated to
+use engine trigonometry. The engine also has no text or HUD renderer, so the project
+presents player and verification state through the window title and `log`. This second
+workaround remains project-owned pending UI/text capability in Phase 1/2.
 
 - Choose one compact original gameplay scenario with movement, an interaction,
   and a clear success/failure condition.
@@ -160,7 +161,6 @@ consumer rather than a speculative abstraction.
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.
-- Fixed-point 3D rotation/transform types.
 - General assets, materials, lighting, scene graphs, and renderer backends.
 - Network transport, peer identity, encryption, clock synchronization, and
   multiplayer prediction/reconciliation. Define a threat model before adding

@@ -697,20 +697,9 @@ fn outcome_from_code(code: u8) -> Option<Outcome> {
     }
 }
 
-fn sin_small(angle: Fixed) -> Fixed {
-    let square = angle * angle;
-    angle * (Fixed::ONE - square * (Fixed::from_ratio(1, 6) - square * Fixed::from_ratio(1, 120)))
-}
-
-fn cos_small(angle: Fixed) -> Fixed {
-    let square = angle * angle;
-    Fixed::ONE - square * (Fixed::from_ratio(1, 2) - square * Fixed::from_ratio(1, 24))
-}
-
 fn rotate_unit(vector: FixedVec2, angle: Fixed) -> FixedVec2 {
     let angle = angle.clamp(-MAX_LOOK_STEP, MAX_LOOK_STEP);
-    let sin = sin_small(angle);
-    let cos = cos_small(angle);
+    let (sin, cos) = angle.sin_cos();
     FixedVec2::new(
         vector.x * cos - vector.y * sin,
         vector.x * sin + vector.y * cos,
@@ -1040,6 +1029,6 @@ mod tests {
             sim.step(strafing_input(tick));
         }
 
-        assert_eq!(sim.state_hash(), 0x5f26_eefc_7bdb_0776);
+        assert_eq!(sim.state_hash(), 0x19e9_08be_4b07_2b83);
     }
 }

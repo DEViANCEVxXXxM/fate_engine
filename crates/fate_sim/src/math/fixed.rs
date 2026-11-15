@@ -10,6 +10,10 @@ pub struct Fixed(i64);
 impl Fixed {
     pub const ZERO: Self = Self(0);
     pub const ONE: Self = Self(SCALE);
+    pub const FRAC_PI_4: Self = Self(3_373_259_426);
+    pub const FRAC_PI_2: Self = Self(6_746_518_852);
+    pub const PI: Self = Self(13_493_037_704);
+    pub const TAU: Self = Self(26_986_075_408);
 
     pub const fn from_raw(raw: i64) -> Self {
         Self(raw)
@@ -58,6 +62,43 @@ impl Fixed {
     pub fn rem_euclid(self, rhs: Self) -> Self {
         assert!(rhs.0 > 0, "fixed-point modulus must be positive");
         Self(self.0.rem_euclid(rhs.0))
+    }
+
+    /// Compute deterministic sine and cosine using fixed-point polynomial approximation.
+    pub fn sin_cos(self) -> (Self, Self) {
+        let raw = self.rem_euclid(Self::TAU).0;
+        let oct = (raw / Self::FRAC_PI_4.0).min(7) as usize;
+        let rem = raw - oct as i64 * Self::FRAC_PI_4.0;
+        let t = if oct % 2 == 1 {
+            Self::from_raw(Self::FRAC_PI_4.0 - rem)
+        } else {
+            Self::from_raw(rem)
+        };
+
+        let s = sin_octant(t);
+        let c = cos_octant(t);
+
+        match oct {
+            0 => (s, c),
+            1 => (c, s),
+            2 => (c, -s),
+            3 => (s, -c),
+            4 => (-s, -c),
+            5 => (-c, -s),
+            6 => (-c, s),
+            7 => (-s, c),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Compute deterministic sine in fixed-point.
+    pub fn sin(self) -> Self {
+        self.sin_cos().0
+    }
+
+    /// Compute deterministic cosine in fixed-point.
+    pub fn cos(self) -> Self {
+        self.sin_cos().1
     }
 }
 
@@ -116,7 +157,7 @@ impl Neg for Fixed {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FixedVec2 {
     pub x: Fixed,
     pub y: Fixed,
@@ -196,7 +237,7 @@ impl Neg for FixedVec2 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct FixedVec3 {
     pub x: Fixed,
     pub y: Fixed,
@@ -295,6 +336,29 @@ impl Neg for FixedVec3 {
     }
 }
 
+const SIN_C1: Fixed = Fixed::from_ratio(1, 6);
+const SIN_C2: Fixed = Fixed::from_ratio(1, 120);
+const SIN_C3: Fixed = Fixed::from_ratio(1, 5_040);
+const SIN_C4: Fixed = Fixed::from_ratio(1, 362_880);
+
+const COS_C1: Fixed = Fixed::from_ratio(1, 2);
+const COS_C2: Fixed = Fixed::from_ratio(1, 24);
+const COS_C3: Fixed = Fixed::from_ratio(1, 720);
+const COS_C4: Fixed = Fixed::from_ratio(1, 40_320);
+const COS_C5: Fixed = Fixed::from_ratio(1, 3_628_800);
+
+fn sin_octant(x: Fixed) -> Fixed {
+    let x2 = x * x;
+    let term = SIN_C1 - x2 * (SIN_C2 - x2 * (SIN_C3 - x2 * SIN_C4));
+    x * (Fixed::ONE - x2 * term)
+}
+
+fn cos_octant(x: Fixed) -> Fixed {
+    let x2 = x * x;
+    let term = COS_C1 - x2 * (COS_C2 - x2 * (COS_C3 - x2 * (COS_C4 - x2 * COS_C5)));
+    Fixed::ONE - x2 * term
+}
+
 fn integer_sqrt(value: u128) -> u128 {
     if value < 2 {
         return value;
@@ -374,5 +438,119 @@ mod tests {
             i64::MAX
         );
         assert_eq!(Fixed::from_ratio(i64::MAX, 1).raw(), i64::MAX);
+    }
+
+    #[test]
+    fn trig_cardinal_angles_and_periodicity() {
+        // Zero
+        let (s0, c0) = Fixed::ZERO.sin_cos();
+        assert_eq!(s0, Fixed::ZERO);
+        assert_eq!(c0, Fixed::ONE);
+
+        // pi / 2
+        let (s_pi2, c_pi2) = Fixed::FRAC_PI_2.sin_cos();
+        assert_eq!(s_pi2, Fixed::ONE);
+        assert_eq!(c_pi2, Fixed::ZERO);
+
+        // pi
+        let (s_pi, c_pi) = Fixed::PI.sin_cos();
+        assert_eq!(s_pi, Fixed::ZERO);
+        assert_eq!(c_pi, -Fixed::ONE);
+
+        // 3pi / 2
+        let (s_3pi2, c_3pi2) = (Fixed::PI + Fixed::FRAC_PI_2).sin_cos();
+        assert_eq!(s_3pi2, -Fixed::ONE);
+        assert_eq!(c_3pi2, Fixed::ZERO);
+
+        // 2pi (tau)
+        let (s_tau, c_tau) = Fixed::TAU.sin_cos();
+        assert_eq!(s_tau, Fixed::ZERO);
+        assert_eq!(c_tau, Fixed::ONE);
+
+        // Negative angle (-pi/2)
+        let (s_neg_pi2, c_neg_pi2) = (-Fixed::FRAC_PI_2).sin_cos();
+        assert_eq!(s_neg_pi2, -Fixed::ONE);
+        assert_eq!(c_neg_pi2, Fixed::ZERO);
+
+        // Periodic wrap (tau + pi/2)
+        let (s_wrap, c_wrap) = (Fixed::TAU + Fixed::FRAC_PI_2).sin_cos();
+        assert_eq!(s_wrap, s_pi2);
+        assert_eq!(c_wrap, c_pi2);
+
+        // sin(pi/4) == cos(pi/4) approx sqrt(2)/2 = 0.70710678
+        let (s_pi4, c_pi4) = Fixed::FRAC_PI_4.sin_cos();
+        assert!(
+            s_pi4.raw().abs_diff(c_pi4.raw()) <= 64,
+            "s_pi4: {}, c_pi4: {}, diff: {}",
+            s_pi4.raw(),
+            c_pi4.raw(),
+            s_pi4.raw().abs_diff(c_pi4.raw())
+        );
+        let expected_sqrt2_2 = (Fixed::ONE * Fixed::ONE / Fixed::from_int(2)).sqrt();
+        assert!(s_pi4.raw().abs_diff(expected_sqrt2_2.raw()) < 100);
+
+        // Pythagorean identity sin^2 + cos^2 approx 1 across various angles
+        let angles = [
+            Fixed::from_ratio(1, 10),
+            Fixed::from_ratio(1, 3),
+            Fixed::from_ratio(7, 5),
+            Fixed::from_ratio(22, 7),
+            Fixed::from_ratio(-5, 4),
+        ];
+        for angle in angles {
+            let (s, c) = angle.sin_cos();
+            let sum_sq = s * s + c * c;
+            assert!(
+                sum_sq.raw().abs_diff(Fixed::ONE.raw()) <= 16,
+                "sin^2 + cos^2 diverged for angle {:?}",
+                angle
+            );
+        }
+
+        // Test standalone sin() and cos() helpers against sin_cos()
+        for angle in angles {
+            assert_eq!(angle.sin(), angle.sin_cos().0);
+            assert_eq!(angle.cos(), angle.sin_cos().1);
+        }
+    }
+
+    #[test]
+    fn trig_odd_even_symmetry() {
+        // sin(-x) == -sin(x), cos(-x) == cos(x)
+        let sample_steps = 32;
+        let step = Fixed::TAU / Fixed::from_int(sample_steps);
+        for i in 0..sample_steps {
+            let angle = step * Fixed::from_int(i);
+            let (s_pos, c_pos) = angle.sin_cos();
+            let (s_neg, c_neg) = (-angle).sin_cos();
+
+            assert!(
+                s_neg.raw().abs_diff((-s_pos).raw()) <= 1,
+                "sin(-x) symmetry failed for angle {:?}",
+                angle
+            );
+            assert!(
+                c_neg.raw().abs_diff(c_pos.raw()) <= 1,
+                "cos(-x) symmetry failed for angle {:?}",
+                angle
+            );
+        }
+    }
+
+    #[test]
+    fn trig_continuous_across_octant_boundaries() {
+        // Step tightly around boundaries: k * PI / 4
+        let eps = Fixed::from_raw(1);
+        for k in 0..8 {
+            let boundary = Fixed::FRAC_PI_4 * Fixed::from_int(k);
+            let (s_before, c_before) = (boundary - eps).sin_cos();
+            let (s_at, c_at) = boundary.sin_cos();
+            let (s_after, c_after) = (boundary + eps).sin_cos();
+
+            assert!(s_before.raw().abs_diff(s_at.raw()) <= 64);
+            assert!(s_after.raw().abs_diff(s_at.raw()) <= 64);
+            assert!(c_before.raw().abs_diff(c_at.raw()) <= 64);
+            assert!(c_after.raw().abs_diff(c_at.raw()) <= 64);
+        }
     }
 }
