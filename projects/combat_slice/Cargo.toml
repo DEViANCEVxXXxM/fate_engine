@@ -7,6 +7,7 @@ edition = "2024"
 env_logger = "0.11.11"
 fate_engine = { path = "../.." }
 fate_sim = { path = "../../crates/fate_sim" }
+gilrs = "0.11.2"
 log = "0.4.35"
 pollster = "1.0.1"
 winit = "0.30.13"

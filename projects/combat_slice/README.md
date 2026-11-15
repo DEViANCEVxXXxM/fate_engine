@@ -25,10 +25,14 @@ evaluating the reported timings.
 - First-person `Camera3d` rendering of an indexed cube arena and dynamic cubes.
 - Consumer-owned frustum culling and draw-instance budgeting.
 - Render-only interpolation between fixed states.
+- Keyboard, mouse, and Xbox/DualSense controller input merged into one
+  fixed-step command stream.
 - Continuous replay verification and periodic snapshot round trips.
 - A playable loop with explicit victory and defeat conditions.
 
 ## Controls
+
+Keyboard and mouse:
 
 - **W/A/S/D** or **arrow keys** — move.
 - **Mouse** — look, while the window has captured the cursor.
@@ -41,6 +45,21 @@ evaluating the reported timings.
 - **F4** — run a snapshot round-trip check immediately.
 - **Enter** — restart after victory or defeat.
 - **Escape** — release the cursor; press again to quit.
+
+Controller (Xbox and DualSense):
+
+- **Left stick** or **D-pad** — move.
+- **Right stick** — look.
+- **Right trigger (RT / R2)** — fire.
+- **Left trigger (LT / L2)** or **left stick click** — sprint.
+- **X (Xbox)** / **Square (DualSense)** — reload.
+- **Start (Xbox)** / **Options (DualSense)** — pause or resume.
+- **View (Xbox)** / **Create (DualSense)** — restart after victory or defeat.
+- **Y (Xbox)** / **Triangle (DualSense)** — toggle verbose status logging.
+
+Controllers are optional and can be connected or disconnected while the slice
+runs. The first connected pad drives the slice; if it disconnects, another
+connected pad takes over.
 
 Clicking the window recaptures the cursor after it has been released. Losing
 window focus releases the cursor and clears held input.
@@ -89,13 +108,18 @@ The simulation is deterministic and independent of the window and GPU:
 
 Results appear in the window title and the status log. `cargo test -p
 fate_combat_slice` runs the headless tests for simulation rules, replay,
-snapshot codec, interpolation, culling, input bindings, and app behavior. Those
-tests do not need a window or GPU adapter.
+snapshot codec, interpolation, culling, input bindings, controller mapping, and
+app behavior. Those tests do not need a window, GPU adapter, or controller.
 
 ## Limitations
 
 - Rendering requires a working window-system backend and a GPU adapter supported
   by `wgpu`; windowed checks are manual.
+- Controller support uses `gilrs`: Windows uses Windows Gaming Input and Linux
+  uses evdev. Unusual pads may need an SDL-style mapping that `gilrs` does not
+  ship. Rumble, rebinding, and per-pad sensitivity are not implemented.
+- Controller stick movement is converted to the simulation's digital
+  `-1`/`0`/`1` move axis, so it does not offer analog walk speed.
 - There is no text or HUD renderer, so all player-facing status is presented
   through the window title and logs.
 - `fate_sim` has no fixed-point trigonometric functions. The slice keeps aim as

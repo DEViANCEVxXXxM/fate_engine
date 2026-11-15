@@ -15,6 +15,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::combat_input::{self, Action, Axis, CombatInput};
+use crate::gamepad::{Gamepad, GamepadUpdate};
 use crate::interpolation::Interpolation;
 use crate::scene;
 use crate::sim::{MAGAZINE_SIZE, MAX_LOOK_INPUT, Outcome, SIMULATION_HZ, Sim, SimInput};
@@ -43,6 +44,8 @@ struct App {
     verification: Verification,
     interpolation: Interpolation,
     input: CombatInput,
+    gamepad: Gamepad,
+    gamepad_update: GamepadUpdate,
     time: Time,
     mouse_fire: bool,
     pending_look: (f32, f32),
@@ -75,6 +78,8 @@ impl App {
             verification,
             interpolation,
             input: combat_input::new(),
+            gamepad: Gamepad::disabled(),
+            gamepad_update: GamepadUpdate::default(),
             time: Time::new(SIMULATION_HZ as f32),
             mouse_fire: false,
             pending_look: (0.0, 0.0),
@@ -99,7 +104,8 @@ impl App {
     /// Returns whether a frame was submitted to the renderer.
     fn step_frame(&mut self) -> bool {
         let frame_dt = self.time.tick();
-        self.accumulate_look();
+        self.poll_gamepad();
+        self.accumulate_look(frame_dt);
         let (sim_ms, verify_ms) = self.advance_simulation();
         self.last_sim_ms = sim_ms;
         self.last_verify_ms = verify_ms;
@@ -158,35 +164,70 @@ impl App {
         (sim_ms, verify_ms)
     }
 
+    /// Poll the controller and apply one-shot menu actions.
+    ///
+    /// The backend is still drained while the window is unfocused so events do
+    /// not pile up, but its input is ignored until focus returns.
+    fn poll_gamepad(&mut self) {
+        let update = self.gamepad.poll();
+        self.apply_gamepad_update(update);
+    }
+
+    /// Apply one frame of controller input, including one-shot menu actions.
+    fn apply_gamepad_update(&mut self, update: GamepadUpdate) {
+        if !self.focused {
+            self.gamepad_update = GamepadUpdate::default();
+            return;
+        }
+
+        self.gamepad_update = update;
+        if update.pause {
+            self.set_paused(!self.paused);
+        }
+        if update.restart && !self.sim.outcome().is_running() {
+            self.restart();
+        }
+        if update.verbose {
+            self.toggle_verbose();
+        }
+    }
+
     fn build_input(&self, look: (i16, i16)) -> SimInput {
-        let move_x = (self.input.action_down(Action::MoveRight) as i8)
+        let keyboard_x = (self.input.action_down(Action::MoveRight) as i8)
             - (self.input.action_down(Action::MoveLeft) as i8);
-        let move_y = (self.input.action_down(Action::MoveForward) as i8)
+        let keyboard_y = (self.input.action_down(Action::MoveForward) as i8)
             - (self.input.action_down(Action::MoveBack) as i8);
+        let move_x = (keyboard_x as i16 + self.gamepad_update.move_x as i16).clamp(-1, 1) as i8;
+        let move_y = (keyboard_y as i16 + self.gamepad_update.move_y as i16).clamp(-1, 1) as i8;
 
         SimInput {
             move_x,
             move_y,
             look_yaw: look.0,
             look_pitch: look.1,
-            sprint: self.input.action_down(Action::Sprint),
-            fire: self.input.action_down(Action::Fire) || self.mouse_fire,
-            reload: self.input.action_down(Action::Reload),
+            sprint: self.input.action_down(Action::Sprint) || self.gamepad_update.sprint,
+            fire: self.input.action_down(Action::Fire)
+                || self.mouse_fire
+                || self.gamepad_update.fire,
+            reload: self.input.action_down(Action::Reload) || self.gamepad_update.reload,
         }
     }
 
-    fn accumulate_look(&mut self) {
-        let delta_x = self.input.axis_delta(Axis::MouseX);
-        let delta_y = self.input.axis_delta(Axis::MouseY);
-        if delta_x.is_finite() {
-            self.pending_look.0 =
-                (self.pending_look.0 + delta_x).clamp(-MAX_PENDING_LOOK, MAX_PENDING_LOOK);
+    fn accumulate_look(&mut self, frame_dt: f32) {
+        if self.paused || !self.sim.outcome().is_running() {
+            return;
         }
-        if delta_y.is_finite() {
-            // Screen-space Y grows downward, while positive pitch looks up.
-            self.pending_look.1 =
-                (self.pending_look.1 - delta_y).clamp(-MAX_PENDING_LOOK, MAX_PENDING_LOOK);
-        }
+
+        let mouse_x = finite_or_zero(self.input.axis_delta(Axis::MouseX));
+        let mouse_y = finite_or_zero(self.input.axis_delta(Axis::MouseY));
+        let (pad_yaw, pad_pitch) = self.gamepad_update.look_counts(frame_dt);
+
+        self.pending_look.0 =
+            (self.pending_look.0 + mouse_x + pad_yaw).clamp(-MAX_PENDING_LOOK, MAX_PENDING_LOOK);
+        // Screen-space mouse Y grows downward, while positive pitch looks up.
+        // The stick already reports positive up.
+        self.pending_look.1 =
+            (self.pending_look.1 - mouse_y + pad_pitch).clamp(-MAX_PENDING_LOOK, MAX_PENDING_LOOK);
     }
 
     fn take_look(&mut self) -> (i16, i16) {
@@ -441,6 +482,7 @@ impl App {
         self.paused = false;
         self.mouse_fire = false;
         self.pending_look = (0.0, 0.0);
+        self.gamepad_update = GamepadUpdate::default();
         self.time = Time::new(SIMULATION_HZ as f32);
         self.input.clear();
         log::info!(target: "fate.combat", "slice restarted");
@@ -562,11 +604,16 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.mesh = mesh;
+        self.gamepad = Gamepad::new();
         self.capture_cursor();
 
         log::info!(
             target: "fate.combat",
             "controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit"
+        );
+        log::info!(
+            target: "fate.combat",
+            "controller: left stick/d-pad move, right stick look, RT fire, LT sprint, X/Square reload, Menu/Options pause, View/Create restart after outcome, Y/Triangle verbose"
         );
     }
 
@@ -639,6 +686,10 @@ impl ApplicationHandler for App {
             window.request_redraw();
         }
     }
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
 }
 
 fn clamp_look(value: f32) -> i16 {
@@ -781,15 +832,141 @@ mod tests {
     fn vertical_mouse_motion_is_not_inverted() {
         let mut app = App::new();
         app.input.update_axis(Axis::MouseY, 120.0);
-        app.accumulate_look();
+        app.accumulate_look(1.0 / 120.0);
         let (_, pitch) = app.take_look();
         assert!(pitch < 0, "mouse down should pitch down");
 
         let mut app = App::new();
         app.input.update_axis(Axis::MouseY, -120.0);
-        app.accumulate_look();
+        app.accumulate_look(1.0 / 120.0);
         let (_, pitch) = app.take_look();
         assert!(pitch > 0, "mouse up should pitch up");
+    }
+
+    #[test]
+    fn gamepad_movement_and_actions_merge_with_keyboard() {
+        let mut app = App::new();
+        app.input.press(KeyCode::KeyW);
+        app.gamepad_update = GamepadUpdate {
+            move_x: 1,
+            fire: true,
+            sprint: true,
+            reload: true,
+            ..GamepadUpdate::default()
+        };
+
+        let input = app.build_input((0, 0));
+
+        assert_eq!(input.move_x, 1);
+        assert_eq!(input.move_y, 1);
+        assert!(input.fire);
+        assert!(input.sprint);
+        assert!(input.reload);
+    }
+
+    #[test]
+    fn gamepad_stick_look_pitches_up_and_uses_frame_time() {
+        let mut app = App::new();
+        app.gamepad_update = GamepadUpdate {
+            look_y: 1.0,
+            ..GamepadUpdate::default()
+        };
+        app.accumulate_look(1.0 / 120.0);
+        let (yaw, pitch) = app.take_look();
+        assert_eq!(yaw, 0);
+        assert!(pitch > 0, "stick up should pitch up");
+
+        app.gamepad_update = GamepadUpdate {
+            look_x: 1.0,
+            ..GamepadUpdate::default()
+        };
+        app.accumulate_look(1.0 / 120.0);
+        let (yaw, _) = app.take_look();
+        assert!(yaw > 0, "stick right should look right");
+    }
+
+    #[test]
+    fn look_is_ignored_while_paused() {
+        let mut app = App::new();
+        app.set_paused(true);
+        app.gamepad_update = GamepadUpdate {
+            look_y: 1.0,
+            ..GamepadUpdate::default()
+        };
+
+        app.accumulate_look(1.0 / 120.0);
+
+        assert_eq!(app.pending_look, (0.0, 0.0));
+    }
+
+    #[test]
+    fn gamepad_pause_edge_toggles_pause() {
+        let mut app = App::new();
+
+        app.apply_gamepad_update(GamepadUpdate {
+            pause: true,
+            ..GamepadUpdate::default()
+        });
+        assert!(app.paused);
+
+        app.apply_gamepad_update(GamepadUpdate::default());
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn gamepad_verbose_edge_toggles_verbose() {
+        let mut app = App::new();
+        let verbose = app.verbose;
+
+        app.apply_gamepad_update(GamepadUpdate {
+            verbose: true,
+            ..GamepadUpdate::default()
+        });
+
+        assert_eq!(app.verbose, !verbose);
+    }
+
+    #[test]
+    fn gamepad_restart_requires_a_terminal_outcome() {
+        let mut app = App::new();
+        app.sim.step(SimInput {
+            move_y: 1,
+            ..SimInput::default()
+        });
+
+        app.apply_gamepad_update(GamepadUpdate {
+            restart: true,
+            ..GamepadUpdate::default()
+        });
+        assert_eq!(app.sim.tick(), 1, "a live run should not restart");
+
+        for enemy in &mut app.sim.enemies {
+            enemy.health = 0;
+        }
+        app.sim.step(SimInput::default());
+        assert!(!app.sim.outcome().is_running());
+
+        app.apply_gamepad_update(GamepadUpdate {
+            restart: true,
+            ..GamepadUpdate::default()
+        });
+        assert_eq!(app.sim.tick(), 0);
+        assert!(app.sim.outcome().is_running());
+    }
+
+    #[test]
+    fn unfocused_gamepad_input_is_ignored() {
+        let mut app = App::new();
+        app.focused = false;
+
+        app.apply_gamepad_update(GamepadUpdate {
+            move_y: 1,
+            pause: true,
+            ..GamepadUpdate::default()
+        });
+
+        assert_eq!(app.gamepad_update, GamepadUpdate::default());
+        assert!(!app.paused);
     }
 
     #[test]

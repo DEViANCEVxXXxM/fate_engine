@@ -2,6 +2,7 @@
 
 mod app;
 mod combat_input;
+mod gamepad;
 mod interpolation;
 mod replay;
 mod scene;
