@@ -23,6 +23,7 @@ use crate::sim::{
     MAGAZINE_SIZE, MAX_LOOK_INPUT, MOVE_SCALE_FULL, Outcome, SIMULATION_HZ, Sim, SimInput,
 };
 use crate::verification::Verification;
+use fate_engine::audio::{AudioEngine, Tone};
 use fate_engine::math::Vec2;
 use fate_engine::renderer::{Mesh3d, Renderer, TextDraw, text_width};
 use fate_engine::time::Time;
@@ -112,6 +113,8 @@ struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     mesh: Option<Mesh3d>,
+    audio: Option<AudioEngine>,
+    audio_muted: bool,
     sim: Sim,
     verification: Verification,
     interpolation: Interpolation,
@@ -146,6 +149,8 @@ impl App {
             window: None,
             renderer: None,
             mesh: None,
+            audio: None,
+            audio_muted: false,
             sim,
             verification,
             interpolation,
@@ -219,10 +224,15 @@ impl App {
             verify_ms += verify_start.elapsed().as_secs_f32() * 1000.0;
 
             self.interpolation.begin_step();
+            let feedback = FeedbackState::capture(&self.sim);
             let sim_start = Instant::now();
             self.sim.step(input);
             sim_ms += sim_start.elapsed().as_secs_f32() * 1000.0;
             self.interpolation.end_step(&self.sim);
+
+            for event in feedback_events(feedback, &self.sim) {
+                self.play_feedback(event);
+            }
 
             let verify_start = Instant::now();
             self.verification.end_tick(&self.sim);
@@ -234,6 +244,14 @@ impl App {
         }
 
         (sim_ms, verify_ms)
+    }
+
+    /// Play one presentation cue. Audio is optional and never affects the
+    /// simulation, replay, or snapshot state.
+    fn play_feedback(&self, event: Feedback) {
+        if let Some(audio) = &self.audio {
+            audio.play(tone_for(event));
+        }
     }
 
     /// Poll the controller and apply one-shot menu actions.
@@ -459,6 +477,17 @@ impl App {
                 self.last_drawn,
                 Renderer::max_instance_budget(),
                 self.last_visible
+            ),
+            dpi,
+            HUD_DIM,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "AUDIO {}",
+                audio_status(self.audio.is_some(), self.audio_muted)
             ),
             dpi,
             HUD_DIM,
@@ -748,6 +777,22 @@ impl App {
         );
     }
 
+    fn toggle_mute(&mut self) {
+        self.audio_muted = !self.audio_muted;
+        self.apply_audio_volume();
+        log::info!(
+            target: "fate.combat",
+            "audio {}",
+            if self.audio_muted { "muted" } else { "unmuted" }
+        );
+    }
+
+    fn apply_audio_volume(&self) {
+        if let Some(audio) = &self.audio {
+            audio.set_volume(if self.audio_muted { 0.0 } else { 1.0 });
+        }
+    }
+
     fn toggle_replay(&mut self) {
         let enabled = !self.verification.replay_enabled;
         self.verification.set_replay_enabled(enabled, &self.sim);
@@ -793,6 +838,10 @@ impl App {
                 }
                 KeyCode::KeyP => {
                     self.set_paused(!self.paused);
+                    return;
+                }
+                KeyCode::KeyM => {
+                    self.toggle_mute();
                     return;
                 }
                 KeyCode::Enter => {
@@ -858,9 +907,21 @@ impl ApplicationHandler for App {
         self.gamepad = Gamepad::new();
         self.capture_cursor();
 
+        self.audio = match AudioEngine::new() {
+            Ok(audio) => {
+                audio.set_volume(if self.audio_muted { 0.0 } else { 1.0 });
+                log::info!(target: "fate.combat", "audio output started");
+                Some(audio)
+            }
+            Err(error) => {
+                log::warn!(target: "fate.combat", "audio disabled: {error}");
+                None
+            }
+        };
+
         log::info!(
             target: "fate.combat",
-            "controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit"
+            "controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, M mute, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit"
         );
         log::info!(
             target: "fate.combat",
@@ -948,6 +1009,103 @@ fn clamp_look(value: f32) -> i16 {
         value.clamp(-MAX_LOOK_INPUT as f32, MAX_LOOK_INPUT as f32) as i16
     } else {
         0
+    }
+}
+
+/// Simulation values that the presentation layer needs to detect new events.
+///
+/// Only counters and terminal state are compared; nothing here feeds back into
+/// the simulation, replay tape, or snapshots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FeedbackState {
+    shots: u32,
+    hits: u32,
+    kills: u32,
+    health: i32,
+    reload_remaining: u32,
+    outcome: Outcome,
+}
+
+impl FeedbackState {
+    fn capture(sim: &Sim) -> Self {
+        Self {
+            shots: sim.shots_fired(),
+            hits: sim.hits(),
+            kills: sim.kills(),
+            health: sim.player.health,
+            reload_remaining: sim.player.reload_remaining,
+            outcome: sim.outcome(),
+        }
+    }
+}
+
+/// A presentation cue derived from one simulation step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Feedback {
+    Shot,
+    Hit,
+    Kill,
+    Damage,
+    ReloadStarted,
+    ReloadFinished,
+    Victory,
+    Defeat,
+}
+
+/// Compare two simulation states and list the cues that just became true.
+fn feedback_events(previous: FeedbackState, sim: &Sim) -> Vec<Feedback> {
+    let mut events = Vec::new();
+
+    if sim.shots_fired() > previous.shots {
+        events.push(Feedback::Shot);
+    }
+    if sim.hits() > previous.hits {
+        events.push(Feedback::Hit);
+    }
+    if sim.kills() > previous.kills {
+        events.push(Feedback::Kill);
+    }
+    if sim.player.health < previous.health {
+        events.push(Feedback::Damage);
+    }
+    if previous.reload_remaining == 0 && sim.player.reload_remaining > 0 {
+        events.push(Feedback::ReloadStarted);
+    }
+    if previous.reload_remaining > 0 && sim.player.reload_remaining == 0 {
+        events.push(Feedback::ReloadFinished);
+    }
+    match sim.outcome() {
+        Outcome::Victory if previous.outcome != Outcome::Victory => events.push(Feedback::Victory),
+        Outcome::Defeat(reason) if previous.outcome != Outcome::Defeat(reason) => {
+            events.push(Feedback::Defeat);
+        }
+        Outcome::Running | Outcome::Victory | Outcome::Defeat(_) => {}
+    }
+
+    events
+}
+
+fn audio_status(available: bool, muted: bool) -> &'static str {
+    if !available {
+        "UNAVAILABLE"
+    } else if muted {
+        "MUTED"
+    } else {
+        "ON"
+    }
+}
+
+/// The slice's sound design: short synthesized cues, chosen by the consumer.
+fn tone_for(event: Feedback) -> Tone {
+    match event {
+        Feedback::Shot => Tone::square(180.0, 0.05, 0.16),
+        Feedback::Hit => Tone::triangle(560.0, 0.05, 0.16),
+        Feedback::Kill => Tone::triangle(880.0, 0.22, 0.20),
+        Feedback::Damage => Tone::noise(0.16, 0.22),
+        Feedback::ReloadStarted => Tone::square(130.0, 0.04, 0.10),
+        Feedback::ReloadFinished => Tone::square(260.0, 0.05, 0.12),
+        Feedback::Victory => Tone::triangle(660.0, 0.45, 0.20),
+        Feedback::Defeat => Tone::triangle(130.0, 0.60, 0.20),
     }
 }
 
@@ -1400,5 +1558,97 @@ mod tests {
         assert_eq!(scaled[0].x, fallback[0].x);
         assert_eq!(scaled[0].y, fallback[0].y);
         assert_eq!(scaled[0].scale, fallback[0].scale);
+    }
+
+    #[test]
+    fn audio_status_covers_unavailable_muted_and_on() {
+        assert_eq!(audio_status(false, false), "UNAVAILABLE");
+        assert_eq!(audio_status(false, true), "UNAVAILABLE");
+        assert_eq!(audio_status(true, true), "MUTED");
+        assert_eq!(audio_status(true, false), "ON");
+    }
+
+    #[test]
+    fn mute_toggle_survives_restart() {
+        let mut app = App::new();
+        assert!(!app.audio_muted);
+
+        app.toggle_mute();
+        assert!(app.audio_muted);
+
+        app.restart();
+        assert!(app.audio_muted);
+        assert!(hud_text(&app).contains("AUDIO UNAVAILABLE"));
+    }
+
+    #[test]
+    fn unchanged_simulation_produces_no_feedback() {
+        let sim = Sim::new();
+        assert!(feedback_events(FeedbackState::capture(&sim), &sim).is_empty());
+    }
+
+    #[test]
+    fn shot_and_hit_feedback_follow_the_event_counters() {
+        let mut sim = Sim::new();
+        let before = FeedbackState::capture(&sim);
+
+        sim.step(SimInput {
+            fire: true,
+            ..SimInput::default()
+        });
+        let events = feedback_events(before, &sim);
+
+        assert!(events.contains(&Feedback::Shot));
+        assert!(events.contains(&Feedback::Hit));
+        assert!(!events.contains(&Feedback::Kill));
+    }
+
+    #[test]
+    fn damage_and_defeat_feedback_are_reported_together() {
+        let mut sim = Sim::new();
+        sim.player.health = 1;
+        sim.enemies[0].position = sim.player.position;
+        let before = FeedbackState::capture(&sim);
+
+        sim.step(SimInput::default());
+        let events = feedback_events(before, &sim);
+
+        assert!(events.contains(&Feedback::Damage));
+        assert!(events.contains(&Feedback::Defeat));
+    }
+
+    #[test]
+    fn victory_feedback_is_reported_when_the_last_enemy_dies() {
+        let mut sim = Sim::new();
+        for enemy in &mut sim.enemies {
+            enemy.health = 0;
+        }
+        let before = FeedbackState::capture(&sim);
+
+        sim.step(SimInput::default());
+
+        assert_eq!(sim.outcome(), Outcome::Victory);
+        assert!(feedback_events(before, &sim).contains(&Feedback::Victory));
+    }
+
+    #[test]
+    fn reload_feedback_reports_start_and_finish() {
+        let mut sim = Sim::new();
+        sim.player.ammo = 1;
+        let before = FeedbackState::capture(&sim);
+
+        sim.step(SimInput {
+            reload: true,
+            ..SimInput::default()
+        });
+        assert!(feedback_events(before, &sim).contains(&Feedback::ReloadStarted));
+
+        let before_finish = FeedbackState::capture(&sim);
+        for _ in 0..100 {
+            sim.step(SimInput::default());
+        }
+        let events = feedback_events(before_finish, &sim);
+        assert!(events.contains(&Feedback::ReloadFinished));
+        assert_eq!(sim.player.ammo, MAGAZINE_SIZE);
     }
 }

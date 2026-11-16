@@ -25,6 +25,7 @@ specific application's rules.
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
 | Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
 
@@ -36,7 +37,7 @@ planned features in a design document are already implemented.
 ```text
 fate_engine/
   Cargo.toml                 # workspace root and fate_engine library package
-  src/                       # reusable input, math, renderer, and time APIs
+  src/                       # reusable audio, input, math, renderer, and time APIs
   crates/
     fate_net/                # versioned local protocol prototype
     fate_sim/                # headless deterministic simulation crate
@@ -52,7 +53,8 @@ fate_engine/
 Responsibilities are intentionally split:
 
 - **`fate_engine`** — generic input state, renderer-facing floating-point math,
-  window/GPU renderer foundations, and a frame/fixed-step clock.
+  window/GPU renderer foundations, procedural audio output, and a frame/fixed-step
+  clock.
 - **`fate_sim`** — deterministic simulation primitives. It has no third-party
   dependencies and forbids unsafe code.
 - **`fate_net`** — transport-agnostic packet encoding and client/server session
@@ -603,7 +605,47 @@ submits 3D draws. There is no second backend and no backend-portability trait.
 Treat the `wgpu`/`winit` boundary as a prototype seam, pin dependency versions,
 and do not assume future backend compatibility.
 
-## 9. Errors, diagnostics, and operational notes
+## 9. Audio
+
+`fate_engine::audio` provides procedural one-shot sounds. The engine synthesizes
+tones; the project decides which sound belongs to which event.
+
+```rust
+use fate_engine::audio::{AudioEngine, Tone};
+
+let audio = AudioEngine::new();
+if let Ok(audio) = audio {
+    audio.play(Tone::square(180.0, 0.05, 0.16));
+    audio.set_volume(0.5);
+}
+```
+
+`Tone` combines frequency, duration, amplitude, and a `Waveform` (`Sine`,
+`Square`, `Triangle`, or `Noise`). Tones start immediately and are not looped or
+positioned in space. The mixer applies a short attack/release envelope, sums up
+to `MAX_VOICES` tones, and clamps the result to full scale. When the voice pool
+is full, new tones are dropped rather than replacing an active sound.
+
+`AudioEngine::set_volume` controls a master gain in `0..=1`; non-finite values
+mute and out-of-range values clamp. The change applies to the next rendered
+buffer, including tones already playing, so a consumer can mute immediately
+without stopping the stream.
+
+`AudioEngine::new()` is the only call that touches a device. It returns an
+`AudioError` when the platform has no default output, the default configuration
+cannot be read, the stream cannot be built, or the sample format is unsupported.
+Treat audio as optional: log the error and keep running without it. If the
+output device disappears later, the stream error is logged and the engine does
+not rebuild the stream automatically. CPU-only checks never need to open a
+device because the mixer is tested separately.
+
+The engine does not provide an asset format, spatial audio, looping music, or
+mixer buses. Consumers choose those policies when a real workload needs them.
+
+Audio is presentation. Do not feed tone events back into deterministic
+simulation state, replay data, or snapshots.
+
+## 10. Errors, diagnostics, and operational notes
 
 - Handle `GpuInitError` and `MeshCreateError` explicitly during startup/content
   creation. A missing adapter or malformed mesh is a real initialization
@@ -656,7 +698,7 @@ crates:
 These snapshots are cheap read-only data. Consumers decide how to display,
 log, or export them, and tooling must not become a dependency of the engine.
 
-## 10. Verification and examples
+## 11. Verification and examples
 
 Run the workspace quality gate after changing engine-facing behavior:
 
@@ -684,10 +726,11 @@ cargo test --workspace --locked
 cargo run -p fate_consumer_smoke --locked
 ```
 
-Before the first build step it installs `libudev-dev`, because the combat
-slice's Linux controller support links against the system `libudev` through
-`pkg-config`. The windowing and rendering dependencies load their system
-libraries at runtime, so they need no development packages.
+Before the first build step it installs `libudev-dev` and `libasound2-dev`,
+because the combat slice's Linux controller support links against the system
+`libudev` through `pkg-config`, and the engine's audio output resolves ALSA the
+same way. The windowing and rendering dependencies load their system libraries
+at runtime, so they need no development packages.
 
 The consumer smoke run is a headless integration check: it exercises input,
 simulation, movement, snapshots, and restoration through the public APIs. It
@@ -759,7 +802,7 @@ Useful source references:
   [`projects/demo/src/app.rs`](../projects/demo/src/app.rs) — render APIs and
   window/event-loop integration.
 
-## 11. Keeping this guide useful
+## 12. Keeping this guide useful
 
 When a public capability changes, update the relevant guide section in the
 same change. Include the goal, prerequisites, setup, public API, a complete

@@ -18,11 +18,12 @@ Or run `cargo run` from this directory. Frame timings are only representative in
 an optimized build; use `cargo run --release -p fate_combat_slice` when
 evaluating the reported timings.
 
-On Linux, building the slice needs the `libudev` development package, because the
-controller backend links against it:
+On Linux, building the slice needs the `libudev` and ALSA development packages,
+because the controller backend links against `libudev` and the engine's audio
+output links against ALSA:
 
 ```sh
-sudo apt-get install -y libudev-dev
+sudo apt-get install -y libudev-dev libasound2-dev
 ```
 
 ## What it demonstrates
@@ -31,6 +32,8 @@ sudo apt-get install -y libudev-dev
   wall-clock or renderer dependency.
 - First-person `Camera3d` rendering of an indexed cube arena and dynamic cubes.
 - An engine-drawn text HUD layered over the scene in the same frame.
+- Procedural audio cues for shots, hits, kills, damage, reloads, and outcomes,
+  with the slice choosing every tone and the engine owning playback.
 - Consumer-owned frustum culling and draw-instance budgeting.
 - Render-only interpolation between fixed states.
 - Keyboard, mouse, and Xbox/DualSense controller input merged into one
@@ -47,7 +50,8 @@ Keyboard and mouse:
 - **Left Shift** — sprint.
 - **Space** or **left mouse button** — fire.
 - **R** — reload.
-- **P** — pause or resume the simulation.
+- **P** - pause or resume the simulation.
+- **M** - mute or unmute audio.
 - **F1** — toggle verbose status logging.
 - **F2** — toggle replay verification.
 - **F4** — run a snapshot round-trip check immediately.
@@ -94,7 +98,8 @@ The scenario runs until it reaches a terminal outcome:
 The slice draws an in-window HUD on top of the scene:
 
 - Top-left status lines show health, ammo, enemies, remaining time, frame rate,
-  frame timings, replay and snapshot status, tick and state hash, and draw load.
+  frame timings, replay and snapshot status, tick and state hash, draw load, and
+  audio status.
 - A centered **PAUSED** banner appears while the simulation is paused, and
   **VICTORY** or **DEFEAT** appears when the run ends.
 
@@ -109,6 +114,13 @@ so they stay readable on high-DPI screens.
 - A status line is logged every two seconds. **F1** toggles the verbose
   structured form; a shorter summary is always logged.
 - Outcome changes and verification failures are always logged.
+
+The slice also plays short synthesized sounds for shots, hits, kills, damage,
+reload start and finish, victory, and defeat. Audio is optional: if no output
+device can be opened, the slice logs a warning and keeps running silently.
+**M** mutes or unmutes the master volume, and the HUD reports `AUDIO ON`,
+`AUDIO MUTED`, or `AUDIO UNAVAILABLE`. The sounds are presentation only and
+never affect simulation, replay, or snapshot state.
 
 The default `env_logger` filter is `fate.combat=info,warn`. Override it with
 `RUST_LOG` when running, for example:
@@ -130,8 +142,8 @@ The simulation is deterministic and independent of the window and GPU:
 Results appear in the HUD, the window title, and the status log. `cargo test -p
 fate_combat_slice` runs the headless tests for simulation rules, replay,
 snapshot codec, interpolation, culling, input bindings, controller mapping and
-DualSense report parsing, and app behavior. Those tests do not need a window,
-GPU adapter, or controller.
+DualSense report parsing, feedback cue selection, and app behavior. Those tests
+do not need a window, GPU adapter, controller, or audio device.
 
 ## Limitations
 
@@ -153,6 +165,9 @@ GPU adapter, or controller.
   deflection does set analog walk speed with a radial dead zone.
 - The HUD text path uses a built-in bitmap font only: there is no font loading,
   shaped text, anti-aliasing, or rich text layout.
+- Audio is synthesized from a small built-in tone generator: there are no sound
+  assets, music, spatialization, or per-sound volume controls. Only the engine's
+  single master volume is exposed.
 - The scene uses untextured cubes only: there are no assets, materials,
   lighting, or shadows.
 - The slice does not use `fate_net`; it has no networking, prediction, or

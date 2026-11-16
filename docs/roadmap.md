@@ -20,6 +20,10 @@
   testing, tint, cameras, and visibility helpers, and a bitmap-font text overlay
   with alpha blending. Consumers own scene traversal, culling decisions, and HUD
   layout; there is no general asset, material, or lighting system.
+- `fate_engine::audio` plays bounded procedural one-shot tones through the
+  platform output device and degrades to silence when no device is available.
+  Consumers own the mapping from events to sounds; there are no audio assets,
+  spatialization, or mixer buses.
 - Headless and windowed smoke consumers exercise the public APIs independently
   of the demo. CPU benchmarks exist, but do not establish GPU performance.
 - `fate_engine::diagnostics` provides rolling frame reports, budget
@@ -140,7 +144,7 @@ fixed-point, and the project verifies a 240-tick replay window and periodic
 snapshot round trips against the live state. Headless tests cover the rules,
 replay, snapshot codec, interpolation, culling, and app behavior.
 
-The slice recorded two concrete gaps. First, `fate_sim` had no fixed-point
+The slice recorded three concrete gaps. First, `fate_sim` had no fixed-point
 trigonometric functions, so the project initially rotated aim with local small-angle
 polynomials. This gap is now resolved: `fate_sim::math` provides deterministic
 `sin_cos()`, `FixedQuat`, and `FixedTransform`, and `combat_slice` was updated to
@@ -148,7 +152,11 @@ use engine trigonometry. Second, the engine had no text or HUD renderer, so the
 project initially presented player and verification state through the window
 title and `log`. This gap is now resolved: the renderer provides `TextDraw`,
 `text_width`, and `render_meshes_with_text` with a built-in bitmap font, and the
-slice draws its HUD in the window while keeping the title and log output.
+slice draws its HUD in the window while keeping the title and log output. Third,
+combat events had no audible feedback. This gap is now resolved:
+`fate_engine::audio` plays procedural one-shot tones through a bounded mixer,
+and the slice maps shots, hits, kills, damage, reloads, and outcomes to sounds
+without letting audio affect deterministic state.
 
 - Choose one compact original gameplay scenario with movement, an interaction,
   and a clear success/failure condition.

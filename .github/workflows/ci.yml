@@ -33,8 +33,9 @@ jobs:
 
       # The combat slice reads Linux controllers through `gilrs`, whose
       # `libudev-sys` dependency resolves the native library with pkg-config.
+      # The engine's audio output resolves ALSA the same way through `cpal`.
       - name: Install Linux build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev libasound2-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check

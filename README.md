@@ -17,6 +17,8 @@ expanding content.
   reusable library.
 - The renderer provides 2D and indexed-mesh 3D paths with depth testing, plus a
   built-in bitmap-font text overlay.
+- Audio provides optional procedural one-shot tones through the platform output
+  device, with a bounded mixer and a no-device fallback.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
   fixed-point math, an indexed-column ECS, seeded RNG, and versioned snapshots.
   Concrete input commands, replay, and rollback currently live in the demo.
@@ -48,11 +50,12 @@ and the consumer smoke test) on pull requests and branch pushes. Windowed and
 GPU checks stay manual; see the
 [engine guide](docs/engine-guide.md#automated-quality-gate).
 
-On Linux, building the workspace needs the `libudev` development package,
-because the combat slice's controller support links against it:
+On Linux, building the workspace needs the `libudev` and ALSA development
+packages. The combat slice's controller support links against `libudev`, and
+the engine's audio output links against `libasound2` through `pkg-config`:
 
 ```sh
-sudo apt-get install -y libudev-dev
+sudo apt-get install -y libudev-dev libasound2-dev
 ```
 
 The CPU-only simulation benchmark does not initialize a window or GPU:
