@@ -4,9 +4,9 @@
 //! fallback: when the system's game-controller stack reports nothing, the pad is
 //! read through the platform HID interface instead (see `crate::sony_hid`).
 //!
-//! Both paths produce the same normalized [`PadState`], so deadzones, digital
-//! movement, trigger thresholds, and menu edge detection are shared. Sticks use
-//! `-1..=1` with positive X right and positive Y up, which lets the mapping
+//! Both paths produce the same normalized [`PadState`], so deadzones, analog
+//! move speed, trigger thresholds, and menu edge detection are shared. Sticks
+//! use `-1..=1` with positive X right and positive Y up, which lets the mapping
 //! treat Y as forward and up directly. The pure helpers below are covered by
 //! headless tests; the device backends are optional so those tests never open a
 //! controller.
@@ -47,6 +47,8 @@ pub struct GamepadUpdate {
     pub move_x: i8,
     /// Forward axis in `-1..=1` (positive = forward).
     pub move_y: i8,
+    /// Move speed in `0..=1` (stick deflection or full for the D-pad).
+    pub move_amount: f32,
     /// Horizontal stick deflection in `-1..=1` (positive = right).
     pub look_x: f32,
     /// Vertical stick deflection in `-1..=1` (positive = up).
@@ -119,6 +121,14 @@ impl PadState {
 
         let dpad_x = f32::from(i8::from(self.dpad_right) - i8::from(self.dpad_left));
         let dpad_y = f32::from(i8::from(self.dpad_up) - i8::from(self.dpad_down));
+        // The stick keeps its analog deflection as a speed fraction; the D-pad
+        // always means full speed.
+        let stick_amount = (stick_x * stick_x + stick_y * stick_y).sqrt().min(1.0);
+        let move_amount = if dpad_x != 0.0 || dpad_y != 0.0 {
+            1.0
+        } else {
+            stick_amount
+        };
 
         let current = MenuButtons {
             pause: self.start,
@@ -132,6 +142,7 @@ impl PadState {
             connected: true,
             move_x: direction(stick_x + dpad_x),
             move_y: direction(stick_y + dpad_y),
+            move_amount,
             look_x,
             look_y,
             sprint: self.left_trigger >= TRIGGER_THRESHOLD || self.left_shoulder || self.left_thumb,
@@ -678,5 +689,39 @@ mod tests {
         let update = state.update(&mut previous);
         assert_eq!(update.move_x, 1);
         assert_eq!(update.move_y, 1);
+        assert_eq!(update.move_amount, 1.0, "the D-pad means full speed");
+    }
+
+    #[test]
+    fn stick_deflection_sets_analog_move_amount() {
+        let mut previous = MenuButtons::default();
+
+        let half = PadState {
+            left_x: 0.5,
+            ..PadState::default()
+        }
+        .update(&mut previous);
+        assert_eq!(half.move_x, 1);
+        assert!(
+            half.move_amount > 0.0 && half.move_amount < 1.0,
+            "half deflection should ask for partial speed, got {}",
+            half.move_amount
+        );
+
+        let full = PadState {
+            left_y: 1.0,
+            ..PadState::default()
+        }
+        .update(&mut previous);
+        assert_eq!(full.move_y, 1);
+        assert!((full.move_amount - 1.0).abs() < 1e-5);
+
+        let dpad = PadState {
+            dpad_right: true,
+            ..PadState::default()
+        }
+        .update(&mut previous);
+        assert_eq!(dpad.move_x, 1);
+        assert_eq!(dpad.move_amount, 1.0);
     }
 }

@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path and indexed 3D mesh path | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
 
@@ -507,7 +507,7 @@ interpolation, ownership, or production server policy.
 
 ### Available paths
 
-`fate_engine::renderer::Renderer` currently provides two prototype paths:
+`fate_engine::renderer::Renderer` currently provides three prototype paths:
 
 - `render(&[Instance2d])` draws a built-in 2D triangle for each transform.
   `Instance2d` supplies world `position`, `rotation`, and `scale`; it does not
@@ -515,6 +515,29 @@ interpolation, ownership, or production server policy.
 - `render_meshes(&[Draw3d])` draws indexed `Mesh3d` geometry with perspective
   projection and a depth buffer. `MeshVertex` contains position and vertex
   color; each `Draw3d` adds a model matrix and RGB tint.
+- `render_meshes_with_text(&[Draw3d], &[TextDraw])` draws the same 3D list and
+  then a text overlay in one surface submission. `render_meshes` is equivalent
+  to calling it with an empty overlay.
+
+`TextDraw` places one run of text at a top-left position in physical pixels,
+measured from the window's top-left corner. The renderer ships a built-in 5x7
+bitmap font covering printable ASCII (`0x20..=0x7E`); unknown characters render
+as `?`. There is no font file, shaping, or anti-aliasing. Each draw carries a
+pixel `scale` and RGBA `color`, and alpha blending composites glyphs over the
+scene. `TextDraw::new(position, text)`, `.with_scale(scale)`, and
+`.with_color(color)` build records; `text_width(text, scale)` returns the width
+of the widest line so consumers can center or right-align text. Newlines and
+tabs are supported, and blank glyphs (such as spaces) emit no quads.
+
+Text positions and sizes are physical pixels, matching
+`Renderer::surface_size()`, which returns the current drawable size. Consumers
+own HUD layout, content, and anchoring; multiply logical layout values by the
+window's scale factor (from `winit`) so text keeps the same apparent size on
+high-DPI displays. The engine does not overlay diagnostics or force a HUD on
+any project. One frame is capped at 2048 glyphs, and text beyond the budget is
+dropped with a warning. The layout helpers are pure and tested headlessly, and
+the GPU path has an offscreen visibility test that skips when no adapter is
+available.
 
 `Renderer::create_mesh(label, vertices, indices)` uploads a mesh through the
 renderer's device and returns a `Result`; `Renderer::cube_mesh()` uploads the
@@ -568,9 +591,10 @@ The renderer uses `wgpu` and `winit` directly. The current public coupling is:
   `Adapter`, `Device`, `Queue`, and `SurfaceConfiguration` for lower-level
   work. `GpuInitError` also wraps `wgpu` error types.
 - The common consumer path does not need to name `wgpu`: `Renderer::aspect`,
-  `Renderer::create_mesh`, `Renderer::cube_mesh`, `render`, and `render_meshes`
-  are sufficient for window creation, surface ownership, mesh upload, and draw
-  submission.
+  `Renderer::surface_size`, `Renderer::create_mesh`, `Renderer::cube_mesh`,
+  `render`, `render_meshes`, and `render_meshes_with_text` are sufficient for
+  window creation, surface ownership, mesh upload, draw submission, and a text
+  overlay.
 
 `projects/window_smoke` is a second windowed consumer that validates this seam.
 Its manifest depends only on `fate_engine`, `pollster`, and `winit`; it creates

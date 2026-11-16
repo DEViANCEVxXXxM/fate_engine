@@ -16,9 +16,10 @@
 - `fate_net` provides a transport-agnostic local protocol and ordered
   client/server sessions. It does not provide sockets, authentication,
   encryption, clock synchronization, or prediction/reconciliation.
-- The renderer supports built-in 2D triangles and indexed 3D meshes with depth
-  testing, tint, cameras, and visibility helpers. Consumers own scene traversal
-  and culling decisions; there is no general asset, material, or lighting system.
+- The renderer supports built-in 2D triangles, indexed 3D meshes with depth
+  testing, tint, cameras, and visibility helpers, and a bitmap-font text overlay
+  with alpha blending. Consumers own scene traversal, culling decisions, and HUD
+  layout; there is no general asset, material, or lighting system.
 - Headless and windowed smoke consumers exercise the public APIs independently
   of the demo. CPU benchmarks exist, but do not establish GPU performance.
 - `fate_engine::diagnostics` provides rolling frame reports, budget
@@ -143,9 +144,11 @@ The slice recorded two concrete gaps. First, `fate_sim` had no fixed-point
 trigonometric functions, so the project initially rotated aim with local small-angle
 polynomials. This gap is now resolved: `fate_sim::math` provides deterministic
 `sin_cos()`, `FixedQuat`, and `FixedTransform`, and `combat_slice` was updated to
-use engine trigonometry. The engine also has no text or HUD renderer, so the project
-presents player and verification state through the window title and `log`. This second
-workaround remains project-owned pending UI/text capability in Phase 1/2.
+use engine trigonometry. Second, the engine had no text or HUD renderer, so the
+project initially presented player and verification state through the window
+title and `log`. This gap is now resolved: the renderer provides `TextDraw`,
+`text_width`, and `render_meshes_with_text` with a built-in bitmap font, and the
+slice draws its HUD in the window while keeping the title and log output.
 
 - Choose one compact original gameplay scenario with movement, an interaction,
   and a clear success/failure condition.

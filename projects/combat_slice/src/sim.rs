@@ -119,12 +119,14 @@ impl Default for Look {
 }
 
 /// One fixed-step input command.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimInput {
     /// Strafe axis in `-1..=1`.
     pub move_x: i8,
     /// Forward axis in `-1..=1`.
     pub move_y: i8,
+    /// Move speed as a fraction of full speed, in `0..=MOVE_SCALE_FULL`.
+    pub move_scale: i16,
     /// Horizontal look delta in mouse counts.
     pub look_yaw: i16,
     /// Vertical look delta in mouse counts.
@@ -134,12 +136,33 @@ pub struct SimInput {
     pub reload: bool,
 }
 
+/// Full-speed value for [`SimInput::move_scale`].
+pub const MOVE_SCALE_FULL: i16 = 1_000;
+
+impl Default for SimInput {
+    fn default() -> Self {
+        Self {
+            move_x: 0,
+            move_y: 0,
+            // An input that selects a direction but does not name a scale moves
+            // at full speed, so simple command scripts stay digital.
+            move_scale: MOVE_SCALE_FULL,
+            look_yaw: 0,
+            look_pitch: 0,
+            sprint: false,
+            fire: false,
+            reload: false,
+        }
+    }
+}
+
 impl SimInput {
     /// Clamp every axis into its accepted range.
     pub fn sanitized(self) -> Self {
         Self {
             move_x: self.move_x.clamp(-1, 1),
             move_y: self.move_y.clamp(-1, 1),
+            move_scale: self.move_scale.clamp(0, MOVE_SCALE_FULL),
             look_yaw: self.look_yaw.clamp(-MAX_LOOK_INPUT, MAX_LOOK_INPUT),
             look_pitch: self.look_pitch.clamp(-MAX_LOOK_INPUT, MAX_LOOK_INPUT),
             ..self
@@ -380,7 +403,11 @@ impl Sim {
         } else {
             PLAYER_SPEED
         };
-        let target = direction * speed;
+        let scale = Fixed::from_ratio(
+            i64::from(input.move_scale.clamp(0, MOVE_SCALE_FULL)),
+            i64::from(MOVE_SCALE_FULL),
+        );
+        let target = direction * speed * scale;
         self.player.velocity.x += (target.x - self.player.velocity.x) * PLAYER_ACCEL;
         self.player.velocity.y += (target.y - self.player.velocity.y) * PLAYER_ACCEL;
         self.player.position += self.player.velocity * FIXED_DELTA;
@@ -750,6 +777,7 @@ mod tests {
                 _ => -1,
             },
             move_y: if tick % 90 < 45 { 1 } else { -1 },
+            move_scale: MOVE_SCALE_FULL,
             look_yaw: ((tick % 40) as i16 - 20) * 3,
             look_pitch: ((tick % 20) as i16 - 10) * 2,
             sprint: tick.is_multiple_of(60),
@@ -785,6 +813,33 @@ mod tests {
         assert!(sim.player.position.x <= limit && sim.player.position.x >= -limit);
         assert!(sim.player.position.y <= limit && sim.player.position.y >= -limit);
         assert_eq!(sim.player.velocity.y, Fixed::ZERO);
+    }
+
+    #[test]
+    fn move_scale_reduces_speed_and_zero_scale_stops() {
+        let run = |scale: i16| {
+            let mut sim = Sim::new();
+            let start = sim.player.position;
+            for _ in 0..60 {
+                sim.step(SimInput {
+                    move_y: 1,
+                    move_scale: scale,
+                    ..SimInput::default()
+                });
+            }
+            (sim.player.position - start).length()
+        };
+
+        let full = run(MOVE_SCALE_FULL);
+        let half = run(MOVE_SCALE_FULL / 2);
+        let stopped = run(0);
+
+        assert!(full > Fixed::ZERO);
+        assert!(
+            half > Fixed::ZERO && half < full,
+            "half speed should travel less: half={half:?} full={full:?}"
+        );
+        assert_eq!(stopped, Fixed::ZERO);
     }
 
     #[test]
@@ -1010,6 +1065,7 @@ mod tests {
         let input = SimInput {
             move_x: 9,
             move_y: -9,
+            move_scale: i16::MAX,
             look_yaw: i16::MAX,
             look_pitch: i16::MIN,
             ..SimInput::default()
@@ -1018,6 +1074,7 @@ mod tests {
 
         assert_eq!(input.move_x, 1);
         assert_eq!(input.move_y, -1);
+        assert_eq!(input.move_scale, MOVE_SCALE_FULL);
         assert_eq!(input.look_yaw, MAX_LOOK_INPUT);
         assert_eq!(input.look_pitch, -MAX_LOOK_INPUT);
     }

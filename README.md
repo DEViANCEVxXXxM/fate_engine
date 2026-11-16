@@ -15,7 +15,8 @@ expanding content.
   [`projects/combat_slice/`](projects/combat_slice/); it exercises the engine
   through a fixed-step first-person arena scenario and is also not part of the
   reusable library.
-- The renderer provides 2D and indexed-mesh 3D paths with depth testing.
+- The renderer provides 2D and indexed-mesh 3D paths with depth testing, plus a
+  built-in bitmap-font text overlay.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
   fixed-point math, an indexed-column ECS, seeded RNG, and versioned snapshots.
   Concrete input commands, replay, and rollback currently live in the demo.

@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use crate::sim::{MAX_LOOK_INPUT, Sim, SimInput, StateDecodeError};
+use crate::sim::{MAX_LOOK_INPUT, MOVE_SCALE_FULL, Sim, SimInput, StateDecodeError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ReplayFrame {
@@ -100,6 +100,7 @@ impl ReplayTape {
 fn validate_input(input: SimInput) -> Result<(), ReplayError> {
     if !(-1..=1).contains(&input.move_x)
         || !(-1..=1).contains(&input.move_y)
+        || !(0..=MOVE_SCALE_FULL).contains(&input.move_scale)
         || !(-MAX_LOOK_INPUT..=MAX_LOOK_INPUT).contains(&input.look_yaw)
         || !(-MAX_LOOK_INPUT..=MAX_LOOK_INPUT).contains(&input.look_pitch)
     {
@@ -121,6 +122,7 @@ mod tests {
                     _ => -1,
                 },
                 move_y: if tick % 2 == 0 { 1 } else { -1 },
+                move_scale: 250 * (1 + (tick % 4) as i16),
                 look_yaw: (tick % 25) as i16 * 3 - 36,
                 look_pitch: (tick % 15) as i16 - 7,
                 sprint: tick % 40 == 0,
@@ -164,6 +166,18 @@ mod tests {
     fn recorder_rejects_out_of_range_axes() {
         let invalid = [SimInput {
             move_x: 2,
+            ..SimInput::default()
+        }];
+        assert_eq!(
+            ReplayTape::record(&Sim::new(), &invalid),
+            Err(ReplayError::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn recorder_rejects_out_of_range_move_scale() {
+        let invalid = [SimInput {
+            move_scale: MOVE_SCALE_FULL + 1,
             ..SimInput::default()
         }];
         assert_eq!(

@@ -6,6 +6,7 @@ mod mesh;
 mod pipeline;
 #[cfg(test)]
 mod test_support;
+mod text;
 mod visibility;
 
 use std::sync::Arc;
@@ -16,11 +17,13 @@ use winit::window::Window;
 pub use camera::{Camera2d, Camera3d};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex};
+pub use text::{TextDraw, text_width};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
 use crate::math::{Mat4, Vec2};
 use mesh::MeshPipeline;
 use pipeline::TrianglePipeline;
+use text::TextRenderer;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -55,6 +58,7 @@ pub struct Renderer {
     pub camera_3d: Camera3d,
     triangle: TrianglePipeline,
     mesh_pipeline: MeshPipeline,
+    text: TextRenderer,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     clear_color: wgpu::Color,
@@ -65,6 +69,7 @@ impl Renderer {
         let gpu = Gpu::new(window).await?;
         let triangle = TrianglePipeline::new(&gpu.device, gpu.config.format);
         let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format);
+        let text = TextRenderer::new(&gpu.device, &gpu.queue, gpu.config.format);
         let (depth_texture, depth_view) = Self::create_depth_target(&gpu);
 
         Ok(Self {
@@ -73,6 +78,7 @@ impl Renderer {
             camera_3d: Camera3d::default(),
             triangle,
             mesh_pipeline,
+            text,
             _depth_texture: depth_texture,
             depth_view,
             clear_color: wgpu::Color {
@@ -137,6 +143,14 @@ impl Renderer {
         self.gpu.aspect()
     }
 
+    /// Current drawable size in physical pixels.
+    ///
+    /// Text positions and sizes are expressed in these units, so consumers use
+    /// this to lay out screen-anchored HUD elements.
+    pub fn surface_size(&self) -> (u32, u32) {
+        (self.gpu.config.width, self.gpu.config.height)
+    }
+
     /// Upload a mesh through the renderer's device.
     ///
     /// This is the backend-neutral path for consumers that do not want to name
@@ -172,6 +186,19 @@ impl Renderer {
     /// Upload and draw indexed meshes using the perspective camera and a depth
     /// buffer. Meshes and transforms remain owned by the caller.
     pub fn render_meshes(&mut self, draws: &[Draw3d<'_>]) -> bool {
+        self.render_meshes_with_text(draws, &[])
+    }
+
+    /// Draw indexed meshes, then a text overlay on top of them.
+    ///
+    /// Both stages share one surface acquisition and one submission. Text
+    /// positions are in physical pixels from the top-left of the window, so
+    /// consumers can anchor a HUD to [`Renderer::surface_size`].
+    pub fn render_meshes_with_text(
+        &mut self,
+        draws: &[Draw3d<'_>],
+        overlay: &[TextDraw<'_>],
+    ) -> bool {
         use wgpu::CurrentSurfaceTexture;
 
         let (frame, suboptimal) = match self.gpu.surface.get_current_texture() {
@@ -244,6 +271,32 @@ impl Renderer {
             for (index, draw) in draws.iter().take(count).enumerate() {
                 self.mesh_pipeline.draw(&mut pass, index, draw.mesh);
             }
+        }
+
+        if !overlay.is_empty() {
+            self.text.write(
+                &self.gpu.queue,
+                self.gpu.config.width,
+                self.gpu.config.height,
+                overlay,
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("text pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            self.text.draw(&mut pass);
         }
 
         self.gpu.queue.submit(Some(encoder.finish()));

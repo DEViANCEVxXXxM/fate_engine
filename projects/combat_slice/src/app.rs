@@ -1,8 +1,9 @@
 //! Windowed playable slice: fixed-step combat, first-person cubes, replay and
-//! snapshot verification, and a log/title presentation.
+//! snapshot verification, and a text HUD.
 //!
-//! The engine has no text renderer or HUD, so player state and verification
-//! results are published through the window title and the `log` facade.
+//! Player and verification state is drawn in the window with the engine's text
+//! renderer. The window title and `log` output are kept as a secondary
+//! presentation so the slice still reports state without a HUD.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,14 +19,85 @@ use crate::combat_input::{self, Action, Axis, CombatInput};
 use crate::gamepad::{Gamepad, GamepadUpdate};
 use crate::interpolation::Interpolation;
 use crate::scene;
-use crate::sim::{MAGAZINE_SIZE, MAX_LOOK_INPUT, Outcome, SIMULATION_HZ, Sim, SimInput};
+use crate::sim::{
+    MAGAZINE_SIZE, MAX_LOOK_INPUT, MOVE_SCALE_FULL, Outcome, SIMULATION_HZ, Sim, SimInput,
+};
 use crate::verification::Verification;
-use fate_engine::renderer::{Mesh3d, Renderer};
+use fate_engine::math::Vec2;
+use fate_engine::renderer::{Mesh3d, Renderer, TextDraw, text_width};
 use fate_engine::time::Time;
 
 const TITLE_INTERVAL: f32 = 0.5;
 const STATUS_LOG_INTERVAL: f32 = 2.0;
 const MAX_PENDING_LOOK: f32 = MAX_LOOK_INPUT as f32 * 4.0;
+
+/// Distance from the window edge to the HUD in physical pixels.
+const HUD_MARGIN: f32 = 12.0;
+/// Extra space between HUD lines beyond the font line height.
+const HUD_LINE_GAP: f32 = 4.0;
+const HUD_TEXT: [f32; 4] = [0.92, 0.95, 1.0, 1.0];
+const HUD_DIM: [f32; 4] = [0.62, 0.68, 0.78, 1.0];
+const HUD_ALERT: [f32; 4] = [1.0, 0.42, 0.38, 1.0];
+const HUD_GOOD: [f32; 4] = [0.55, 1.0, 0.62, 1.0];
+const HUD_SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.72];
+/// Down-right offset of the drop shadow, in physical pixels.
+const HUD_SHADOW_OFFSET: f32 = 2.0;
+
+/// One line of the on-screen HUD, in physical pixels.
+#[derive(Clone, Debug)]
+struct HudLine {
+    x: f32,
+    y: f32,
+    text: String,
+    scale: f32,
+    color: [f32; 4],
+}
+
+impl HudLine {
+    fn draw(&self) -> TextDraw<'_> {
+        TextDraw::new(Vec2::new(self.x, self.y), &self.text)
+            .with_scale(self.scale)
+            .with_color(self.color)
+    }
+
+    /// A dark copy of the line offset down-right, drawn under the text so the
+    /// HUD stays readable over bright or busy scene colors.
+    fn shadow(&self, offset: f32) -> TextDraw<'_> {
+        TextDraw::new(Vec2::new(self.x + offset, self.y + offset), &self.text)
+            .with_scale(self.scale)
+            .with_color(HUD_SHADOW)
+    }
+}
+
+fn push_hud(
+    lines: &mut Vec<HudLine>,
+    y: &mut f32,
+    x: f32,
+    text: String,
+    scale: f32,
+    color: [f32; 4],
+) {
+    lines.push(HudLine {
+        x,
+        y: *y,
+        text,
+        scale,
+        color,
+    });
+    *y += 8.0 * scale + HUD_LINE_GAP;
+}
+
+/// A horizontally centered HUD line at `y`.
+fn centered_hud(surface_width: u32, text: String, y: f32, scale: f32, color: [f32; 4]) -> HudLine {
+    let width = text_width(&text, scale);
+    HudLine {
+        x: ((surface_width as f32 - width) * 0.5).max(0.0),
+        y,
+        text,
+        scale,
+        color,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderFrame {
@@ -197,12 +269,24 @@ impl App {
             - (self.input.action_down(Action::MoveLeft) as i8);
         let keyboard_y = (self.input.action_down(Action::MoveForward) as i8)
             - (self.input.action_down(Action::MoveBack) as i8);
+        let keyboard_active = keyboard_x != 0 || keyboard_y != 0;
         let move_x = (keyboard_x as i16 + self.gamepad_update.move_x as i16).clamp(-1, 1) as i8;
         let move_y = (keyboard_y as i16 + self.gamepad_update.move_y as i16).clamp(-1, 1) as i8;
+        // Keys are digital and always mean full speed; the stick keeps its
+        // deflection as an analog speed fraction.
+        let move_scale = if keyboard_active {
+            MOVE_SCALE_FULL
+        } else if self.gamepad_update.move_amount.is_finite() {
+            (self.gamepad_update.move_amount.clamp(0.0, 1.0) * f32::from(MOVE_SCALE_FULL)).round()
+                as i16
+        } else {
+            0
+        };
 
         SimInput {
             move_x,
             move_y,
+            move_scale,
             look_yaw: look.0,
             look_pitch: look.1,
             sprint: self.input.action_down(Action::Sprint) || self.gamepad_update.sprint,
@@ -255,6 +339,163 @@ impl App {
         }
     }
 
+    /// Build the on-screen HUD for a surface of `surface_width` x
+    /// `surface_height` physical pixels at display scale `dpi_scale`.
+    ///
+    /// The layout is a pure function of app state so it can be tested without a
+    /// window: status lines stack down the top-left, and outcome/pause banners
+    /// are centered over the scene. Sizes are in physical pixels, so
+    /// `dpi_scale` converts the logical layout to a crisp size on high-DPI
+    /// displays.
+    fn hud_lines(&self, surface_width: u32, surface_height: u32, dpi_scale: f32) -> Vec<HudLine> {
+        let dpi = if dpi_scale.is_finite() {
+            dpi_scale.clamp(0.5, 4.0)
+        } else {
+            1.0
+        };
+        let margin = HUD_MARGIN * dpi;
+        let gap = HUD_LINE_GAP * dpi;
+        let mut lines = Vec::new();
+        let mut y = margin;
+        let health = self.sim.player.health;
+        let health_color = if health <= 25 { HUD_ALERT } else { HUD_TEXT };
+
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!("HEALTH {health}"),
+            2.0 * dpi,
+            health_color,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!("AMMO {}/{}", self.sim.player.ammo, MAGAZINE_SIZE),
+            2.0 * dpi,
+            HUD_TEXT,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "ENEMIES {}/{}",
+                self.sim.enemies_alive(),
+                self.sim.enemies.len()
+            ),
+            2.0 * dpi,
+            HUD_TEXT,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!("TIME {:.0}s", remaining_seconds(&self.sim).max(0.0)),
+            2.0 * dpi,
+            HUD_TEXT,
+        );
+
+        y += gap;
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!("{:.0} FPS", self.time.fps()),
+            dpi,
+            HUD_DIM,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "SIM {:.2} DRAW {:.2} SUBMIT {:.2} VERIFY {:.2} MS",
+                self.last_sim_ms, self.last_draw_list_ms, self.last_render_ms, self.last_verify_ms
+            ),
+            dpi,
+            HUD_DIM,
+        );
+
+        y += gap;
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!("REPLAY {}", self.replay_label().to_uppercase()),
+            dpi,
+            HUD_DIM,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "SNAPSHOT {}",
+                self.verification.snapshot_result.label().to_uppercase()
+            ),
+            dpi,
+            HUD_DIM,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "TICK {} HASH {:016x}",
+                self.sim.tick(),
+                self.sim.state_hash()
+            ),
+            dpi,
+            HUD_DIM,
+        );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            format!(
+                "DRAWN {}/{} VISIBLE {}",
+                self.last_drawn,
+                Renderer::max_instance_budget(),
+                self.last_visible
+            ),
+            dpi,
+            HUD_DIM,
+        );
+
+        let banner_y = surface_height as f32 * 0.34;
+        match self.sim.outcome() {
+            Outcome::Running => {}
+            Outcome::Victory => lines.push(centered_hud(
+                surface_width,
+                "VICTORY".to_string(),
+                banner_y,
+                4.0 * dpi,
+                HUD_GOOD,
+            )),
+            Outcome::Defeat(reason) => lines.push(centered_hud(
+                surface_width,
+                format!("DEFEAT ({})", reason.label().to_uppercase()),
+                banner_y,
+                4.0 * dpi,
+                HUD_ALERT,
+            )),
+        }
+
+        if self.paused {
+            lines.push(centered_hud(
+                surface_width,
+                "PAUSED".to_string(),
+                surface_height as f32 * 0.52,
+                3.0 * dpi,
+                HUD_TEXT,
+            ));
+        }
+
+        lines
+    }
+
     fn render_frame(&mut self, alpha: f32) -> RenderFrame {
         let Some(renderer) = &self.renderer else {
             return RenderFrame::default();
@@ -265,6 +506,11 @@ impl App {
 
         let draw_start = Instant::now();
         let camera = renderer.camera_3d;
+        let (surface_width, surface_height) = renderer.surface_size();
+        let dpi_scale = self
+            .window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor() as f32);
         let dynamic = scene::dynamic_instances(&self.sim, &self.interpolation, alpha);
         let mut instances = Vec::with_capacity(scene::ARENA.len() + dynamic.len());
         instances.extend_from_slice(&scene::ARENA);
@@ -277,13 +523,18 @@ impl App {
         let mut draws = weapon_draws;
         draws.extend(world_draws);
         let drawn = renderer.budgeted_instance_count(draws.len());
+        let hud = self.hud_lines(surface_width, surface_height, dpi_scale);
+        let shadow_offset = HUD_SHADOW_OFFSET * dpi_scale.clamp(0.5, 4.0);
+        let mut overlay: Vec<TextDraw<'_>> = Vec::with_capacity(hud.len() * 2);
+        overlay.extend(hud.iter().map(|line| line.shadow(shadow_offset)));
+        overlay.extend(hud.iter().map(HudLine::draw));
         let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
 
         let submit_start = Instant::now();
         let rendered = self
             .renderer
             .as_mut()
-            .is_some_and(|renderer| renderer.render_meshes(&draws));
+            .is_some_and(|renderer| renderer.render_meshes_with_text(&draws, &overlay));
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
         RenderFrame {
@@ -613,7 +864,7 @@ impl ApplicationHandler for App {
         );
         log::info!(
             target: "fate.combat",
-            "controller: left stick/d-pad move, right stick look, RT fire, LT sprint, X/Square reload, Menu/Options pause, View/Create restart after outcome, Y/Triangle verbose"
+            "controller: left stick (analog speed)/d-pad move, right stick look, RT fire, LT sprint, X/Square reload, Menu/Options pause, View/Create restart after outcome, Y/Triangle verbose"
         );
     }
 
@@ -849,6 +1100,7 @@ mod tests {
         app.input.press(KeyCode::KeyW);
         app.gamepad_update = GamepadUpdate {
             move_x: 1,
+            move_amount: 1.0,
             fire: true,
             sprint: true,
             reload: true,
@@ -859,9 +1111,43 @@ mod tests {
 
         assert_eq!(input.move_x, 1);
         assert_eq!(input.move_y, 1);
+        assert_eq!(input.move_scale, MOVE_SCALE_FULL);
         assert!(input.fire);
         assert!(input.sprint);
         assert!(input.reload);
+    }
+
+    #[test]
+    fn gamepad_half_stick_requests_half_speed_but_keyboard_requests_full() {
+        let mut app = App::new();
+        app.gamepad_update = GamepadUpdate {
+            move_y: 1,
+            move_amount: 0.5,
+            ..GamepadUpdate::default()
+        };
+
+        let pad_only = app.build_input((0, 0));
+        assert_eq!(pad_only.move_y, 1);
+        assert_eq!(pad_only.move_scale, MOVE_SCALE_FULL / 2);
+
+        app.input.press(KeyCode::KeyW);
+        let merged = app.build_input((0, 0));
+        assert_eq!(merged.move_scale, MOVE_SCALE_FULL);
+    }
+
+    #[test]
+    fn non_finite_gamepad_move_amount_requests_no_speed() {
+        let mut app = App::new();
+        app.gamepad_update = GamepadUpdate {
+            move_y: 1,
+            move_amount: f32::NAN,
+            ..GamepadUpdate::default()
+        };
+
+        let input = app.build_input((0, 0));
+
+        assert_eq!(input.move_y, 1);
+        assert_eq!(input.move_scale, 0);
     }
 
     #[test]
@@ -988,5 +1274,131 @@ mod tests {
         assert!((camera.position.y - 1.6).abs() < 1e-6);
         assert!(camera.yaw.is_finite());
         assert!(camera.pitch.is_finite());
+    }
+
+    fn hud_text(app: &App) -> String {
+        app.hud_lines(1280, 720, 1.0)
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn find_hud_line<'a>(lines: &'a [HudLine], text: &str) -> Option<&'a HudLine> {
+        lines.iter().find(|line| line.text == text)
+    }
+
+    #[test]
+    fn hud_reports_health_ammo_enemies_and_time() {
+        let app = App::new();
+        let text = hud_text(&app);
+
+        assert!(text.contains("HEALTH 100"), "hud was:\n{text}");
+        assert!(text.contains("AMMO 10/10"), "hud was:\n{text}");
+        assert!(text.contains("ENEMIES 6/6"), "hud was:\n{text}");
+        assert!(text.contains("TIME 90s"), "hud was:\n{text}");
+        assert!(text.contains("REPLAY "), "hud was:\n{text}");
+        assert!(text.contains("SNAPSHOT "), "hud was:\n{text}");
+        assert!(text.contains(&format!("TICK 0 HASH {:016x}", app.sim.state_hash())));
+    }
+
+    #[test]
+    fn hud_marks_low_health_and_tracks_ammo() {
+        let mut app = App::new();
+        app.sim.player.health = 20;
+        app.sim.player.ammo = 3;
+
+        let lines = app.hud_lines(1280, 720, 1.0);
+        let health = find_hud_line(&lines, "HEALTH 20").expect("health line");
+        assert_eq!(health.color, HUD_ALERT);
+        assert!(hud_text(&app).contains("AMMO 3/10"));
+    }
+
+    #[test]
+    fn hud_hides_pause_banner_while_running_and_centers_it_when_paused() {
+        let mut app = App::new();
+        assert!(find_hud_line(&app.hud_lines(1280, 720, 1.0), "PAUSED").is_none());
+
+        app.set_paused(true);
+        let lines = app.hud_lines(1280, 720, 1.0);
+        let paused = find_hud_line(&lines, "PAUSED").expect("pause banner");
+        let expected = (1280.0 - text_width("PAUSED", paused.scale)) * 0.5;
+        assert!((paused.x - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hud_centers_a_victory_banner_when_the_run_ends() {
+        let mut app = App::new();
+        for enemy in &mut app.sim.enemies {
+            enemy.health = 0;
+        }
+        app.sim.step(SimInput::default());
+
+        let lines = app.hud_lines(1280, 720, 1.0);
+        let victory = find_hud_line(&lines, "VICTORY").expect("victory banner");
+        let expected = (1280.0 - text_width("VICTORY", victory.scale)) * 0.5;
+        assert!((victory.x - expected).abs() < 1e-3);
+        assert_eq!(victory.color, HUD_GOOD);
+    }
+
+    #[test]
+    fn hud_lines_convert_to_text_draws_without_allocating_new_strings() {
+        let mut app = App::new();
+        app.set_paused(true);
+
+        let lines = app.hud_lines(800, 600, 1.0);
+        let draws: Vec<TextDraw<'_>> = lines.iter().map(HudLine::draw).collect();
+
+        assert_eq!(draws.len(), lines.len());
+        assert_eq!(draws[0].text, "HEALTH 100");
+        assert_eq!(draws.last().expect("pause draw").text, "PAUSED");
+    }
+
+    #[test]
+    fn hud_shadow_is_offset_and_translucent() {
+        let line = HudLine {
+            x: 40.0,
+            y: 20.0,
+            text: "OK".to_string(),
+            scale: 2.0,
+            color: HUD_TEXT,
+        };
+
+        let shadow = line.shadow(HUD_SHADOW_OFFSET);
+
+        assert_eq!(shadow.text, "OK");
+        assert_eq!(shadow.position, Vec2::new(42.0, 22.0));
+        assert_eq!(shadow.color, HUD_SHADOW);
+        assert_eq!(shadow.scale, 2.0);
+    }
+
+    #[test]
+    fn hud_scales_layout_for_high_dpi_surfaces() {
+        let mut app = App::new();
+        app.set_paused(true);
+
+        let lines = app.hud_lines(2560, 1440, 2.0);
+        let health = find_hud_line(&lines, "HEALTH 100").expect("health line");
+        assert_eq!(health.x, HUD_MARGIN * 2.0);
+        assert_eq!(health.y, HUD_MARGIN * 2.0);
+        assert_eq!(health.scale, 4.0);
+
+        let paused = find_hud_line(&lines, "PAUSED").expect("pause banner");
+        assert_eq!(paused.scale, 6.0);
+        assert_eq!(paused.y, 1440.0 * 0.52);
+        let expected = (2560.0 - text_width("PAUSED", 6.0)) * 0.5;
+        assert!((paused.x - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn hud_layout_falls_back_to_unscaled_for_invalid_dpi() {
+        let app = App::new();
+
+        let scaled = app.hud_lines(1280, 720, 1.0);
+        let fallback = app.hud_lines(1280, 720, f32::NAN);
+
+        assert_eq!(scaled[0].x, fallback[0].x);
+        assert_eq!(scaled[0].y, fallback[0].y);
+        assert_eq!(scaled[0].scale, fallback[0].scale);
     }
 }

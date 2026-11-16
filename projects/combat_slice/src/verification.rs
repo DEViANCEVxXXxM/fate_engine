@@ -162,6 +162,7 @@ mod tests {
                 _ => -1,
             },
             move_y: if tick % 60 < 30 { 1 } else { -1 },
+            move_scale: 250 * (1 + (tick % 4) as i16),
             look_yaw: (tick % 30) as i16 - 15,
             look_pitch: (tick % 10) as i16 - 5,
             sprint: tick.is_multiple_of(50),

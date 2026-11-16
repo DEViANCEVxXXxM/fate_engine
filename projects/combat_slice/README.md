@@ -30,10 +30,11 @@ sudo apt-get install -y libudev-dev
 - A 120 Hz fixed-step simulation built on `fate_sim` fixed-point math, with no
   wall-clock or renderer dependency.
 - First-person `Camera3d` rendering of an indexed cube arena and dynamic cubes.
+- An engine-drawn text HUD layered over the scene in the same frame.
 - Consumer-owned frustum culling and draw-instance budgeting.
 - Render-only interpolation between fixed states.
 - Keyboard, mouse, and Xbox/DualSense controller input merged into one
-  fixed-step command stream.
+  fixed-step command stream, with analog stick walk speed.
 - Continuous replay verification and periodic snapshot round trips.
 - A playable loop with explicit victory and defeat conditions.
 
@@ -55,7 +56,8 @@ Keyboard and mouse:
 
 Controller (Xbox and DualSense):
 
-- **Left stick** or **D-pad** - move.
+- **Left stick** or **D-pad** - move. Stick deflection sets walk speed; the
+  D-pad moves at full speed.
 - **Right stick** - look.
 - **Right trigger (RT / R2)** or **right bumper (RB / R1)** - fire.
 - **Left trigger (LT / L2)**, **left bumper (LB / L1)**, or **left stick click** -
@@ -89,7 +91,17 @@ The scenario runs until it reaches a terminal outcome:
 
 ## Presentation
 
-The engine has no text renderer or HUD, so the slice owns its presentation:
+The slice draws an in-window HUD on top of the scene:
+
+- Top-left status lines show health, ammo, enemies, remaining time, frame rate,
+  frame timings, replay and snapshot status, tick and state hash, and draw load.
+- A centered **PAUSED** banner appears while the simulation is paused, and
+  **VICTORY** or **DEFEAT** appears when the run ends.
+
+The HUD is only presentation: the same state is still published through the
+window title and `log`, so status remains available outside the window. HUD
+sizes are laid out in physical pixels and scale with the display scale factor,
+so they stay readable on high-DPI screens.
 
 - The window title refreshes twice per second with the outcome, health, ammo,
   enemy count, tick, frame timings, draw load, verification status, and state
@@ -115,7 +127,7 @@ The simulation is deterministic and independent of the window and GPU:
 - Every 240 ticks, the current state is serialized, decoded, and compared.
 - **F4** forces an immediate snapshot round-trip check.
 
-Results appear in the window title and the status log. `cargo test -p
+Results appear in the HUD, the window title, and the status log. `cargo test -p
 fate_combat_slice` runs the headless tests for simulation rules, replay,
 snapshot codec, interpolation, culling, input bindings, controller mapping and
 DualSense report parsing, and app behavior. Those tests do not need a window,
@@ -137,13 +149,10 @@ GPU adapter, or controller.
   fallback.
 - Rumble, light bar, touchpad, and motion sensors are not implemented, and there
   is no rebinding or per-pad sensitivity.
-- Controller stick movement is converted to the simulation's digital
-  `-1`/`0`/`1` move axis, so it does not offer analog walk speed.
-- There is no text or HUD renderer, so all player-facing status is presented
-  through the window title and logs.
-- `fate_sim` has no fixed-point trigonometric functions. The slice keeps aim as
-  unit yaw/pitch vectors and rotates them with project-owned small-angle
-  polynomials, then converts to float only for the camera.
+- Controller stick direction is quantized to eight directions, though stick
+  deflection does set analog walk speed with a radial dead zone.
+- The HUD text path uses a built-in bitmap font only: there is no font loading,
+  shaped text, anti-aliasing, or rich text layout.
 - The scene uses untextured cubes only: there are no assets, materials,
   lighting, or shadows.
 - The slice does not use `fate_net`; it has no networking, prediction, or
