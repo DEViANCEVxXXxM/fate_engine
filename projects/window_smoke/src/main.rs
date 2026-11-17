@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{
     Draw3d, Mesh3d, MeshVertex, Overlay, Renderer, TextDraw, Texture2d, TextureOptions,
-    TextureRegion, UiImage, UiRect, text_width,
+    TextureRegion, UiClip, UiImage, UiRect, text_width,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -40,6 +40,8 @@ const IMAGE_SIZE: f32 = 56.0;
 const IMAGE_GAP: f32 = 10.0;
 const TILE_STRIP_HEIGHT: f32 = 12.0;
 const TILE_REPEATS: f32 = 8.0;
+const CLIP_PREVIEW: f32 = 40.0;
+const CLIP_OVERFLOW: f32 = 12.0;
 
 const PYRAMID_VERTICES: &[MeshVertex] = &[
     MeshVertex {
@@ -171,7 +173,7 @@ impl SmokeApp {
         let seam_y = counters_y + line_step;
         let frame = format!("FRAME {}", self.redraws);
         let counters = format!("SUBMITTED {} SKIPPED {}", self.submitted, self.skipped);
-        let seam = "MESH + TEXT + UI + ATLAS + TILE";
+        let seam = "MESH + TEXT + UI + TILE + CLIP";
 
         let lines = [
             (title, title_x, title_y, title_scale, HUD_TEXT),
@@ -183,7 +185,9 @@ impl SmokeApp {
         let panel_pad = margin * 0.5;
         let panel_width = (surface_width as f32 - panel_pad * 2.0).max(1.0);
         let strip_height = TILE_STRIP_HEIGHT * dpi;
-        let panel_height = (seam_y + 8.0 * line_scale + strip_height + margin)
+        let preview_size = CLIP_PREVIEW * dpi;
+        let bottom_height = strip_height.max(preview_size);
+        let panel_height = (seam_y + 8.0 * line_scale + bottom_height + margin)
             .min((surface_height as f32 - panel_pad * 2.0).max(1.0))
             .max(1.0);
         let panel = UiRect::new(
@@ -203,8 +207,15 @@ impl SmokeApp {
         let icon_y = panel.position.y + margin;
         let target_x = (panel.position.x + panel.size.x - image_size - margin).max(margin);
         let checker_x = (target_x - image_size - image_gap).max(margin);
-        let strip_y = panel.position.y + panel.size.y - strip_height - margin * 0.5;
-        let strip_width = (panel.size.x - margin * 2.0).max(1.0);
+        let bottom_y = panel.position.y + panel.size.y - bottom_height - margin * 0.5;
+        let strip_y = bottom_y + (bottom_height - strip_height) * 0.5;
+        let preview_x = panel.position.x + panel.size.x - preview_size - margin;
+        let strip_width = (preview_x - image_gap - (panel.position.x + margin)).max(1.0);
+        let overflow = CLIP_OVERFLOW * dpi;
+        let preview_clip = UiClip::new(
+            Vec2::new(preview_x, bottom_y),
+            Vec2::new(preview_size, preview_size),
+        );
         let images = [
             UiImage::new(
                 texture,
@@ -230,6 +241,15 @@ impl SmokeApp {
                 Vec2::new(0.5 * TILE_REPEATS, 1.0),
             ))
             .with_color([0.55, 0.7, 1.0, 0.75]),
+            // Deliberately oversized and offset, then clipped to a slot so the
+            // cropped edges are visible.
+            UiImage::new(
+                texture,
+                Vec2::new(preview_x - overflow, bottom_y - overflow),
+                Vec2::new(preview_size + overflow * 2.0, preview_size + overflow * 2.0),
+            )
+            .with_region(texture.region(ATLAS_TILE, 0, ATLAS_TILE, ATLAS_TILE))
+            .with_clip(preview_clip),
         ];
 
         let shadow_offset = 2.0 * dpi;

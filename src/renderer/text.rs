@@ -10,6 +10,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use super::ui::{UiClip, apply_scissor};
 use crate::math::Vec2;
 
 /// Width of one glyph cell in atlas pixels.
@@ -45,6 +46,8 @@ pub struct TextDraw<'a> {
     pub text: &'a str,
     pub scale: f32,
     pub color: [f32; 4],
+    /// Optional bounds outside which nothing is drawn.
+    pub clip: Option<UiClip>,
 }
 
 impl<'a> TextDraw<'a> {
@@ -55,6 +58,7 @@ impl<'a> TextDraw<'a> {
             text,
             scale: 1.0,
             color: [1.0, 1.0, 1.0, 1.0],
+            clip: None,
         }
     }
 
@@ -67,6 +71,12 @@ impl<'a> TextDraw<'a> {
     /// Set the color, including alpha.
     pub fn with_color(mut self, color: [f32; 4]) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Draw only the glyph pixels inside `clip`.
+    pub fn with_clip(mut self, clip: UiClip) -> Self {
+        self.clip = Some(clip);
         self
     }
 }
@@ -346,8 +356,17 @@ pub(crate) struct TextRenderer {
     bind_group: wgpu::BindGroup,
     placements: Vec<GlyphPlacement>,
     scratch: Vec<TextVertex>,
-    vertex_count: u32,
+    runs: Vec<TextRun>,
+    surface: (u32, u32),
     last_clipped: bool,
+}
+
+/// A contiguous glyph-vertex range that shares one clip rectangle.
+#[derive(Clone, Copy, Debug)]
+struct TextRun {
+    first_vertex: u32,
+    vertex_count: u32,
+    clip: Option<UiClip>,
 }
 
 impl TextRenderer {
@@ -515,7 +534,8 @@ impl TextRenderer {
             bind_group,
             placements: Vec::new(),
             scratch: Vec::new(),
-            vertex_count: 0,
+            runs: Vec::new(),
+            surface: (0, 0),
             last_clipped: false,
         }
     }
@@ -529,16 +549,35 @@ impl TextRenderer {
         draws: &[TextDraw<'_>],
     ) {
         self.scratch.clear();
+        self.runs.clear();
+        self.surface = (width, height);
         let mut clipped = false;
 
         'draws: for draw in draws {
             layout_text(draw.text, draw.position, draw.scale, &mut self.placements);
+            let first_vertex = self.scratch.len() as u32;
             for placement in &self.placements {
                 if self.scratch.len() / 6 >= MAX_TEXT_GLYPHS {
                     clipped = true;
+                    let vertex_count = self.scratch.len() as u32 - first_vertex;
+                    if vertex_count > 0 {
+                        self.runs.push(TextRun {
+                            first_vertex,
+                            vertex_count,
+                            clip: draw.clip,
+                        });
+                    }
                     break 'draws;
                 }
                 push_quad(&mut self.scratch, placement, draw.color);
+            }
+            let vertex_count = self.scratch.len() as u32 - first_vertex;
+            if vertex_count > 0 {
+                self.runs.push(TextRun {
+                    first_vertex,
+                    vertex_count,
+                    clip: draw.clip,
+                });
             }
         }
 
@@ -549,7 +588,6 @@ impl TextRenderer {
         }
         self.last_clipped = clipped;
 
-        self.vertex_count = self.scratch.len() as u32;
         queue.write_buffer(
             &self.uniforms,
             0,
@@ -562,13 +600,27 @@ impl TextRenderer {
 
     /// Record the glyph batch into an existing pass.
     pub(crate) fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.vertex_count == 0 {
+        if self.runs.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        let mut start = 0;
+        while start < self.runs.len() {
+            let clip = self.runs[start].clip;
+            let first_vertex = self.runs[start].first_vertex;
+            let mut end = start + 1;
+            while end < self.runs.len() && self.runs[end].clip == clip {
+                end += 1;
+            }
+            let vertex_count =
+                self.runs[end - 1].first_vertex + self.runs[end - 1].vertex_count - first_vertex;
+            if apply_scissor(pass, self.surface, clip) {
+                pass.draw(first_vertex..first_vertex + vertex_count, 0..1);
+            }
+            start = end;
+        }
     }
 }
 

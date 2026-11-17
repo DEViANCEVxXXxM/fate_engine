@@ -5,6 +5,9 @@
 //! draws them after the 3D scene and before text, so consumers can place a
 //! translucent panel behind a label without constructing meshes or naming
 //! `wgpu` types.
+//!
+//! Overlay records can opt into [`UiClip`] so content stays inside a panel even
+//! when its geometry extends past it.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -16,6 +19,58 @@ pub const MAX_UI_RECTS: usize = 256;
 /// Upper bound on textured images drawn in one frame.
 pub const MAX_UI_IMAGES: usize = 64;
 
+/// An axis-aligned clip rectangle in physical pixels.
+///
+/// Attach a clip to a [`UiRect`], [`UiImage`], or
+/// [`TextDraw`](crate::renderer::TextDraw) with its `with_clip` builder. Only
+/// the pixels inside the clip are drawn; the rest of the record is discarded.
+/// Clips are independent per record, so two panels can clip to their own
+/// bounds. Clips are intersected with the window by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiClip {
+    pub position: Vec2,
+    pub size: Vec2,
+}
+
+impl UiClip {
+    /// A clip starting at `position` and extending right and down by `size`.
+    pub const fn new(position: Vec2, size: Vec2) -> Self {
+        Self { position, size }
+    }
+
+    /// Convert to a window-space scissor rect, or `None` when the clip is
+    /// invalid or empty after rounding.
+    pub(crate) fn to_scissor(self, width: u32, height: u32) -> Option<Scissor> {
+        if !finite_rect(self.position, self.size) {
+            return None;
+        }
+        let max_width = width as f32;
+        let max_height = height as f32;
+        let left = self.position.x.max(0.0).floor();
+        let top = self.position.y.max(0.0).floor();
+        let right = (self.position.x + self.size.x).min(max_width).ceil();
+        let bottom = (self.position.y + self.size.y).min(max_height).ceil();
+        if !left.is_finite() || !top.is_finite() || right <= left || bottom <= top {
+            return None;
+        }
+        Some(Scissor {
+            x: left as u32,
+            y: top as u32,
+            width: (right - left) as u32,
+            height: (bottom - top) as u32,
+        })
+    }
+}
+
+/// A validated scissor rectangle ready for `set_scissor_rect`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Scissor {
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+}
+
 /// One axis-aligned screen-space rectangle, in physical pixels.
 ///
 /// `position` is the top-left corner and `size` extends right and down. Colors
@@ -26,6 +81,8 @@ pub struct UiRect {
     pub position: Vec2,
     pub size: Vec2,
     pub color: [f32; 4],
+    /// Optional bounds outside which nothing is drawn.
+    pub clip: Option<UiClip>,
 }
 
 impl UiRect {
@@ -35,7 +92,14 @@ impl UiRect {
             position,
             size,
             color,
+            clip: None,
         }
+    }
+
+    /// Draw only the part of this rectangle inside `clip`.
+    pub const fn with_clip(mut self, clip: UiClip) -> Self {
+        self.clip = Some(clip);
+        self
     }
 
     /// Whether this rectangle can be converted to a finite, non-empty quad.
@@ -76,8 +140,17 @@ pub(crate) struct UiRenderer {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     scratch: Vec<UiVertex>,
-    vertex_count: u32,
+    runs: Vec<DrawRun>,
+    surface: (u32, u32),
     last_clipped: bool,
+}
+
+/// A contiguous vertex range that shares one clip rectangle.
+#[derive(Clone, Copy, Debug)]
+struct DrawRun {
+    first_vertex: u32,
+    vertex_count: u32,
+    clip: Option<UiClip>,
 }
 
 impl UiRenderer {
@@ -133,7 +206,8 @@ impl UiRenderer {
             pipeline,
             vertices,
             scratch: Vec::new(),
-            vertex_count: 0,
+            runs: Vec::new(),
+            surface: (0, 0),
             last_clipped: false,
         }
     }
@@ -150,6 +224,8 @@ impl UiRenderer {
         rects: &[UiRect],
     ) -> usize {
         self.scratch.clear();
+        self.runs.clear();
+        self.surface = (width, height);
         let mut count = 0;
         let mut clipped = false;
 
@@ -158,7 +234,13 @@ impl UiRenderer {
                 clipped = true;
                 break;
             }
+            let first_vertex = self.scratch.len() as u32;
             if push_rect(&mut self.scratch, rect, width as f32, height as f32) {
+                self.runs.push(DrawRun {
+                    first_vertex,
+                    vertex_count: 6,
+                    clip: rect.clip,
+                });
                 count += 1;
             }
         }
@@ -170,7 +252,6 @@ impl UiRenderer {
         }
         self.last_clipped = clipped;
 
-        self.vertex_count = self.scratch.len() as u32;
         if !self.scratch.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
         }
@@ -179,12 +260,26 @@ impl UiRenderer {
 
     /// Record the rectangle batch into an existing pass.
     pub(crate) fn draw<'pass>(&'pass self, pass: &mut wgpu::RenderPass<'pass>) {
-        if self.vertex_count == 0 {
+        if self.runs.is_empty() {
             return;
         }
         pass.set_pipeline(&self.pipeline);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        let mut start = 0;
+        while start < self.runs.len() {
+            let clip = self.runs[start].clip;
+            let first_vertex = self.runs[start].first_vertex;
+            let mut end = start + 1;
+            while end < self.runs.len() && self.runs[end].clip == clip {
+                end += 1;
+            }
+            let vertex_count =
+                self.runs[end - 1].first_vertex + self.runs[end - 1].vertex_count - first_vertex;
+            if apply_scissor(pass, self.surface, clip) {
+                pass.draw(first_vertex..first_vertex + vertex_count, 0..1);
+            }
+            start = end;
+        }
     }
 }
 
@@ -203,6 +298,8 @@ pub struct UiImage<'a> {
     /// Normalized sub-rectangle to sample; defaults to the whole texture.
     pub region: TextureRegion,
     pub color: [f32; 4],
+    /// Optional bounds outside which nothing is drawn.
+    pub clip: Option<UiClip>,
 }
 
 impl<'a> UiImage<'a> {
@@ -214,7 +311,14 @@ impl<'a> UiImage<'a> {
             size,
             region: TextureRegion::FULL,
             color: [1.0; 4],
+            clip: None,
         }
+    }
+
+    /// Draw only the part of this image inside `clip`.
+    pub const fn with_clip(mut self, clip: UiClip) -> Self {
+        self.clip = Some(clip);
+        self
     }
 
     /// Sample `region` instead of the whole texture, for atlas tiles.
@@ -276,6 +380,7 @@ pub(crate) struct ImageRenderer {
     vertices: wgpu::Buffer,
     scratch: Vec<ImageVertex>,
     vertex_count: u32,
+    surface: (u32, u32),
     last_clipped: bool,
 }
 
@@ -355,6 +460,7 @@ impl ImageRenderer {
             vertices,
             scratch: Vec::new(),
             vertex_count: 0,
+            surface: (0, 0),
             last_clipped: false,
         }
     }
@@ -374,6 +480,7 @@ impl ImageRenderer {
         images: &[UiImage<'_>],
     ) -> usize {
         self.scratch.clear();
+        self.surface = (width, height);
         let mut count = 0;
         let mut clipped = false;
 
@@ -421,6 +528,10 @@ impl ImageRenderer {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &image.texture.bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertices.slice(..));
+            if !apply_scissor(pass, self.surface, image.clip) {
+                index += 1;
+                continue;
+            }
             let start = (index * 6) as u32;
             pass.draw(start..start + 6, 0..1);
             index += 1;
@@ -435,6 +546,30 @@ fn finite_rect(position: Vec2, size: Vec2) -> bool {
         && size.y.is_finite()
         && size.x > 0.0
         && size.y > 0.0
+}
+
+/// Apply `clip` to the pass, or reset to the full surface when unclipped.
+///
+/// Returns `false` when the clip rounds away to nothing and the caller should
+/// skip the draw entirely.
+pub(crate) fn apply_scissor(
+    pass: &mut wgpu::RenderPass<'_>,
+    surface: (u32, u32),
+    clip: Option<UiClip>,
+) -> bool {
+    match clip {
+        Some(clip) => match clip.to_scissor(surface.0, surface.1) {
+            Some(rect) => {
+                pass.set_scissor_rect(rect.x, rect.y, rect.width, rect.height);
+                true
+            }
+            None => false,
+        },
+        None => {
+            pass.set_scissor_rect(0, 0, surface.0.max(1), surface.1.max(1));
+            true
+        }
+    }
 }
 
 /// The draw path normally knows the surface size; this guard only keeps a
@@ -890,5 +1025,75 @@ mod tests {
         assert!(second[1] > second[0], "second tile was {second:?}");
         assert!(third[0] > third[1], "third tile was {third:?}");
         assert!(fourth[1] > fourth[0], "fourth tile was {fourth:?}");
+    }
+
+    #[test]
+    fn clip_rounds_outward_to_cover_touched_pixels() {
+        let clip = UiClip::new(Vec2::new(10.4, 20.6), Vec2::new(30.2, 40.9));
+        assert_eq!(
+            clip.to_scissor(200, 200),
+            Some(Scissor {
+                x: 10,
+                y: 20,
+                width: 31,
+                height: 42
+            })
+        );
+    }
+
+    #[test]
+    fn clip_clamps_to_the_surface_and_rejects_empty_or_invalid_bounds() {
+        let straddling = UiClip::new(Vec2::new(-5.0, -5.0), Vec2::new(20.0, 20.0));
+        assert_eq!(
+            straddling.to_scissor(100, 100),
+            Some(Scissor {
+                x: 0,
+                y: 0,
+                width: 15,
+                height: 15
+            })
+        );
+
+        let outside = UiClip::new(Vec2::new(200.0, 0.0), Vec2::new(10.0, 10.0));
+        assert_eq!(outside.to_scissor(100, 100), None);
+
+        let empty = UiClip::new(Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0));
+        assert_eq!(empty.to_scissor(100, 100), None);
+
+        let invalid = UiClip::new(Vec2::ZERO, Vec2::new(f32::NAN, 4.0));
+        assert_eq!(invalid.to_scissor(100, 100), None);
+    }
+
+    #[test]
+    fn image_clip_limits_draw_to_the_clip_rect() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = ImageRenderer::new(&device, format);
+        let texture = test_image_texture(
+            &device,
+            &queue,
+            &mut renderer,
+            crate::renderer::TextureOptions::NEAREST,
+        );
+        let size = IMAGE_TEST_SIZE as f32;
+        let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size))
+            .with_clip(UiClip::new(Vec2::ZERO, Vec2::new(size / 2.0, size)));
+        let pixels = render_images(&device, &queue, &mut renderer, &[image]);
+
+        let at = |x: u32, y: u32| pixels[(y * IMAGE_TEST_SIZE + x) as usize];
+        let inside = at(IMAGE_TEST_SIZE / 4, IMAGE_TEST_SIZE / 2);
+        let outside = at(IMAGE_TEST_SIZE - 4, IMAGE_TEST_SIZE / 2);
+
+        assert!(inside[0] > inside[1], "inside pixel was {inside:?}");
+        assert!(
+            outside[0] < 8 && outside[1] < 8 && outside[2] < 8,
+            "outside pixel was {outside:?}"
+        );
     }
 }

@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions and sampling options, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions, sampling options, and clipping, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -549,6 +549,13 @@ rectangles and `MAX_UI_IMAGES` (currently 64) images are submitted per frame.
 Records with non-finite values or non-positive sizes are skipped. The coordinate
 conversion and skip rules are covered by headless tests, and offscreen GPU tests
 skip when no adapter is available.
+
+Every record can opt into a `UiClip` with `with_clip(UiClip::new(position,
+size))`. Only pixels inside the clip are drawn, so overflowing text or artwork
+stays inside a panel even when the record's geometry does not. Clips are
+independent per record and are intersected with the window; empty or invalid
+clips draw nothing. Scissor state is grouped by consecutive equal clip, so the
+cost is proportional to clip changes rather than record count.
 
 `Renderer::create_texture(label, width, height, rgba8)` uploads an RGBA8 sRGB
 texture and returns a `Texture2d` handle. The byte slice must contain exactly

@@ -23,7 +23,7 @@ pub use text::{TextDraw, text_width};
 pub use texture::{
     Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
 };
-pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiImage, UiRect};
+pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiClip, UiImage, UiRect};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
 use crate::math::{Mat4, Vec2};
