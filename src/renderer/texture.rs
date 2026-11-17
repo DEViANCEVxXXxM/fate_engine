@@ -6,6 +6,70 @@
 
 use crate::math::Vec2;
 
+/// How a texture is filtered when sampled.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextureFilter {
+    /// Blend neighbouring texels. Good for photographic or smooth artwork, but
+    /// atlas tiles need padding to avoid bleeding into each other.
+    #[default]
+    Linear,
+    /// Pick the nearest texel. Crisp for pixel art and safer for tight atlas
+    /// packs, but magnified textures become blocky.
+    Nearest,
+}
+
+/// What happens when a sample falls outside `0..=1` on an axis.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TextureAddress {
+    /// Repeat the edge texel.
+    #[default]
+    ClampToEdge,
+    /// Wrap to the opposite edge. Pair this with a [`TextureRegion`] wider than
+    /// `1.0` to tile an image.
+    Repeat,
+    /// Wrap and mirror on each repetition.
+    MirrorRepeat,
+}
+
+/// Sampling behavior for one texture upload.
+///
+/// Defaults match the original texture path: linear filtering with
+/// clamp-to-edge addressing.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TextureOptions {
+    pub filter: TextureFilter,
+    pub address: TextureAddress,
+}
+
+impl TextureOptions {
+    /// Crisp, non-repeating sampling for pixel art.
+    pub const NEAREST: Self = Self {
+        filter: TextureFilter::Nearest,
+        address: TextureAddress::ClampToEdge,
+    };
+
+    /// Tiling with crisp texels, for repeating patterns.
+    pub const NEAREST_REPEAT: Self = Self {
+        filter: TextureFilter::Nearest,
+        address: TextureAddress::Repeat,
+    };
+}
+
+fn to_address_mode(address: TextureAddress) -> wgpu::AddressMode {
+    match address {
+        TextureAddress::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+        TextureAddress::Repeat => wgpu::AddressMode::Repeat,
+        TextureAddress::MirrorRepeat => wgpu::AddressMode::MirrorRepeat,
+    }
+}
+
+fn to_filter_mode(filter: TextureFilter) -> wgpu::FilterMode {
+    match filter {
+        TextureFilter::Linear => wgpu::FilterMode::Linear,
+        TextureFilter::Nearest => wgpu::FilterMode::Nearest,
+    }
+}
+
 /// Why a texture upload was rejected.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextureCreateError {
@@ -72,9 +136,10 @@ pub(crate) fn validate_texture(
 
 /// An RGBA8 sRGB texture uploaded to the renderer's device.
 ///
-/// Pixels are interpreted as sRGB with straight alpha. Sampling uses linear
-/// filtering and clamp-to-edge addressing at the image's natural size. Keep the
-/// handle alive while any [`UiImage`](crate::renderer::UiImage) references it.
+/// Pixels are interpreted as sRGB with straight alpha. Sampling behavior comes
+/// from the [`TextureOptions`] used at upload and is fixed for the texture's
+/// lifetime. Keep the handle alive while any
+/// [`UiImage`](crate::renderer::UiImage) references it.
 pub struct Texture2d {
     _texture: wgpu::Texture,
     _view: wgpu::TextureView,
@@ -87,10 +152,10 @@ pub struct Texture2d {
 ///
 /// `min` is the top-left corner and `max` the bottom-right corner in `0..=1`
 /// texture coordinates, matching wgpu's top-left texture origin. Reversed
-/// corners flip the image. Values outside `0..=1` are allowed; clamp-to-edge
-/// sampling repeats the border texel. Leave padding between atlas tiles when
-/// using linear filtering so neighbouring tiles do not bleed into the sampled
-/// region.
+/// corners flip the image. Values outside `0..=1` are allowed: clamp-to-edge
+/// sampling repeats the border texel, while repeat addressing tiles the
+/// texture. Leave padding between atlas tiles when using linear filtering so
+/// neighbouring tiles do not bleed into the sampled region.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextureRegion {
     pub min: Vec2,
@@ -112,8 +177,8 @@ impl TextureRegion {
     /// Convert a pixel rectangle inside a texture of the given size into
     /// normalized coordinates.
     ///
-    /// The rectangle is not clamped to the texture; callers that pass an
-    /// out-of-range tile get clamp-to-edge sampling at the border.
+    /// The rectangle is not clamped to the texture; the sampler's addressing
+    /// mode decides what happens outside `0..=1`.
     pub fn from_pixels(
         texture_width: u32,
         texture_height: u32,
@@ -159,16 +224,30 @@ impl std::fmt::Debug for Texture2d {
     }
 }
 
+/// Arguments for one texture upload, kept together to avoid a long parameter
+/// list.
+pub(crate) struct TextureUpload<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) rgba8: &'a [u8],
+    pub(crate) options: TextureOptions,
+}
+
 impl Texture2d {
     pub(crate) fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
-        label: &str,
-        width: u32,
-        height: u32,
-        rgba8: &[u8],
+        upload: TextureUpload<'_>,
     ) -> Result<Self, TextureCreateError> {
+        let TextureUpload {
+            label,
+            width,
+            height,
+            rgba8,
+            options,
+        } = upload;
         validate_texture(
             width,
             height,
@@ -212,11 +291,11 @@ impl Texture2d {
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("ui image sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: to_address_mode(options.address),
+            address_mode_v: to_address_mode(options.address),
+            address_mode_w: to_address_mode(options.address),
+            mag_filter: to_filter_mode(options.filter),
+            min_filter: to_filter_mode(options.filter),
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
@@ -330,6 +409,18 @@ mod tests {
         assert!(TextureRegion::FULL.is_finite());
         assert!(!TextureRegion::new(Vec2::new(f32::NAN, 0.0), Vec2::new(1.0, 1.0)).is_finite());
         assert!(!TextureRegion::new(Vec2::ZERO, Vec2::new(f32::INFINITY, 1.0)).is_finite());
+    }
+
+    #[test]
+    fn sampling_options_default_to_linear_clamp() {
+        let options = TextureOptions::default();
+        assert_eq!(options.filter, TextureFilter::Linear);
+        assert_eq!(options.address, TextureAddress::ClampToEdge);
+        assert_eq!(TextureOptions::NEAREST.filter, TextureFilter::Nearest);
+        assert_eq!(
+            TextureOptions::NEAREST_REPEAT.address,
+            TextureAddress::Repeat
+        );
     }
 
     #[test]

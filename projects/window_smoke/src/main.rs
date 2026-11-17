@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{
-    Draw3d, Mesh3d, MeshVertex, Overlay, Renderer, TextDraw, Texture2d, UiImage, UiRect, text_width,
+    Draw3d, Mesh3d, MeshVertex, Overlay, Renderer, TextDraw, Texture2d, TextureOptions,
+    TextureRegion, UiImage, UiRect, text_width,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -37,6 +38,8 @@ const ATLAS_HEIGHT: u32 = 16;
 const ATLAS_TILE: u32 = 16;
 const IMAGE_SIZE: f32 = 56.0;
 const IMAGE_GAP: f32 = 10.0;
+const TILE_STRIP_HEIGHT: f32 = 12.0;
+const TILE_REPEATS: f32 = 8.0;
 
 const PYRAMID_VERTICES: &[MeshVertex] = &[
     MeshVertex {
@@ -168,7 +171,7 @@ impl SmokeApp {
         let seam_y = counters_y + line_step;
         let frame = format!("FRAME {}", self.redraws);
         let counters = format!("SUBMITTED {} SKIPPED {}", self.submitted, self.skipped);
-        let seam = "MESH + TEXT + UI + ATLAS SEAM";
+        let seam = "MESH + TEXT + UI + ATLAS + TILE";
 
         let lines = [
             (title, title_x, title_y, title_scale, HUD_TEXT),
@@ -179,7 +182,8 @@ impl SmokeApp {
 
         let panel_pad = margin * 0.5;
         let panel_width = (surface_width as f32 - panel_pad * 2.0).max(1.0);
-        let panel_height = (seam_y + 8.0 * line_scale)
+        let strip_height = TILE_STRIP_HEIGHT * dpi;
+        let panel_height = (seam_y + 8.0 * line_scale + strip_height + margin)
             .min((surface_height as f32 - panel_pad * 2.0).max(1.0))
             .max(1.0);
         let panel = UiRect::new(
@@ -199,6 +203,8 @@ impl SmokeApp {
         let icon_y = panel.position.y + margin;
         let target_x = (panel.position.x + panel.size.x - image_size - margin).max(margin);
         let checker_x = (target_x - image_size - image_gap).max(margin);
+        let strip_y = panel.position.y + panel.size.y - strip_height - margin * 0.5;
+        let strip_width = (panel.size.x - margin * 2.0).max(1.0);
         let images = [
             UiImage::new(
                 texture,
@@ -212,6 +218,18 @@ impl SmokeApp {
                 Vec2::new(image_size, image_size),
             )
             .with_region(texture.region(ATLAS_TILE, 0, ATLAS_TILE, ATLAS_TILE)),
+            // A region wider than the texture plus repeat addressing tiles the
+            // checker half of the atlas across the strip.
+            UiImage::new(
+                texture,
+                Vec2::new(panel.position.x + margin, strip_y),
+                Vec2::new(strip_width, strip_height),
+            )
+            .with_region(TextureRegion::new(
+                Vec2::new(0.0, 0.0),
+                Vec2::new(0.5 * TILE_REPEATS, 1.0),
+            ))
+            .with_color([0.55, 0.7, 1.0, 0.75]),
         ];
 
         let shadow_offset = 2.0 * dpi;
@@ -259,11 +277,12 @@ impl ApplicationHandler for SmokeApp {
             .create_mesh("smoke pyramid", PYRAMID_VERTICES, PYRAMID_INDICES)
             .expect("failed to create mesh");
         let texture = renderer
-            .create_texture(
+            .create_texture_with_options(
                 "smoke atlas",
                 ATLAS_WIDTH,
                 ATLAS_HEIGHT,
                 &atlas_rgba(ATLAS_WIDTH, ATLAS_HEIGHT, ATLAS_TILE),
+                TextureOptions::NEAREST_REPEAT,
             )
             .expect("failed to create texture");
 

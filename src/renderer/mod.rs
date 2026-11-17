@@ -20,7 +20,9 @@ pub use camera::{Camera2d, Camera3d};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex};
 pub use text::{TextDraw, text_width};
-pub use texture::{Texture2d, TextureCreateError, TextureRegion};
+pub use texture::{
+    Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
+};
 pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiImage, UiRect};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
@@ -194,14 +196,34 @@ impl Renderer {
         height: u32,
         rgba8: &[u8],
     ) -> Result<Texture2d, TextureCreateError> {
+        self.create_texture_with_options(label, width, height, rgba8, TextureOptions::default())
+    }
+
+    /// Upload an RGBA8 sRGB texture with explicit sampling behavior.
+    ///
+    /// Use [`TextureOptions::NEAREST`] for crisp pixel art and
+    /// [`TextureOptions::NEAREST_REPEAT`] (or a repeat address mode) with a
+    /// [`TextureRegion`] wider than `1.0` to tile an image. Validation and
+    /// lifetime rules match [`Renderer::create_texture`].
+    pub fn create_texture_with_options(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba8: &[u8],
+        options: TextureOptions,
+    ) -> Result<Texture2d, TextureCreateError> {
         Texture2d::new(
             &self.gpu.device,
             &self.gpu.queue,
             self.images.layout(),
-            label,
-            width,
-            height,
-            rgba8,
+            texture::TextureUpload {
+                label,
+                width,
+                height,
+                rgba8,
+                options,
+            },
         )
     }
 

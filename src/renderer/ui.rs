@@ -191,7 +191,9 @@ impl UiRenderer {
 /// One textured screen-space image, in physical pixels.
 ///
 /// `position` is the top-left corner and `size` extends right and down, matching
-/// [`UiRect`]. The full texture is sampled, tinted by `color`, and alpha
+/// [`UiRect`]. By default the full texture is sampled; [`Self::with_region`]
+/// selects a normalized sub-rectangle, including regions beyond `1.0` for tiled
+/// sampling with a repeating texture. The sample is tinted by `color` and alpha
 /// blended. Images draw after rectangles and before text.
 #[derive(Clone, Copy, Debug)]
 pub struct UiImage<'a> {
@@ -792,15 +794,19 @@ mod tests {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         renderer: &mut ImageRenderer,
+        options: crate::renderer::TextureOptions,
     ) -> Texture2d {
         Texture2d::new(
             device,
             queue,
             renderer.layout(),
-            "test image",
-            2,
-            1,
-            &[255, 0, 0, 255, 0, 255, 0, 255],
+            crate::renderer::texture::TextureUpload {
+                label: "test image",
+                width: 2,
+                height: 1,
+                rgba8: &[255, 0, 0, 255, 0, 255, 0, 255],
+                options,
+            },
         )
         .expect("texture")
     }
@@ -816,7 +822,7 @@ mod tests {
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut renderer = ImageRenderer::new(&device, format);
-        let texture = test_image_texture(&device, &queue, &mut renderer);
+        let texture = test_image_texture(&device, &queue, &mut renderer, Default::default());
         let size = IMAGE_TEST_SIZE as f32;
         let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size));
         let pixels = render_images(&device, &queue, &mut renderer, &[image]);
@@ -840,7 +846,7 @@ mod tests {
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let mut renderer = ImageRenderer::new(&device, format);
-        let texture = test_image_texture(&device, &queue, &mut renderer);
+        let texture = test_image_texture(&device, &queue, &mut renderer, Default::default());
         let size = IMAGE_TEST_SIZE as f32;
         let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size))
             .with_region(texture.region(1, 0, 1, 1));
@@ -849,5 +855,40 @@ mod tests {
         let center =
             pixels[((IMAGE_TEST_SIZE / 2) * IMAGE_TEST_SIZE + IMAGE_TEST_SIZE / 2) as usize];
         assert!(center[1] > center[0], "center pixel was {center:?}");
+    }
+
+    #[test]
+    fn repeat_addressing_tiles_a_region_wider_than_the_texture() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = ImageRenderer::new(&device, format);
+        let texture = test_image_texture(
+            &device,
+            &queue,
+            &mut renderer,
+            crate::renderer::TextureOptions::NEAREST_REPEAT,
+        );
+        let size = IMAGE_TEST_SIZE as f32;
+        let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size)).with_region(
+            crate::renderer::TextureRegion::new(Vec2::new(0.0, 0.0), Vec2::new(2.0, 1.0)),
+        );
+        let pixels = render_images(&device, &queue, &mut renderer, &[image]);
+
+        let at = |x: u32| pixels[((IMAGE_TEST_SIZE / 2) * IMAGE_TEST_SIZE + x) as usize];
+        let first = at(8);
+        let second = at(24);
+        let third = at(40);
+        let fourth = at(56);
+
+        assert!(first[0] > first[1], "first tile was {first:?}");
+        assert!(second[1] > second[0], "second tile was {second:?}");
+        assert!(third[0] > third[1], "third tile was {third:?}");
+        assert!(fourth[1] > fourth[0], "fourth tile was {fourth:?}");
     }
 }

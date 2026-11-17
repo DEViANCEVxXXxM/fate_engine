@@ -185,11 +185,13 @@ skipped.
 
 `Renderer::create_texture` adds a raw RGBA8 sRGB upload path with validation, so
 a HUD can show real artwork without an asset pipeline or direct `wgpu` names.
-`TextureRegion` and `Texture2d::region` select atlas tiles from one upload.
-There are no decoders, mipmaps, atlas packers, or 3D-texture support yet. The
-handle is consumer-owned and must outlive any `UiImage` that references it.
-`projects/window_smoke` exercises the seam with a two-tile procedural atlas, a
-panel, an accent bar, and text.
+`TextureRegion` and `Texture2d::region` select atlas tiles from one upload, and
+`TextureOptions` chooses nearest filtering for crisp pixel art or repeat
+addressing for tiled regions. There are no decoders, mipmaps, atlas packers, or
+3D-texture support yet. The handle is consumer-owned and must outlive any
+`UiImage` that references it. `projects/window_smoke` exercises the seam with a
+two-tile procedural atlas, a nearest-filtered tiled strip, a panel, an accent
+bar, and text.
 
 - Keep the common overlay path free of direct `wgpu` names.
 - Use one surface acquisition and submission for meshes and every overlay layer.

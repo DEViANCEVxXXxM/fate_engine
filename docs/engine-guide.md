@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions and sampling options, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -553,14 +553,23 @@ skip when no adapter is available.
 `Renderer::create_texture(label, width, height, rgba8)` uploads an RGBA8 sRGB
 texture and returns a `Texture2d` handle. The byte slice must contain exactly
 `width * height * 4` bytes; empty, zero-sized, oversized, and mismatched uploads
-return `TextureCreateError` before touching the GPU. Sampling uses linear
-filtering and clamp-to-edge addressing. `TextureRegion` describes a normalized
+return `TextureCreateError` before touching the GPU. Sampling defaults to linear
+filtering with clamp-to-edge addressing. `TextureRegion` describes a normalized
 sub-rectangle, and `Texture2d::region(x, y, width, height)` converts an atlas
-tile from pixels. Regions are not clamped or inset, and there are no mipmaps,
-packers, decoders, or hot reload: leave padding between atlas tiles to avoid
-filtering bleed, and let consumers own asset loading and texture lifetime. A
-texture may be shared by any number of `UiImage` records but must outlive them.
-The current image path is screen-space only; it does not texture 3D meshes.
+tile from pixels. Regions are not clamped or inset.
+
+Pass `TextureOptions` to `create_texture_with_options` to choose sampling
+behavior. `TextureFilter::Nearest` keeps pixel art crisp and avoids atlas bleed;
+`TextureOptions::NEAREST` and `TextureOptions::NEAREST_REPEAT` are the common
+presets. `TextureAddress::Repeat` (or `MirrorRepeat`) combined with a region
+wider than `1.0` tiles the texture: a region of `0..4` on `u` repeats it four
+times across the image.
+
+There are no mipmaps, packers, decoders, or hot reload: leave padding between
+linearly filtered atlas tiles, and let consumers own asset loading and texture
+lifetime. A texture may be shared by any number of `UiImage` records but must
+outlive them. The current image path is screen-space only; it does not texture
+3D meshes.
 
 `TextDraw` places one run of text at a top-left position in physical pixels,
 measured from the window's top-left corner. The renderer ships a built-in 5x7

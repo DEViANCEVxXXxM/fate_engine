@@ -16,8 +16,8 @@ expanding content.
   through a fixed-step first-person arena scenario and is also not part of the
   reusable library.
 - The renderer provides 2D and indexed-mesh 3D paths with depth testing,
-  screen-space UI rectangles and textured images with atlas regions, and a
-  built-in bitmap-font text overlay.
+  screen-space UI rectangles and textured images with atlas regions and sampling
+  options, and a built-in bitmap-font text overlay.
 - Audio provides optional procedural one-shot tones through the platform output
   device, with a bounded mixer and a no-device fallback.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
