@@ -7,6 +7,8 @@ mod pipeline;
 #[cfg(test)]
 mod test_support;
 mod text;
+mod texture;
+mod ui;
 mod visibility;
 
 use std::sync::Arc;
@@ -18,12 +20,15 @@ pub use camera::{Camera2d, Camera3d};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex};
 pub use text::{TextDraw, text_width};
+pub use texture::{Texture2d, TextureCreateError, TextureRegion};
+pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiImage, UiRect};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
 use crate::math::{Mat4, Vec2};
 use mesh::MeshPipeline;
 use pipeline::TrianglePipeline;
 use text::TextRenderer;
+use ui::{ImageRenderer, UiRenderer};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -58,6 +63,8 @@ pub struct Renderer {
     pub camera_3d: Camera3d,
     triangle: TrianglePipeline,
     mesh_pipeline: MeshPipeline,
+    ui: UiRenderer,
+    images: ImageRenderer,
     text: TextRenderer,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
@@ -69,6 +76,8 @@ impl Renderer {
         let gpu = Gpu::new(window).await?;
         let triangle = TrianglePipeline::new(&gpu.device, gpu.config.format);
         let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format);
+        let ui = UiRenderer::new(&gpu.device, gpu.config.format);
+        let images = ImageRenderer::new(&gpu.device, gpu.config.format);
         let text = TextRenderer::new(&gpu.device, &gpu.queue, gpu.config.format);
         let (depth_texture, depth_view) = Self::create_depth_target(&gpu);
 
@@ -78,6 +87,8 @@ impl Renderer {
             camera_3d: Camera3d::default(),
             triangle,
             mesh_pipeline,
+            ui,
+            images,
             text,
             _depth_texture: depth_texture,
             depth_view,
@@ -170,6 +181,30 @@ impl Renderer {
         cube_mesh(&self.gpu.device)
     }
 
+    /// Upload an RGBA8 sRGB texture through the renderer's device.
+    ///
+    /// `rgba8` must contain exactly `width * height * 4` bytes. This is a raw
+    /// upload primitive: decoding files, atlases, mipmaps, and lifetime policy
+    /// remain consumer decisions. Draw the result with a
+    /// [`UiImage`] inside an [`Overlay`].
+    pub fn create_texture(
+        &self,
+        label: &str,
+        width: u32,
+        height: u32,
+        rgba8: &[u8],
+    ) -> Result<Texture2d, TextureCreateError> {
+        Texture2d::new(
+            &self.gpu.device,
+            &self.gpu.queue,
+            self.images.layout(),
+            label,
+            width,
+            height,
+            rgba8,
+        )
+    }
+
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let previous_size = (self.gpu.config.width, self.gpu.config.height);
         self.gpu.resize(size);
@@ -193,11 +228,31 @@ impl Renderer {
     ///
     /// Both stages share one surface acquisition and one submission. Text
     /// positions are in physical pixels from the top-left of the window, so
-    /// consumers can anchor a HUD to [`Renderer::surface_size`].
-    pub fn render_meshes_with_text(
+    /// consumers can anchor a HUD to [`Renderer::surface_size`]. Use
+    /// [`Renderer::render_meshes_with_overlay`] to add panels behind the text.
+    pub fn render_meshes_with_text(&mut self, draws: &[Draw3d<'_>], text: &[TextDraw<'_>]) -> bool {
+        self.render_meshes_with_overlay(
+            draws,
+            &Overlay {
+                text,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Draw indexed meshes, then the screen-space [`Overlay`] on top.
+    ///
+    /// All stages share one surface acquisition and one submission. Overlay
+    /// positions are in physical pixels from the top-left of the window, so
+    /// consumers can anchor a HUD to [`Renderer::surface_size`]. The layers
+    /// draw in order: rectangles, images, then text. They are alpha blended and
+    /// skip depth testing, so a translucent panel behind a label just goes
+    /// first. At most [`MAX_UI_RECTS`] rectangles and [`MAX_UI_IMAGES`] images
+    /// are submitted.
+    pub fn render_meshes_with_overlay(
         &mut self,
         draws: &[Draw3d<'_>],
-        overlay: &[TextDraw<'_>],
+        overlay: &Overlay<'_>,
     ) -> bool {
         use wgpu::CurrentSurfaceTexture;
 
@@ -273,15 +328,29 @@ impl Renderer {
             }
         }
 
-        if !overlay.is_empty() {
-            self.text.write(
-                &self.gpu.queue,
-                self.gpu.config.width,
-                self.gpu.config.height,
-                overlay,
-            );
+        let rect_count = self.ui.write(
+            &self.gpu.queue,
+            self.gpu.config.width,
+            self.gpu.config.height,
+            overlay.rects,
+        );
+        let image_count = self.images.write(
+            &self.gpu.queue,
+            self.gpu.config.width,
+            self.gpu.config.height,
+            overlay.images,
+        );
+        if rect_count > 0 || image_count > 0 || !overlay.text.is_empty() {
+            if !overlay.text.is_empty() {
+                self.text.write(
+                    &self.gpu.queue,
+                    self.gpu.config.width,
+                    self.gpu.config.height,
+                    overlay.text,
+                );
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("text pass"),
+                label: Some("overlay pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None,
@@ -296,7 +365,13 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.text.draw(&mut pass);
+            self.ui.draw(&mut pass);
+            if image_count > 0 {
+                self.images.draw(&mut pass, overlay.images);
+            }
+            if !overlay.text.is_empty() {
+                self.text.draw(&mut pass);
+            }
         }
 
         self.gpu.queue.submit(Some(encoder.finish()));

@@ -50,8 +50,9 @@ Keyboard and mouse:
 - **Left Shift** — sprint.
 - **Space** or **left mouse button** — fire.
 - **R** — reload.
-- **P** - pause or resume the simulation.
-- **M** - mute or unmute audio.
+- **P** — pause or resume the simulation.
+- **M** — mute or unmute audio.
+- **H** — show or hide the on-screen controls overlay.
 - **F1** — toggle verbose status logging.
 - **F2** — toggle replay verification.
 - **F4** — run a snapshot round-trip check immediately.
@@ -100,6 +101,9 @@ The slice draws an in-window HUD on top of the scene:
 - Top-left status lines show health, ammo, enemies, remaining time, frame rate,
   frame timings, replay and snapshot status, tick and state hash, draw load, and
   audio status.
+- A dim **H HELP** hint is always shown. Pressing **H** during a run opens a
+  centered controls overlay with movement/combat and system bindings in two
+  columns; **H** again hides it. The overlay disappears when the run ends.
 - A centered **PAUSED** banner appears while the simulation is paused, and
   **VICTORY** or **DEFEAT** appears when the run ends.
 

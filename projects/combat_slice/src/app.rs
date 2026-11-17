@@ -100,6 +100,114 @@ fn centered_hud(surface_width: u32, text: String, y: f32, scale: f32, color: [f3
     }
 }
 
+const HELP_COLUMN_GAP: f32 = 40.0;
+/// Extra space between help rows beyond the font line height.
+const HELP_ROW_GAP: f32 = 4.0;
+/// Help rows shrink below this fraction of the nominal scale only when the
+/// surface is too narrow to fit both columns.
+const HELP_MIN_SCALE: f32 = 0.6;
+
+/// The controls overlay: a centered heading over two DPI-scaled columns.
+///
+/// The left column lists movement and combat bindings, the right column lists
+/// system controls. When the surface is too narrow the row scale shrinks so the
+/// columns still fit inside the margins, which keeps the overlay readable in a
+/// small window. The block is positioned above the pause banner.
+fn help_lines(surface_width: u32, surface_height: u32, dpi: f32) -> Vec<HudLine> {
+    const LEFT_TITLE: &str = "MOVE + FIGHT";
+    const LEFT: [&str; 8] = [
+        "WASD / ARROWS  MOVE",
+        "MOUSE  LOOK",
+        "SHIFT  SPRINT",
+        "SPACE / LMB  FIRE",
+        "R  RELOAD",
+        "PAD STICK  MOVE + LOOK",
+        "PAD RT  FIRE",
+        "PAD X  RELOAD",
+    ];
+    const RIGHT_TITLE: &str = "SYSTEM";
+    const RIGHT: [&str; 8] = [
+        "P / MENU  PAUSE",
+        "M  MUTE AUDIO",
+        "H  HIDE HELP",
+        "F1 / Y  VERBOSE",
+        "F2  REPLAY CHECK",
+        "F4  SNAPSHOT CHECK",
+        "ENTER  RESTART",
+        "ESC  RELEASE / QUIT",
+    ];
+
+    let margin = HUD_MARGIN * dpi;
+    let heading_scale = 2.5 * dpi;
+    let mut row_scale = 2.0 * dpi;
+    let column_gap = HELP_COLUMN_GAP * dpi;
+    let available = (surface_width as f32 - margin * 2.0).max(1.0);
+    let column_width = |title: &str, rows: &[&str], scale: f32| {
+        rows.iter().fold(text_width(title, scale), |width, row| {
+            width.max(text_width(row, scale))
+        })
+    };
+
+    let mut left_width = column_width(LEFT_TITLE, &LEFT, row_scale);
+    let mut right_width = column_width(RIGHT_TITLE, &RIGHT, row_scale);
+    let natural = left_width + column_gap + right_width;
+    if natural > available {
+        let fitted = (available - column_gap).max(1.0) / (left_width + right_width).max(1.0);
+        row_scale *= fitted.clamp(HELP_MIN_SCALE, 1.0);
+        left_width = column_width(LEFT_TITLE, &LEFT, row_scale);
+        right_width = column_width(RIGHT_TITLE, &RIGHT, row_scale);
+    }
+
+    let total = left_width + column_gap + right_width;
+    let left_x = ((surface_width as f32 - total) * 0.5).max(margin);
+    let right_x = left_x + left_width + column_gap;
+    let title_y = surface_height as f32 * 0.16;
+    let header_y = title_y + 8.0 * heading_scale + 6.0 * dpi;
+    let row_y = header_y + 8.0 * row_scale + 6.0 * dpi;
+    let row_step = 8.0 * row_scale + HELP_ROW_GAP * dpi;
+
+    let mut lines = Vec::with_capacity(2 + LEFT.len() + RIGHT.len());
+    lines.push(centered_hud(
+        surface_width,
+        "CONTROLS".to_string(),
+        title_y,
+        heading_scale,
+        HUD_TEXT,
+    ));
+    for (x, title) in [(left_x, LEFT_TITLE), (right_x, RIGHT_TITLE)] {
+        lines.push(HudLine {
+            x,
+            y: header_y,
+            text: title.to_string(),
+            scale: row_scale,
+            color: HUD_GOOD,
+        });
+    }
+    for row in 0..LEFT.len().max(RIGHT.len()) {
+        let y = row_y + row_step * row as f32;
+        if let Some(text) = LEFT.get(row) {
+            lines.push(HudLine {
+                x: left_x,
+                y,
+                text: (*text).to_string(),
+                scale: row_scale,
+                color: HUD_TEXT,
+            });
+        }
+        if let Some(text) = RIGHT.get(row) {
+            lines.push(HudLine {
+                x: right_x,
+                y,
+                text: (*text).to_string(),
+                scale: row_scale,
+                color: HUD_TEXT,
+            });
+        }
+    }
+
+    lines
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct RenderFrame {
     rendered: bool,
@@ -115,6 +223,7 @@ struct App {
     mesh: Option<Mesh3d>,
     audio: Option<AudioEngine>,
     audio_muted: bool,
+    help_visible: bool,
     sim: Sim,
     verification: Verification,
     interpolation: Interpolation,
@@ -151,6 +260,7 @@ impl App {
             mesh: None,
             audio: None,
             audio_muted: false,
+            help_visible: false,
             sim,
             verification,
             interpolation,
@@ -492,6 +602,23 @@ impl App {
             dpi,
             HUD_DIM,
         );
+        push_hud(
+            &mut lines,
+            &mut y,
+            margin,
+            if self.help_visible {
+                "H HIDE HELP"
+            } else {
+                "H HELP"
+            }
+            .to_string(),
+            dpi,
+            HUD_DIM,
+        );
+
+        if self.help_visible && self.sim.outcome().is_running() {
+            lines.extend(help_lines(surface_width, surface_height, dpi));
+        }
 
         let banner_y = surface_height as f32 * 0.34;
         match self.sim.outcome() {
@@ -777,6 +904,15 @@ impl App {
         );
     }
 
+    fn toggle_help(&mut self) {
+        self.help_visible = !self.help_visible;
+        log::info!(
+            target: "fate.combat",
+            "help overlay {}",
+            if self.help_visible { "shown" } else { "hidden" }
+        );
+    }
+
     fn toggle_mute(&mut self) {
         self.audio_muted = !self.audio_muted;
         self.apply_audio_volume();
@@ -842,6 +978,10 @@ impl App {
                 }
                 KeyCode::KeyM => {
                     self.toggle_mute();
+                    return;
+                }
+                KeyCode::KeyH => {
+                    self.toggle_help();
                     return;
                 }
                 KeyCode::Enter => {
@@ -921,7 +1061,7 @@ impl ApplicationHandler for App {
 
         log::info!(
             target: "fate.combat",
-            "controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, M mute, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit"
+            "controls: WASD/arrows move, mouse look, Shift sprint, Space/left mouse fire, R reload, P pause, M mute, H help, F1 verbose, F2 replay, F4 snapshot, Enter restart, Escape release/quit"
         );
         log::info!(
             target: "fate.combat",
@@ -1579,6 +1719,100 @@ mod tests {
         app.restart();
         assert!(app.audio_muted);
         assert!(hud_text(&app).contains("AUDIO UNAVAILABLE"));
+    }
+
+    #[test]
+    fn help_is_hidden_by_default_and_hinted_in_the_hud() {
+        let app = App::new();
+        let text = hud_text(&app);
+
+        assert!(!text.contains("CONTROLS"), "hud was:\n{text}");
+        assert!(text.contains("H HELP"), "hud was:\n{text}");
+        assert!(!text.contains("H HIDE HELP"), "hud was:\n{text}");
+    }
+
+    #[test]
+    fn help_toggle_shows_two_centered_columns_above_the_pause_banner() {
+        let mut app = App::new();
+        app.toggle_help();
+
+        let lines = app.hud_lines(1280, 720, 1.0);
+        let title = find_hud_line(&lines, "CONTROLS").expect("help title");
+        let expected = (1280.0 - text_width("CONTROLS", title.scale)) * 0.5;
+        assert!((title.x - expected).abs() < 1e-3);
+
+        let left_header = find_hud_line(&lines, "MOVE + FIGHT").expect("left header");
+        let right_header = find_hud_line(&lines, "SYSTEM").expect("right header");
+        assert!(left_header.x < right_header.x);
+
+        let left_row = find_hud_line(&lines, "WASD / ARROWS  MOVE").expect("left row");
+        let right_row = find_hud_line(&lines, "P / MENU  PAUSE").expect("right row");
+        assert_eq!(left_row.x, left_header.x);
+        assert_eq!(right_row.x, right_header.x);
+        assert_eq!(left_row.y, right_row.y);
+        assert!(find_hud_line(&lines, "H HIDE HELP").is_some());
+
+        for line in &lines {
+            let bottom = line.y + 8.0 * line.scale;
+            assert!(
+                bottom < 720.0 * 0.52,
+                "help row overlaps the pause banner: {line:?}"
+            );
+            let right = line.x + text_width(&line.text, line.scale);
+            assert!(left_row.x >= HUD_MARGIN, "help starts inside the margin");
+            assert!(
+                line.x >= 0.0 && right <= 1280.0,
+                "help row overflows: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn help_layout_scales_with_dpi() {
+        let mut app = App::new();
+        app.toggle_help();
+
+        let lines = app.hud_lines(2560, 1440, 2.0);
+        let title = find_hud_line(&lines, "CONTROLS").expect("help title");
+        assert_eq!(title.scale, 5.0);
+        assert_eq!(title.y, 1440.0 * 0.16);
+        let expected = (2560.0 - text_width("CONTROLS", 5.0)) * 0.5;
+        assert!((title.x - expected).abs() < 1e-3);
+
+        let row = find_hud_line(&lines, "M  MUTE AUDIO").expect("right row");
+        assert_eq!(row.scale, 4.0);
+    }
+
+    #[test]
+    fn help_rows_shrink_to_fit_a_narrow_surface() {
+        let mut app = App::new();
+        app.toggle_help();
+
+        let lines = app.hud_lines(360, 640, 1.0);
+        let row = find_hud_line(&lines, "WASD / ARROWS  MOVE").expect("left row");
+        assert!(row.scale < 2.0, "row scale did not shrink: {}", row.scale);
+
+        for line in &lines {
+            let right = line.x + text_width(&line.text, line.scale);
+            assert!(line.x >= 0.0, "row starts off-screen: {line:?}");
+            assert!(right <= 360.0, "row overflows the surface: {line:?}");
+        }
+    }
+
+    #[test]
+    fn help_is_hidden_once_the_run_ends() {
+        let mut app = App::new();
+        app.toggle_help();
+        assert!(hud_text(&app).contains("CONTROLS"));
+
+        for enemy in &mut app.sim.enemies {
+            enemy.health = 0;
+        }
+        app.sim.step(SimInput::default());
+
+        let text = hud_text(&app);
+        assert!(!text.contains("CONTROLS"), "hud was:\n{text}");
+        assert!(text.contains("VICTORY"), "hud was:\n{text}");
     }
 
     #[test]

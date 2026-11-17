@@ -9,6 +9,10 @@ deliberately independent from `fate_demo`:
 - it uploads a mesh through `Renderer::create_mesh` instead of naming a
   `wgpu::Device`;
 - it submits a 3D draw list and handles resize events;
+- it uploads a procedural two-tile atlas through `Renderer::create_texture` and
+  draws a DPI-scaled panel, accent bar, and both atlas regions behind its text
+  through `render_meshes_with_overlay`, exercising the public overlay layers the
+  combat slice can use for text;
 - it exits after a fixed number of redraws, so it can run unattended.
 
 Its manifest depends on `fate_engine`, `pollster`, and `winit` only. There is no

@@ -17,8 +17,9 @@
   client/server sessions. It does not provide sockets, authentication,
   encryption, clock synchronization, or prediction/reconciliation.
 - The renderer supports built-in 2D triangles, indexed 3D meshes with depth
-  testing, tint, cameras, and visibility helpers, and a bitmap-font text overlay
-  with alpha blending. Consumers own scene traversal, culling decisions, and HUD
+  testing, tint, cameras, visibility helpers, screen-space UI rectangles and
+  textured images, and a bitmap-font text overlay with alpha blending.
+  Consumers own scene traversal, culling decisions, asset loading, and HUD
   layout; there is no general asset, material, or lighting system.
 - `fate_engine::audio` plays bounded procedural one-shot tones through the
   platform output device and degrades to silence when no device is available.
@@ -168,6 +169,35 @@ without letting audio affect deterministic state.
 **Done when:** The scenario is playable through documented public APIs, its
 simulation is regression-tested, and the next engine task has a concrete
 consumer rather than a speculative abstraction.
+
+## Step 6 - Compose HUD overlays without backend types
+
+**Depends on:** Step 5. Status: **done.**
+
+The text overlay covered labels but not the surface behind them, so consumers
+either accepted lower contrast over bright scenes or built meshes just to draw a
+panel. `Renderer::render_meshes_with_overlay` now composites a borrowed
+`Overlay`: screen-space rectangles, textured images, then text, all in one
+surface submission. Positions use the same physical-pixel, top-left origin as
+`TextDraw`; alpha blending supports translucent panels, and list order controls
+layering. Rectangle and image counts are bounded, and invalid geometry is
+skipped.
+
+`Renderer::create_texture` adds a raw RGBA8 sRGB upload path with validation, so
+a HUD can show real artwork without an asset pipeline or direct `wgpu` names.
+`TextureRegion` and `Texture2d::region` select atlas tiles from one upload.
+There are no decoders, mipmaps, atlas packers, or 3D-texture support yet. The
+handle is consumer-owned and must outlive any `UiImage` that references it.
+`projects/window_smoke` exercises the seam with a two-tile procedural atlas, a
+panel, an accent bar, and text.
+
+- Keep the common overlay path free of direct `wgpu` names.
+- Use one surface acquisition and submission for meshes and every overlay layer.
+- Test coordinate conversion, texture validation, and invalid input headlessly,
+  plus offscreen GPU visibility and sampling checks that skip without an adapter.
+
+**Done when:** A windowed consumer can place readable HUD content over arbitrary
+scene colors without uploading a mesh or naming backend types.
 
 ## Deferred until a consumer needs them
 

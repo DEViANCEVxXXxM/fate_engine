@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -509,7 +509,7 @@ interpolation, ownership, or production server policy.
 
 ### Available paths
 
-`fate_engine::renderer::Renderer` currently provides three prototype paths:
+`fate_engine::renderer::Renderer` currently provides four prototype paths:
 
 - `render(&[Instance2d])` draws a built-in 2D triangle for each transform.
   `Instance2d` supplies world `position`, `rotation`, and `scale`; it does not
@@ -520,6 +520,47 @@ interpolation, ownership, or production server policy.
 - `render_meshes_with_text(&[Draw3d], &[TextDraw])` draws the same 3D list and
   then a text overlay in one surface submission. `render_meshes` is equivalent
   to calling it with an empty overlay.
+- `render_meshes_with_overlay(&[Draw3d], &Overlay)` also draws screen-space
+  rectangles, textured images, and text between the 3D scene and presentation.
+  Use this when a panel or bar needs to sit behind a label, or an icon needs to
+  sit beside it.
+
+`UiRect` is one axis-aligned screen-space rectangle in physical pixels, using
+the same top-left origin as `TextDraw`. `position` is the top-left corner,
+`size` extends right and down, and `color` includes alpha. `UiImage` places a
+`Texture2d`, multiplied by a tint color, at the same kind of rectangle. By
+default it samples the whole texture; `.with_region(texture.region(x, y, width,
+height))` selects an atlas tile using normalized coordinates.
+`Overlay` groups borrowed slices:
+
+```rust
+let overlay = Overlay {
+    rects: &panels,
+    images: &icons,
+    text: &labels,
+};
+renderer.render_meshes_with_overlay(&draws, &overlay);
+```
+
+Layers draw in field order: rectangles, images, then text. Every layer is alpha
+blended, skips depth testing, and preserves slice order, so a translucent panel
+behind a label simply comes first. Up to `MAX_UI_RECTS` (currently 256)
+rectangles and `MAX_UI_IMAGES` (currently 64) images are submitted per frame.
+Records with non-finite values or non-positive sizes are skipped. The coordinate
+conversion and skip rules are covered by headless tests, and offscreen GPU tests
+skip when no adapter is available.
+
+`Renderer::create_texture(label, width, height, rgba8)` uploads an RGBA8 sRGB
+texture and returns a `Texture2d` handle. The byte slice must contain exactly
+`width * height * 4` bytes; empty, zero-sized, oversized, and mismatched uploads
+return `TextureCreateError` before touching the GPU. Sampling uses linear
+filtering and clamp-to-edge addressing. `TextureRegion` describes a normalized
+sub-rectangle, and `Texture2d::region(x, y, width, height)` converts an atlas
+tile from pixels. Regions are not clamped or inset, and there are no mipmaps,
+packers, decoders, or hot reload: leave padding between atlas tiles to avoid
+filtering bleed, and let consumers own asset loading and texture lifetime. A
+texture may be shared by any number of `UiImage` records but must outlive them.
+The current image path is screen-space only; it does not texture 3D meshes.
 
 `TextDraw` places one run of text at a top-left position in physical pixels,
 measured from the window's top-left corner. The renderer ships a built-in 5x7
@@ -594,14 +635,17 @@ The renderer uses `wgpu` and `winit` directly. The current public coupling is:
   work. `GpuInitError` also wraps `wgpu` error types.
 - The common consumer path does not need to name `wgpu`: `Renderer::aspect`,
   `Renderer::surface_size`, `Renderer::create_mesh`, `Renderer::cube_mesh`,
-  `render`, `render_meshes`, and `render_meshes_with_text` are sufficient for
-  window creation, surface ownership, mesh upload, draw submission, and a text
-  overlay.
+  `render`, `render_meshes`, `render_meshes_with_text`, and
+  `render_meshes_with_overlay` are sufficient for window creation, surface
+  ownership, mesh upload, texture upload, draw submission, and an overlay with
+  panels, images, and text.
 
 `projects/window_smoke` is a second windowed consumer that validates this seam.
 Its manifest depends only on `fate_engine`, `pollster`, and `winit`; it creates
-its own window, uploads a custom mesh through the renderer, handles resize, and
-submits 3D draws. There is no second backend and no backend-portability trait.
+its own window, uploads a custom mesh and a procedural checkerboard texture
+through the renderer, handles resize, submits 3D draws, and draws a panel, image,
+and text through `render_meshes_with_overlay`. There is no second backend and no
+backend-portability trait.
 Treat the `wgpu`/`winit` boundary as a prototype seam, pin dependency versions,
 and do not assume future backend compatibility.
 
