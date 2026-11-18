@@ -288,7 +288,8 @@ impl UiRenderer {
 /// `position` is the top-left corner and `size` extends right and down, matching
 /// [`UiRect`]. By default the full texture is sampled; [`Self::with_region`]
 /// selects a normalized sub-rectangle, including regions beyond `1.0` for tiled
-/// sampling with a repeating texture. The sample is tinted by `color` and alpha
+/// sampling with a repeating texture. The sample is tinted by `color`, optionally
+/// rotated around the image center with [`Self::with_rotation`], and alpha
 /// blended. Images draw after rectangles and before text.
 #[derive(Clone, Copy, Debug)]
 pub struct UiImage<'a> {
@@ -298,6 +299,8 @@ pub struct UiImage<'a> {
     /// Normalized sub-rectangle to sample; defaults to the whole texture.
     pub region: TextureRegion,
     pub color: [f32; 4],
+    /// Clockwise rotation in radians around the image center.
+    pub rotation: f32,
     /// Optional bounds outside which nothing is drawn.
     pub clip: Option<UiClip>,
 }
@@ -311,6 +314,7 @@ impl<'a> UiImage<'a> {
             size,
             region: TextureRegion::FULL,
             color: [1.0; 4],
+            rotation: 0.0,
             clip: None,
         }
     }
@@ -318,6 +322,16 @@ impl<'a> UiImage<'a> {
     /// Draw only the part of this image inside `clip`.
     pub const fn with_clip(mut self, clip: UiClip) -> Self {
         self.clip = Some(clip);
+        self
+    }
+
+    /// Rotate clockwise by `radians` around the image center.
+    ///
+    /// Positive angles turn the top edge toward the right, matching screen
+    /// coordinates where `y` grows downward. Rotation does not change the
+    /// sampled region or the clip.
+    pub const fn with_rotation(mut self, radians: f32) -> Self {
+        self.rotation = radians;
         self
     }
 
@@ -336,6 +350,7 @@ impl<'a> UiImage<'a> {
     fn is_drawable(&self) -> bool {
         finite_rect(self.position, self.size)
             && self.region.is_finite()
+            && self.rotation.is_finite()
             && self.color.iter().all(|channel| channel.is_finite())
     }
 }
@@ -578,6 +593,34 @@ fn rect_fits_surface(position: Vec2, size: Vec2) -> bool {
     (position.x + size.x).is_finite() && (position.y + size.y).is_finite()
 }
 
+/// Pixel-space quad corners of an image, clockwise from the top-left.
+///
+/// Returns `None` when the center or any rotated corner is not finite.
+fn rotated_corners(position: Vec2, size: Vec2, rotation: f32) -> Option<[[f32; 2]; 4]> {
+    let half_width = size.x * 0.5;
+    let half_height = size.y * 0.5;
+    let center_x = position.x + half_width;
+    let center_y = position.y + half_height;
+    let (sin, cos) = rotation.sin_cos();
+    let corner = |dx: f32, dy: f32| {
+        [
+            center_x + dx * cos - dy * sin,
+            center_y + dx * sin + dy * cos,
+        ]
+    };
+    let corners = [
+        corner(-half_width, -half_height),
+        corner(half_width, -half_height),
+        corner(half_width, half_height),
+        corner(-half_width, half_height),
+    ];
+    corners
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite())
+        .then_some(corners)
+}
+
 /// Append two triangles covering `image`, in normalized device coordinates.
 fn push_image(out: &mut Vec<ImageVertex>, image: &UiImage<'_>, width: f32, height: f32) -> bool {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
@@ -586,11 +629,13 @@ fn push_image(out: &mut Vec<ImageVertex>, image: &UiImage<'_>, width: f32, heigh
     if !image.is_drawable() || !rect_fits_surface(image.position, image.size) {
         return false;
     }
+    let Some([top_left, top_right, bottom_right, bottom_left]) =
+        rotated_corners(image.position, image.size, image.rotation)
+    else {
+        return false;
+    };
 
-    let x0 = image.position.x / width * 2.0 - 1.0;
-    let x1 = (image.position.x + image.size.x) / width * 2.0 - 1.0;
-    let y0 = 1.0 - image.position.y / height * 2.0;
-    let y1 = 1.0 - (image.position.y + image.size.y) / height * 2.0;
+    let ndc = |[x, y]: [f32; 2]| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
     let color = image.color;
     let [u0, v0] = [image.region.min.x, image.region.min.y];
     let [u1, v1] = [image.region.max.x, image.region.max.y];
@@ -601,12 +646,12 @@ fn push_image(out: &mut Vec<ImageVertex>, image: &UiImage<'_>, width: f32, heigh
     };
 
     out.extend_from_slice(&[
-        vertex([x0, y0], [u0, v0]),
-        vertex([x0, y1], [u0, v1]),
-        vertex([x1, y1], [u1, v1]),
-        vertex([x0, y0], [u0, v0]),
-        vertex([x1, y1], [u1, v1]),
-        vertex([x1, y0], [u1, v0]),
+        vertex(ndc(top_left), [u0, v0]),
+        vertex(ndc(bottom_left), [u0, v1]),
+        vertex(ndc(bottom_right), [u1, v1]),
+        vertex(ndc(top_left), [u0, v0]),
+        vertex(ndc(bottom_right), [u1, v1]),
+        vertex(ndc(top_right), [u1, v0]),
     ]);
     true
 }
@@ -1065,6 +1110,26 @@ mod tests {
     }
 
     #[test]
+    fn image_corners_rotate_clockwise_around_the_center() {
+        let corners = rotated_corners(
+            Vec2::new(10.0, 20.0),
+            Vec2::new(4.0, 2.0),
+            std::f32::consts::FRAC_PI_2,
+        )
+        .expect("corners");
+        let expected = [[13.0, 19.0], [13.0, 23.0], [11.0, 23.0], [11.0, 19.0]];
+        for (corner, expected) in corners.iter().zip(expected) {
+            assert!((corner[0] - expected[0]).abs() < 1e-5, "{corner:?}");
+            assert!((corner[1] - expected[1]).abs() < 1e-5, "{corner:?}");
+        }
+    }
+
+    #[test]
+    fn image_corners_reject_non_finite_rotation() {
+        assert!(rotated_corners(Vec2::ZERO, Vec2::new(4.0, 4.0), f32::NAN).is_none());
+    }
+
+    #[test]
     fn image_clip_limits_draw_to_the_clip_rect() {
         use crate::renderer::test_support::{skip_without_adapter, test_device};
 
@@ -1095,5 +1160,35 @@ mod tests {
             outside[0] < 8 && outside[1] < 8 && outside[2] < 8,
             "outside pixel was {outside:?}"
         );
+    }
+
+    #[test]
+    fn image_rotation_turns_the_texture_clockwise() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let mut renderer = ImageRenderer::new(&device, format);
+        let texture = test_image_texture(
+            &device,
+            &queue,
+            &mut renderer,
+            crate::renderer::TextureOptions::NEAREST,
+        );
+        let size = IMAGE_TEST_SIZE as f32;
+        let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size))
+            .with_rotation(std::f32::consts::FRAC_PI_2);
+        let pixels = render_images(&device, &queue, &mut renderer, &[image]);
+
+        let at = |x: u32, y: u32| pixels[(y * IMAGE_TEST_SIZE + x) as usize];
+        let top = at(IMAGE_TEST_SIZE / 2, 8);
+        let bottom = at(IMAGE_TEST_SIZE / 2, IMAGE_TEST_SIZE - 8);
+
+        assert!(top[0] > top[1], "top pixel was {top:?}");
+        assert!(bottom[1] > bottom[0], "bottom pixel was {bottom:?}");
     }
 }

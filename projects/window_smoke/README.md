@@ -12,9 +12,9 @@ deliberately independent from `fate_demo`:
 - it uploads a procedural two-tile atlas through
   `Renderer::create_texture_with_options`, draws both atlas regions with
   nearest filtering, tiles one region across a strip using repeat addressing,
-  and crops an oversized tile with `UiClip` through
-  `render_meshes_with_overlay`, exercising the public overlay layers the combat
-  slice can use for text;
+  rotates one icon, crops an oversized tile with `UiClip`, and wraps a paragraph
+  with `wrap_text` through `render_meshes_with_overlay`, exercising the public
+  overlay layers the combat slice can use for text;
 - it exits after a fixed number of redraws, so it can run unattended.
 
 Its manifest depends on `fate_engine`, `pollster`, and `winit` only. There is no

@@ -297,6 +297,68 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
     (glyphs * GLYPH_ADVANCE as f32 - (GLYPH_ADVANCE - GLYPH_WIDTH) as f32) * scale
 }
 
+/// Split `text` into lines no wider than `max_width` at `scale`.
+///
+/// Words wrap at ASCII whitespace, explicit `\n` starts a new line, and blank
+/// paragraphs produce empty strings. A single word wider than `max_width` is
+/// hard-broken at character boundaries, so the result stays within the limit
+/// unless one glyph alone is wider. Whitespace inside a paragraph is collapsed
+/// to single spaces.
+///
+/// Returns the original paragraph structure when `max_width` or `scale` is not
+/// positive and finite, so callers can render the unwrapped fallback.
+pub fn wrap_text(text: &str, max_width: f32, scale: f32) -> Vec<String> {
+    let paragraphs: Vec<&str> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    if !max_width.is_finite() || max_width <= 0.0 || !scale.is_finite() || scale <= 0.0 {
+        return paragraphs.into_iter().map(str::to_owned).collect();
+    }
+
+    let advance = GLYPH_ADVANCE as f32 * scale;
+    let gap = (GLYPH_ADVANCE - GLYPH_WIDTH) as f32 * scale;
+    let mut lines = Vec::new();
+    for paragraph in paragraphs {
+        let mut current = String::new();
+        for word in paragraph.split_whitespace() {
+            let candidate_width = if current.is_empty() {
+                text_width(word, scale)
+            } else {
+                text_width(&current, scale) + advance + text_width(word, scale) + gap
+            };
+            if candidate_width <= max_width {
+                if !current.is_empty() {
+                    current.push(' ');
+                }
+                current.push_str(word);
+                continue;
+            }
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            if text_width(word, scale) <= max_width {
+                current.push_str(word);
+                continue;
+            }
+            // The word does not fit on an empty line, so break it by glyphs.
+            for ch in word.chars() {
+                let next_width = if current.is_empty() {
+                    advance
+                } else {
+                    text_width(&current, scale) + advance
+                };
+                if !current.is_empty() && next_width > max_width {
+                    lines.push(std::mem::take(&mut current));
+                }
+                current.push(ch);
+            }
+        }
+        lines.push(current);
+    }
+    lines
+}
+
 /// Lay out one run of text into glyph placements.
 ///
 /// `out` is cleared first so callers can reuse its allocation. Runs whose scale
@@ -727,6 +789,43 @@ mod tests {
         assert_eq!(text_width("AB", 2.0), ((GLYPH_ADVANCE * 2 - 1) * 2) as f32);
         assert_eq!(text_width("AB\nABCD", 1.0), (GLYPH_ADVANCE * 4 - 1) as f32);
         assert_eq!(text_width("A", 0.0), 0.0);
+    }
+
+    #[test]
+    fn wrap_text_breaks_at_word_boundaries() {
+        let lines = wrap_text("AA AA", 11.0, 1.0);
+        assert_eq!(lines, ["AA", "AA"]);
+        assert!(lines.iter().all(|line| text_width(line, 1.0) <= 11.0));
+    }
+
+    #[test]
+    fn wrap_text_hard_breaks_a_word_that_cannot_fit() {
+        let lines = wrap_text("AAAAA", 11.0, 1.0);
+        assert_eq!(lines, ["AA", "AA", "A"]);
+    }
+
+    #[test]
+    fn wrap_text_preserves_paragraphs_and_blank_lines() {
+        let lines = wrap_text("AB\r\n\nCD", 100.0, 1.0);
+        assert_eq!(lines, ["AB", "", "CD"]);
+    }
+
+    #[test]
+    fn wrap_text_keeps_the_fallback_when_the_limit_is_invalid() {
+        assert_eq!(wrap_text("AB CD", 0.0, 1.0), ["AB CD"]);
+        assert_eq!(wrap_text("AB CD", 100.0, f32::NAN), ["AB CD"]);
+        assert_eq!(wrap_text("AB\nCD", f32::INFINITY, 1.0), ["AB", "CD"]);
+    }
+
+    #[test]
+    fn wrap_text_keeps_every_line_within_the_limit() {
+        let lines = wrap_text(
+            "WRAP THESE WORDS INTO SEVERAL HUD LINES WITHOUT OVERFLOW",
+            80.0,
+            1.0,
+        );
+        assert!(lines.len() > 1);
+        assert!(lines.iter().all(|line| text_width(line, 1.0) <= 80.0));
     }
 
     #[test]

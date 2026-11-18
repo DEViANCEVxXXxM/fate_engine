@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{
     Draw3d, Mesh3d, MeshVertex, Overlay, Renderer, TextDraw, Texture2d, TextureOptions,
-    TextureRegion, UiClip, UiImage, UiRect, text_width,
+    TextureRegion, UiClip, UiImage, UiRect, text_width, wrap_text,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -42,6 +42,8 @@ const TILE_STRIP_HEIGHT: f32 = 12.0;
 const TILE_REPEATS: f32 = 8.0;
 const CLIP_PREVIEW: f32 = 40.0;
 const CLIP_OVERFLOW: f32 = 12.0;
+/// Slight clockwise tilt so the checker icon shows rotated geometry.
+const ICON_ROTATION: f32 = 0.16;
 
 const PYRAMID_VERTICES: &[MeshVertex] = &[
     MeshVertex {
@@ -164,6 +166,8 @@ impl SmokeApp {
         let gap = HUD_LINE_GAP * dpi;
         let line_scale = 2.0 * dpi;
         let line_step = 8.0 * line_scale + gap;
+        let panel_pad = margin * 0.5;
+        let panel_width = (surface_width as f32 - panel_pad * 2.0).max(1.0);
         let title = "FATE WINDOW SMOKE";
         let title_scale = 3.0 * dpi;
         let title_x = ((surface_width as f32 - text_width(title, title_scale)) * 0.5).max(0.0);
@@ -173,21 +177,36 @@ impl SmokeApp {
         let seam_y = counters_y + line_step;
         let frame = format!("FRAME {}", self.redraws);
         let counters = format!("SUBMITTED {} SKIPPED {}", self.submitted, self.skipped);
-        let seam = "MESH + TEXT + UI + TILE + CLIP";
+        let seam = "MESH + TEXT + UI + TILE + CLIP + ROTATE + WRAP";
+        let copy = "WRAPPED TEXT STAYS INSIDE THE PANEL NO MATTER HOW NARROW THE WINDOW GETS";
+        // Wrap to a deliberately narrow column so the screenshot shows more than
+        // one line even on a wide window.
+        let wrap_width = (panel_width * 0.55 - margin * 2.0).max(1.0);
+        let wrapped = wrap_text(copy, wrap_width, line_scale);
+        let copy_y = seam_y + line_step;
 
-        let lines = [
+        let mut lines: Vec<(&str, f32, f32, f32, [f32; 4])> = vec![
             (title, title_x, title_y, title_scale, HUD_TEXT),
             (frame.as_str(), margin, frame_y, line_scale, HUD_DIM),
             (counters.as_str(), margin, counters_y, line_scale, HUD_DIM),
             (seam, margin, seam_y, line_scale, HUD_DIM),
         ];
+        lines.extend(wrapped.iter().enumerate().map(|(index, line)| {
+            (
+                line.as_str(),
+                margin,
+                copy_y + index as f32 * line_step,
+                line_scale,
+                HUD_DIM,
+            )
+        }));
 
-        let panel_pad = margin * 0.5;
-        let panel_width = (surface_width as f32 - panel_pad * 2.0).max(1.0);
         let strip_height = TILE_STRIP_HEIGHT * dpi;
         let preview_size = CLIP_PREVIEW * dpi;
         let bottom_height = strip_height.max(preview_size);
-        let panel_height = (seam_y + 8.0 * line_scale + bottom_height + margin)
+        let copy_bottom =
+            copy_y + (wrapped.len().saturating_sub(1)) as f32 * line_step + 8.0 * line_scale;
+        let panel_height = (copy_bottom + bottom_height + margin)
             .min((surface_height as f32 - panel_pad * 2.0).max(1.0))
             .max(1.0);
         let panel = UiRect::new(
@@ -222,7 +241,8 @@ impl SmokeApp {
                 Vec2::new(checker_x, icon_y),
                 Vec2::new(image_size, image_size),
             )
-            .with_region(texture.region(0, 0, ATLAS_TILE, ATLAS_TILE)),
+            .with_region(texture.region(0, 0, ATLAS_TILE, ATLAS_TILE))
+            .with_rotation(ICON_ROTATION),
             UiImage::new(
                 texture,
                 Vec2::new(target_x, icon_y),

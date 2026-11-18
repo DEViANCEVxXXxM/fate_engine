@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions, sampling options, and clipping, and a bitmap-font text overlay | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions, sampling options, clipping, and rotation, and a bitmap-font text overlay with width-aware wrapping | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -530,7 +530,9 @@ the same top-left origin as `TextDraw`. `position` is the top-left corner,
 `size` extends right and down, and `color` includes alpha. `UiImage` places a
 `Texture2d`, multiplied by a tint color, at the same kind of rectangle. By
 default it samples the whole texture; `.with_region(texture.region(x, y, width,
-height))` selects an atlas tile using normalized coordinates.
+height))` selects an atlas tile using normalized coordinates, and
+`.with_rotation(radians)` rotates the quad clockwise around its center without
+changing the sampled region.
 `Overlay` groups borrowed slices:
 
 ```rust
@@ -556,6 +558,10 @@ stays inside a panel even when the record's geometry does not. Clips are
 independent per record and are intersected with the window; empty or invalid
 clips draw nothing. Scissor state is grouped by consecutive equal clip, so the
 cost is proportional to clip changes rather than record count.
+
+Image rotation is purely geometric: it changes the quad's corners, not its
+region, tint, or clip. A rotated image can extend past its unrotated bounds, so
+pair it with a `UiClip` when it must stay inside a slot.
 
 `Renderer::create_texture(label, width, height, rgba8)` uploads an RGBA8 sRGB
 texture and returns a `Texture2d` handle. The byte slice must contain exactly
@@ -587,6 +593,15 @@ scene. `TextDraw::new(position, text)`, `.with_scale(scale)`, and
 `.with_color(color)` build records; `text_width(text, scale)` returns the width
 of the widest line so consumers can center or right-align text. Newlines and
 tabs are supported, and blank glyphs (such as spaces) emit no quads.
+
+`wrap_text(text, max_width, scale)` splits a string into lines that fit a pixel
+column, so HUD copy can adapt to a panel instead of using hand-split strings. It
+wraps at ASCII whitespace, hard-breaks a word that is wider than the column,
+keeps explicit paragraphs and blank lines, and collapses whitespace inside a
+paragraph to single spaces. The returned `Vec<String>` usually feeds one
+`TextDraw` per line, stepped by the font's line height. An invalid or
+non-positive `max_width` or `scale` returns the original paragraphs unwrapped,
+so callers can fall back to a single draw.
 
 Text positions and sizes are physical pixels, matching
 `Renderer::surface_size()`, which returns the current drawable size. Consumers

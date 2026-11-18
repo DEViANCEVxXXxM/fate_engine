@@ -17,7 +17,8 @@ expanding content.
   reusable library.
 - The renderer provides 2D and indexed-mesh 3D paths with depth testing,
   screen-space UI rectangles and textured images with atlas regions, sampling
-  options, and clipping, and a built-in bitmap-font text overlay.
+  options, clipping, and rotation, and a built-in bitmap-font text overlay with
+  width-aware wrapping.
 - Audio provides optional procedural one-shot tones through the platform output
   device, with a bounded mixer and a no-device fallback.
 - Deterministic simulation primitives live in the `fate_sim` workspace crate:
