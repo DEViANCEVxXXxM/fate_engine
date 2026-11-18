@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use fate_sim::math::{Fixed, FixedVec2, FixedVec3};
+use fate_sim::math::{Fixed, FixedVec2, FixedVec3, ray_sphere};
 use fate_sim::{StateHasher, StateWriter};
 
 pub const SIMULATION_HZ: u32 = 120;
@@ -740,31 +740,6 @@ fn clamp_pitch(pitch: FixedVec2) -> FixedVec2 {
     FixedVec2::new(x, y)
 }
 
-fn ray_sphere(
-    origin: FixedVec3,
-    direction: FixedVec3,
-    center: FixedVec3,
-    radius: Fixed,
-) -> Option<Fixed> {
-    let offset = center - origin;
-    let along = offset.dot(direction);
-    if along < Fixed::ZERO {
-        return None;
-    }
-    let perpendicular_squared = offset.length_squared() - along * along;
-    let radius_squared = radius * radius;
-    if perpendicular_squared > radius_squared {
-        return None;
-    }
-    let half_chord = (radius_squared - perpendicular_squared).sqrt();
-    let near = along - half_chord;
-    if near >= Fixed::ZERO {
-        Some(near)
-    } else {
-        Some(along + half_chord)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -874,6 +849,32 @@ mod tests {
         assert_eq!(sim.hits(), 1);
         assert_eq!(sim.enemies[5].health, ENEMY_HEALTH - SHOT_DAMAGE);
         assert_eq!(sim.player.ammo, MAGAZINE_SIZE - 1);
+    }
+
+    #[test]
+    fn hitscan_selects_the_nearest_enemy_and_keeps_tie_order_after_restore() {
+        let mut sim = Sim::new();
+        for enemy in &mut sim.enemies {
+            enemy.health = 0;
+        }
+        for (index, distance) in [10, 5, 5].into_iter().enumerate() {
+            sim.enemies[index].position =
+                sim.player.position + FixedVec2::new(Fixed::ZERO, -Fixed::from_int(distance));
+            sim.enemies[index].health = ENEMY_HEALTH;
+        }
+
+        let mut restored = Sim::from_state_bytes(&sim.state_bytes()).unwrap();
+        let input = SimInput {
+            fire: true,
+            ..SimInput::default()
+        };
+        sim.step(input);
+        restored.step(input);
+
+        assert_eq!(sim.enemies[0].health, ENEMY_HEALTH);
+        assert_eq!(sim.enemies[1].health, ENEMY_HEALTH - SHOT_DAMAGE);
+        assert_eq!(sim.enemies[2].health, ENEMY_HEALTH);
+        assert_eq!(restored.state_bytes(), sim.state_bytes());
     }
 
     #[test]
