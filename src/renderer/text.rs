@@ -289,12 +289,14 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
             _ => current += 1,
         }
     }
-    widest = widest.max(current);
-    if widest == 0 {
+    glyph_span_width(widest.max(current), scale)
+}
+
+fn glyph_span_width(count: usize, scale: f32) -> f32 {
+    if count == 0 {
         return 0.0;
     }
-    let glyphs = widest as f32;
-    (glyphs * GLYPH_ADVANCE as f32 - (GLYPH_ADVANCE - GLYPH_WIDTH) as f32) * scale
+    (count as f32 * GLYPH_ADVANCE as f32 - (GLYPH_ADVANCE - GLYPH_WIDTH) as f32) * scale
 }
 
 /// Split `text` into lines no wider than `max_width` at `scale`.
@@ -308,50 +310,46 @@ pub fn text_width(text: &str, scale: f32) -> f32 {
 /// Returns the original paragraph structure when `max_width` or `scale` is not
 /// positive and finite, so callers can render the unwrapped fallback.
 pub fn wrap_text(text: &str, max_width: f32, scale: f32) -> Vec<String> {
-    let paragraphs: Vec<&str> = text
+    let paragraphs = text
         .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .collect();
+        .map(|line| line.strip_suffix('\r').unwrap_or(line));
     if !max_width.is_finite() || max_width <= 0.0 || !scale.is_finite() || scale <= 0.0 {
-        return paragraphs.into_iter().map(str::to_owned).collect();
+        return paragraphs.map(str::to_owned).collect();
     }
 
-    let advance = GLYPH_ADVANCE as f32 * scale;
-    let gap = (GLYPH_ADVANCE - GLYPH_WIDTH) as f32 * scale;
+    let fits = |count| glyph_span_width(count, scale) <= max_width;
     let mut lines = Vec::new();
     for paragraph in paragraphs {
         let mut current = String::new();
-        for word in paragraph.split_whitespace() {
-            let candidate_width = if current.is_empty() {
-                text_width(word, scale)
-            } else {
-                text_width(&current, scale) + advance + text_width(word, scale) + gap
-            };
-            if candidate_width <= max_width {
-                if !current.is_empty() {
+        let mut count = 0;
+        for word in paragraph.split_ascii_whitespace() {
+            let word_count = word.chars().count();
+            let candidate = count + usize::from(count != 0) + word_count;
+            if fits(candidate) {
+                if count != 0 {
                     current.push(' ');
                 }
                 current.push_str(word);
+                count = candidate;
                 continue;
             }
-            if !current.is_empty() {
+            if count != 0 {
                 lines.push(std::mem::take(&mut current));
+                count = 0;
             }
-            if text_width(word, scale) <= max_width {
+            if fits(word_count) {
                 current.push_str(word);
+                count = word_count;
                 continue;
             }
             // The word does not fit on an empty line, so break it by glyphs.
             for ch in word.chars() {
-                let next_width = if current.is_empty() {
-                    advance
-                } else {
-                    text_width(&current, scale) + advance
-                };
-                if !current.is_empty() && next_width > max_width {
+                if count != 0 && !fits(count + 1) {
                     lines.push(std::mem::take(&mut current));
+                    count = 0;
                 }
                 current.push(ch);
+                count += 1;
             }
         }
         lines.push(current);
@@ -802,6 +800,29 @@ mod tests {
     fn wrap_text_hard_breaks_a_word_that_cannot_fit() {
         let lines = wrap_text("AAAAA", 11.0, 1.0);
         assert_eq!(lines, ["AA", "AA", "A"]);
+    }
+
+    #[test]
+    fn wrap_text_keeps_exact_fits_at_fractional_scale() {
+        let scale = 0.41;
+        assert_eq!(wrap_text("A B", text_width("A B", scale), scale), ["A B"]);
+        assert_eq!(
+            wrap_text("ABC", text_width("AB", scale), scale),
+            ["AB", "C"]
+        );
+    }
+
+    #[test]
+    fn wrap_text_collapses_ascii_whitespace_but_keeps_non_ascii_characters() {
+        let text = " \tA\u{a0}B\t C ";
+        assert_eq!(wrap_text(text, 29.0, 1.0), ["A\u{a0}B C"]);
+        assert_eq!(wrap_text(text, 23.0, 1.0), ["A\u{a0}B", "C"]);
+        assert_eq!(wrap_text(text, 11.0, 1.0), ["A\u{a0}", "B", "C"]);
+    }
+
+    #[test]
+    fn wrap_text_makes_progress_when_even_one_glyph_is_too_wide() {
+        assert_eq!(wrap_text("ABC", 1.0, 1.0), ["A", "B", "C"]);
     }
 
     #[test]

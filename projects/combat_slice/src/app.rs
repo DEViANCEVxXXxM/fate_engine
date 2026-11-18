@@ -25,7 +25,7 @@ use crate::sim::{
 use crate::verification::Verification;
 use fate_engine::audio::{AudioEngine, Tone};
 use fate_engine::math::Vec2;
-use fate_engine::renderer::{Mesh3d, Renderer, TextDraw, text_width};
+use fate_engine::renderer::{Mesh3d, Overlay, Renderer, TextDraw, text_width};
 use fate_engine::time::Time;
 
 const TITLE_INTERVAL: f32 = 0.5;
@@ -213,8 +213,10 @@ struct RenderFrame {
     rendered: bool,
     draw_list_ms: f32,
     submit_ms: f32,
+    record_ms: f32,
     visible: usize,
     drawn: usize,
+    draw_calls: usize,
 }
 
 struct App {
@@ -242,8 +244,10 @@ struct App {
     last_verify_ms: f32,
     last_render_ms: f32,
     last_draw_list_ms: f32,
+    last_record_ms: f32,
     last_visible: usize,
     last_drawn: usize,
+    last_draw_calls: usize,
     title_timer: f32,
     status_timer: f32,
 }
@@ -279,8 +283,10 @@ impl App {
             last_verify_ms: 0.0,
             last_render_ms: 0.0,
             last_draw_list_ms: 0.0,
+            last_record_ms: 0.0,
             last_visible: 0,
             last_drawn: 0,
+            last_draw_calls: 0,
             title_timer: 0.0,
             status_timer: 0.0,
         }
@@ -310,6 +316,8 @@ impl App {
         self.last_render_ms = frame.submit_ms;
         self.last_visible = frame.visible;
         self.last_drawn = frame.drawn;
+        self.last_draw_calls = frame.draw_calls;
+        self.last_record_ms = frame.record_ms;
 
         self.input.end_frame();
         self.update_presentation(frame_dt);
@@ -678,7 +686,6 @@ impl App {
         // Keep the viewmodel first so draw-budget truncation can never drop it.
         let mut draws = weapon_draws;
         draws.extend(world_draws);
-        let drawn = renderer.budgeted_instance_count(draws.len());
         let hud = self.hud_lines(surface_width, surface_height, dpi_scale);
         let shadow_offset = HUD_SHADOW_OFFSET * dpi_scale.clamp(0.5, 4.0);
         let mut overlay: Vec<TextDraw<'_>> = Vec::with_capacity(hud.len() * 2);
@@ -687,18 +694,26 @@ impl App {
         let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
 
         let submit_start = Instant::now();
-        let rendered = self
-            .renderer
-            .as_mut()
-            .is_some_and(|renderer| renderer.render_meshes_with_text(&draws, &overlay));
+        let submission = self.renderer.as_mut().and_then(|renderer| {
+            renderer.render_meshes_with_overlay_report(
+                &draws,
+                &Overlay {
+                    text: &overlay,
+                    ..Default::default()
+                },
+            )
+        });
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
         RenderFrame {
-            rendered,
+            rendered: submission.is_some(),
             draw_list_ms,
             submit_ms,
+            record_ms: submission
+                .map_or(0.0, |report| report.cpu_record_time.as_secs_f32() * 1000.0),
             visible,
-            drawn,
+            drawn: submission.map_or(0, |report| report.instances),
+            draw_calls: submission.map_or(0, |report| report.draw_calls),
         }
     }
 
@@ -793,7 +808,7 @@ impl App {
         if self.verbose {
             log::info!(
                 target: "fate.combat",
-                "status tick={} outcome={} health={} ammo={}/{} enemies={} shots={} hits={} kills={} paused={} fps={:.0} sim_ms={:.3} draw_list_ms={:.3} submit_ms={:.3} verify_ms={:.3} drawn={}/{} visible={} replay={} snapshot={} hash={:016x}",
+                "status tick={} outcome={} health={} ammo={}/{} enemies={} shots={} hits={} kills={} paused={} fps={:.0} sim_ms={:.3} draw_list_ms={:.3} render_call_ms={:.3} record_ms={:.3} verify_ms={:.3} drawn={}/{} mesh_calls={} visible={} replay={} snapshot={} hash={:016x}",
                 self.sim.tick(),
                 outcome.label(),
                 self.sim.player.health,
@@ -808,9 +823,11 @@ impl App {
                 self.last_sim_ms,
                 self.last_draw_list_ms,
                 self.last_render_ms,
+                self.last_record_ms,
                 self.last_verify_ms,
                 self.last_drawn,
                 Renderer::max_instance_budget(),
+                self.last_draw_calls,
                 self.last_visible,
                 self.replay_label(),
                 self.verification.snapshot_result.label(),

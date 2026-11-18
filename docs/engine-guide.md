@@ -24,7 +24,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, indexed 3D mesh path, screen-space UI rectangles and textured images with atlas regions, sampling options, clipping, and rotation, and a bitmap-font text overlay with width-aware wrapping | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | `wgpu` renderer with a built-in 2D triangle path, opaque textured and untextured indexed 3D meshes, screen-space UI rectangles and textured images with atlas regions, sampling options, clipping, and rotation, and a bitmap-font text overlay with width-aware wrapping | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -509,7 +509,7 @@ interpolation, ownership, or production server policy.
 
 ### Available paths
 
-`fate_engine::renderer::Renderer` currently provides four prototype paths:
+`fate_engine::renderer::Renderer` provides these draw entry points:
 
 - `render(&[Instance2d])` draws a built-in 2D triangle for each transform.
   `Instance2d` supplies world `position`, `rotation`, and `scale`; it does not
@@ -524,6 +524,9 @@ interpolation, ownership, or production server policy.
   rectangles, textured images, and text between the 3D scene and presentation.
   Use this when a panel or bar needs to sit behind a label, or an icon needs to
   sit beside it.
+- `render_scene(&[SceneDraw3d], &Overlay)` draws a mixed list of opaque textured
+  and untextured meshes with the same depth buffer and draw budget, then draws
+  the overlay in the same submission.
 
 `UiRect` is one axis-aligned screen-space rectangle in physical pixels, using
 the same top-left origin as `TextDraw`. `position` is the top-left corner,
@@ -576,13 +579,12 @@ behavior. `TextureFilter::Nearest` keeps pixel art crisp and avoids atlas bleed;
 `TextureOptions::NEAREST` and `TextureOptions::NEAREST_REPEAT` are the common
 presets. `TextureAddress::Repeat` (or `MirrorRepeat`) combined with a region
 wider than `1.0` tiles the texture: a region of `0..4` on `u` repeats it four
-times across the image.
+times across the image. The same sampler settings apply to mesh UVs.
 
 There are no mipmaps, packers, decoders, or hot reload: leave padding between
 linearly filtered atlas tiles, and let consumers own asset loading and texture
-lifetime. A texture may be shared by any number of `UiImage` records but must
-outlive them. The current image path is screen-space only; it does not texture
-3D meshes.
+lifetime. A consumer-owned texture can be used with the renderer that created
+it and borrowed by both mesh draws and `UiImage` records in the same frame.
 
 `TextDraw` places one run of text at a top-left position in physical pixels,
 measured from the window's top-left corner. The renderer ships a built-in 5x7
@@ -619,9 +621,28 @@ built-in unit cube. Both avoid naming `wgpu::Device`. The lower-level
 `Mesh3d::new(device, label, vertices, indices)` remains available for headless
 tools that create their own device. Mesh creation checks for empty data,
 triangle index count, out-of-range indices, and unsupported index count. Meshes
-are caller-owned and can be reused by multiple draw records. The current 3D
-pipeline is not a full material, lighting, texture, asset-loading, or
-scene-graph system.
+are caller-owned and can be reused by multiple draw records.
+
+For a textured mesh, upload `UvMeshVertex` values with
+`create_mesh_with_uvs(label, vertices, indices)`. Each vertex adds a `[u, v]`
+coordinate: `[0.0, 0.0]` is the upper-left corner of the texture, and
+`[1.0, 1.0]` is the lower-right. Non-finite UVs are rejected. Meshes uploaded
+without UVs use `[0.0, 0.0]` at every vertex.
+
+```rust
+let textured = Draw3d {
+    mesh: &uv_mesh,
+    model,
+    tint: [1.0; 3],
+}
+.with_texture(&texture);
+renderer.render_scene(&[color_draw.into(), textured], &overlay);
+```
+
+A textured mesh multiplies the sampled RGB by the vertex color and the draw
+tint; use white for both to show the texture unchanged. The 3D pass is opaque:
+texture alpha is ignored on meshes but still blends in overlays. The renderer
+does not provide lighting, transparent 3D materials, or a scene graph.
 
 The camera types are `Camera2d` and `Camera3d`. The 2D camera uses a world-space
 center, view size, and zoom. The 3D camera uses +Y as up and faces -Z when yaw
@@ -635,6 +656,18 @@ GpuInitError>`. The demo uses `pollster::block_on` during window setup.
 Call `resize(PhysicalSize<u32>)` when the window changes size. A render call
 returns `false` when the surface cannot be drawn for that frame; callers
 should treat this as a skipped render, not as successful presentation.
+Pass zero dimensions through too: they suspend frame acquisition until the
+next nonzero resize, even if the restored size matches the old one.
+`surface_size()` retains the last configured dimensions (or nonzero
+initial defaults if the window has not been drawable yet). A minimized or
+occluded window can also skip frames without a zero-size event.
+The renderer retries recoverable surface changes on subsequent draws.
+Recovery from loss of the GPU device itself is not supported.
+
+On a desktop with a usable GPU adapter, run
+`cargo run --release -p fate_window_smoke -- --surface-lifecycle` to check
+resize, zero-size suspension, and window minimize/restore for both 2D and 3D.
+This is separate from the headless quality gate.
 
 The renderer caps work at `MAX_DRAWN_INSTANCES` (currently 256) and warns when
 draw pressure reaches the warning threshold. This is a hard draw count limit,
@@ -665,18 +698,14 @@ The renderer uses `wgpu` and `winit` directly. The current public coupling is:
   `Adapter`, `Device`, `Queue`, and `SurfaceConfiguration` for lower-level
   work. `GpuInitError` also wraps `wgpu` error types.
 - The common consumer path does not need to name `wgpu`: `Renderer::aspect`,
-  `Renderer::surface_size`, `Renderer::create_mesh`, `Renderer::cube_mesh`,
-  `render`, `render_meshes`, `render_meshes_with_text`, and
-  `render_meshes_with_overlay` are sufficient for window creation, surface
-  ownership, mesh upload, texture upload, draw submission, and an overlay with
-  panels, images, and text.
+  `Renderer::surface_size`, and the public mesh, texture, and draw methods
+  cover resource uploads and frame submission with 3D meshes and overlays.
 
 `projects/window_smoke` is a second windowed consumer that validates this seam.
 Its manifest depends only on `fate_engine`, `pollster`, and `winit`; it creates
-its own window, uploads a custom mesh and a procedural checkerboard texture
-through the renderer, handles resize, submits 3D draws, and draws a panel, image,
-and text through `render_meshes_with_overlay`. There is no second backend and no
-backend-portability trait.
+its own window, uploads colored and UV meshes, and reuses one procedural atlas
+across the scene and HUD through `render_scene`. There is no second backend and
+no backend-portability trait.
 Treat the `wgpu`/`winit` boundary as a prototype seam, pin dependency versions,
 and do not assume future backend compatibility.
 

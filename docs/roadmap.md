@@ -17,8 +17,9 @@
   client/server sessions. It does not provide sockets, authentication,
   encryption, clock synchronization, or prediction/reconciliation.
 - The renderer supports built-in 2D triangles, indexed 3D meshes with depth
-  testing, tint, cameras, visibility helpers, screen-space UI rectangles and
-  textured images, and a bitmap-font text overlay with alpha blending.
+  testing and opaque color textures, cameras, visibility helpers, screen-space
+  UI rectangles and textured images, and a bitmap-font text overlay with alpha
+  blending.
   Consumers own scene traversal, culling decisions, asset loading, and HUD
   layout; there is no general asset, material, or lighting system.
 - `fate_engine::audio` plays bounded procedural one-shot tones through the
@@ -190,8 +191,8 @@ a HUD can show real artwork without an asset pipeline or direct `wgpu` names.
 addressing for tiled regions. `UiClip` bounds overlay records, so text and
 artwork can be cropped to a panel or scrolling viewport, `UiImage` rotation
 turns icons into spinners or angled indicators, and `wrap_text` breaks HUD copy
-into lines that fit a pixel column. There are no decoders, mipmaps, atlas
-packers, or 3D-texture support yet. The handle is consumer-owned and must
+into lines that fit a pixel column. There are no decoders, mipmaps, or atlas
+packers. The handle is consumer-owned and must
 outlive any `UiImage` that references it. `projects/window_smoke` exercises the
 seam with a two-tile procedural atlas, a nearest-filtered tiled
 strip, a rotated icon, a clipped preview, a wrapped paragraph, a panel, an
@@ -204,6 +205,20 @@ accent bar, and text.
 
 **Done when:** A windowed consumer can place readable HUD content over arbitrary
 scene colors without uploading a mesh or naming backend types.
+
+## Step 7 — Draw opaque textured 3D meshes
+
+**Status: done.** `window_smoke` uses one RGBA8 texture for a UV-mapped mesh and
+HUD images. `render_scene` draws textured and untextured meshes with shared
+depth and a shared draw budget, then composes the HUD in the same submission.
+Transparent 3D materials and a general material system remain deferred.
+
+## Step 8 — Recover drawing after window changes
+
+**Status: done.** The renderer skips frames while the window is not drawable
+and resumes after resize or restore. `window_smoke --surface-lifecycle`
+provides a separate windowed regression for 2D and 3D. GPU device loss recovery
+remains deferred.
 
 ## Deferred until a consumer needs them
 

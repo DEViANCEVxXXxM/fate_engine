@@ -6,8 +6,7 @@ use winit::window::Window;
 /// Everything that talks to the GPU: instance, surface, device, queue and the
 /// swapchain configuration.
 pub struct Gpu {
-    /// Kept alive so the surface can be recreated later.
-    #[allow(dead_code)]
+    /// Kept alive so the surface can be recreated after loss.
     pub instance: wgpu::Instance,
     pub surface: wgpu::Surface<'static>,
     /// Useful for querying capabilities in later milestones.
@@ -16,6 +15,29 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
+    window: Arc<Window>,
+    suspended: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ResizeAction {
+    Suspend,
+    Keep,
+    Configure,
+}
+
+fn resize_action(
+    configured: PhysicalSize<u32>,
+    suspended: bool,
+    requested: PhysicalSize<u32>,
+) -> ResizeAction {
+    if requested.width == 0 || requested.height == 0 {
+        ResizeAction::Suspend
+    } else if !suspended && requested == configured {
+        ResizeAction::Keep
+    } else {
+        ResizeAction::Configure
+    }
 }
 
 #[derive(Debug)]
@@ -72,7 +94,10 @@ impl Gpu {
             .ok_or(GpuInitError::UnsupportedSurface)?;
 
         config.present_mode = wgpu::PresentMode::AutoVsync;
-        surface.configure(&device, &config);
+        let suspended = size.width == 0 || size.height == 0;
+        if !suspended {
+            surface.configure(&device, &config);
+        }
 
         log::info!(
             "GPU: {} ({:?}), surface {:?}",
@@ -88,6 +113,8 @@ impl Gpu {
             device,
             queue,
             config,
+            window,
+            suspended,
         })
     }
 
@@ -95,23 +122,98 @@ impl Gpu {
         self.config.width as f32 / self.config.height.max(1) as f32
     }
 
-    /// Reconfigure the swapchain after a window resize. Zero-sized surfaces
-    /// (minimized windows) are ignored until they come back.
+    /// Reconfigure after a resize. A zero dimension suspends acquisition until
+    /// a nonzero size is supplied, without discarding the last valid size.
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width == 0 || size.height == 0 {
-            return;
+        let configured = PhysicalSize::new(self.config.width, self.config.height);
+        match resize_action(configured, self.suspended, size) {
+            ResizeAction::Suspend => self.suspended = true,
+            ResizeAction::Keep => {}
+            ResizeAction::Configure => {
+                self.config.width = size.width;
+                self.config.height = size.height;
+                self.suspended = false;
+                self.reconfigure();
+            }
         }
-        if size.width == self.config.width && size.height == self.config.height {
-            return;
-        }
-
-        self.config.width = size.width;
-        self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
     }
 
-    /// Recreate the surface and swapchain, e.g. after `SurfaceStatus::Lost`.
+    /// Reconfigure the current surface. No acquired frame may still be live.
     pub fn reconfigure(&self) {
-        self.surface.configure(&self.device, &self.config);
+        if !self.suspended {
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    pub(crate) fn acquire_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
+        use wgpu::CurrentSurfaceTexture;
+
+        if self.suspended || self.window.is_minimized() == Some(true) {
+            return None;
+        }
+
+        match self.surface.get_current_texture() {
+            CurrentSurfaceTexture::Success(frame) => Some(frame),
+            CurrentSurfaceTexture::Suboptimal(frame) => {
+                // Surface::configure forbids a live SurfaceTexture.
+                drop(frame);
+                self.reconfigure();
+                None
+            }
+            CurrentSurfaceTexture::Outdated => {
+                self.reconfigure();
+                None
+            }
+            CurrentSurfaceTexture::Lost => {
+                if let Err(error) = self.recreate_surface() {
+                    log::warn!("could not recover lost surface: {error}");
+                }
+                None
+            }
+            CurrentSurfaceTexture::Timeout | CurrentSurfaceTexture::Occluded => None,
+            CurrentSurfaceTexture::Validation => {
+                log::error!("surface validation error, skipping frame");
+                None
+            }
+        }
+    }
+
+    fn recreate_surface(&mut self) -> Result<(), GpuInitError> {
+        let surface = self
+            .instance
+            .create_surface(self.window.clone())
+            .map_err(GpuInitError::Surface)?;
+        let caps = surface.get_capabilities(&self.adapter);
+        // Keep the render pipelines and depth target compatible with the new
+        // surface. This recovers surface loss, not device or format changes.
+        if !caps.formats.contains(&self.config.format)
+            || !caps.alpha_modes.contains(&self.config.alpha_mode)
+            || !caps.usages.contains(self.config.usage)
+        {
+            return Err(GpuInitError::UnsupportedSurface);
+        }
+        self.surface = surface;
+        self.reconfigure();
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resize_distinguishes_zero_size_duplicate_resize_and_same_size_restore() {
+        let size = PhysicalSize::new(640, 480);
+        for zero in [PhysicalSize::new(0, 480), PhysicalSize::new(640, 0)] {
+            assert_eq!(resize_action(size, false, zero), ResizeAction::Suspend);
+            assert_eq!(resize_action(size, true, zero), ResizeAction::Suspend);
+        }
+        assert_eq!(resize_action(size, false, size), ResizeAction::Keep);
+        assert_eq!(resize_action(size, true, size), ResizeAction::Configure);
+        assert_eq!(
+            resize_action(size, false, PhysicalSize::new(800, 600)),
+            ResizeAction::Configure
+        );
     }
 }

@@ -234,6 +234,31 @@ pub(crate) struct TextureUpload<'a> {
     pub(crate) options: TextureOptions,
 }
 
+/// Bind-group layout shared by every pipeline that samples a `Texture2d`.
+pub(crate) fn texture_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("2d texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    })
+}
+
 impl Texture2d {
     pub(crate) fn new(
         device: &wgpu::Device,
@@ -290,7 +315,7 @@ impl Texture2d {
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("ui image sampler"),
+            label: Some("2d texture sampler"),
             address_mode_u: to_address_mode(options.address),
             address_mode_v: to_address_mode(options.address),
             address_mode_w: to_address_mode(options.address),
@@ -300,7 +325,7 @@ impl Texture2d {
             ..Default::default()
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ui image bind group"),
+            label: Some("2d texture bind group"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {

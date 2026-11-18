@@ -391,7 +391,6 @@ impl ImageVertex {
 /// Copy the latest image batch and the pipeline that draws it.
 pub(crate) struct ImageRenderer {
     pipeline: wgpu::RenderPipeline,
-    layout: wgpu::BindGroupLayout,
     vertices: wgpu::Buffer,
     scratch: Vec<ImageVertex>,
     vertex_count: u32,
@@ -400,32 +399,15 @@ pub(crate) struct ImageRenderer {
 }
 
 impl ImageRenderer {
-    pub(crate) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+    pub(crate) fn new(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("ui_image.wgsl"));
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("ui image bind group layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui image pipeline layout"),
-            bind_group_layouts: &[Some(&layout)],
+            bind_group_layouts: &[Some(layout)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -471,17 +453,12 @@ impl ImageRenderer {
 
         Self {
             pipeline,
-            layout,
             vertices,
             scratch: Vec::new(),
             vertex_count: 0,
             surface: (0, 0),
             last_clipped: false,
         }
-    }
-
-    pub(crate) fn layout(&self) -> &wgpu::BindGroupLayout {
-        &self.layout
     }
 
     /// Build this frame's image batch and upload it. Call before the pass.
@@ -973,13 +950,13 @@ mod tests {
     fn test_image_texture(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &mut ImageRenderer,
+        layout: &wgpu::BindGroupLayout,
         options: crate::renderer::TextureOptions,
     ) -> Texture2d {
         Texture2d::new(
             device,
             queue,
-            renderer.layout(),
+            layout,
             crate::renderer::texture::TextureUpload {
                 label: "test image",
                 width: 2,
@@ -1001,8 +978,9 @@ mod tests {
         };
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut renderer = ImageRenderer::new(&device, format);
-        let texture = test_image_texture(&device, &queue, &mut renderer, Default::default());
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer = ImageRenderer::new(&device, format, &layout);
+        let texture = test_image_texture(&device, &queue, &layout, Default::default());
         let size = IMAGE_TEST_SIZE as f32;
         let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size));
         let pixels = render_images(&device, &queue, &mut renderer, &[image]);
@@ -1025,8 +1003,9 @@ mod tests {
         };
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut renderer = ImageRenderer::new(&device, format);
-        let texture = test_image_texture(&device, &queue, &mut renderer, Default::default());
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer = ImageRenderer::new(&device, format, &layout);
+        let texture = test_image_texture(&device, &queue, &layout, Default::default());
         let size = IMAGE_TEST_SIZE as f32;
         let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size))
             .with_region(texture.region(1, 0, 1, 1));
@@ -1047,11 +1026,12 @@ mod tests {
         };
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut renderer = ImageRenderer::new(&device, format);
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer = ImageRenderer::new(&device, format, &layout);
         let texture = test_image_texture(
             &device,
             &queue,
-            &mut renderer,
+            &layout,
             crate::renderer::TextureOptions::NEAREST_REPEAT,
         );
         let size = IMAGE_TEST_SIZE as f32;
@@ -1139,11 +1119,12 @@ mod tests {
         };
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut renderer = ImageRenderer::new(&device, format);
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer = ImageRenderer::new(&device, format, &layout);
         let texture = test_image_texture(
             &device,
             &queue,
-            &mut renderer,
+            &layout,
             crate::renderer::TextureOptions::NEAREST,
         );
         let size = IMAGE_TEST_SIZE as f32;
@@ -1172,11 +1153,12 @@ mod tests {
         };
 
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let mut renderer = ImageRenderer::new(&device, format);
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer = ImageRenderer::new(&device, format, &layout);
         let texture = test_image_texture(
             &device,
             &queue,
-            &mut renderer,
+            &layout,
             crate::renderer::TextureOptions::NEAREST,
         );
         let size = IMAGE_TEST_SIZE as f32;

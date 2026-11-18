@@ -12,13 +12,14 @@ mod ui;
 mod visibility;
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 pub use camera::{Camera2d, Camera3d};
 pub use gpu::{Gpu, GpuInitError};
-pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex};
+pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex, SceneDraw3d, UvMeshVertex};
 pub use text::{TextDraw, text_width, wrap_text};
 pub use texture::{
     Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
@@ -36,6 +37,18 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub const MAX_DRAWN_INSTANCES: usize = pipeline::MAX_INSTANCES;
 const DRAW_WARNING_THRESHOLD: f32 = 0.75;
+
+/// CPU-side report for a submitted 3D frame. Overlay draws are not counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MeshSubmission {
+    /// Mesh instances submitted after applying the draw budget.
+    pub instances: usize,
+    /// Indexed draw calls recorded after combining adjacent compatible instances.
+    pub draw_calls: usize,
+    /// CPU time to prepare uploads and record commands, including the overlay.
+    /// Excludes surface acquisition, queue submission, presentation, and GPU time.
+    pub cpu_record_time: Duration,
+}
 
 /// A drawable instance of the built-in mesh, in world space.
 #[derive(Clone, Copy, Debug, Default)]
@@ -67,6 +80,7 @@ pub struct Renderer {
     mesh_pipeline: MeshPipeline,
     ui: UiRenderer,
     images: ImageRenderer,
+    texture_layout: wgpu::BindGroupLayout,
     text: TextRenderer,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
@@ -77,9 +91,10 @@ impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, GpuInitError> {
         let gpu = Gpu::new(window).await?;
         let triangle = TrianglePipeline::new(&gpu.device, gpu.config.format);
-        let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format);
         let ui = UiRenderer::new(&gpu.device, gpu.config.format);
-        let images = ImageRenderer::new(&gpu.device, gpu.config.format);
+        let texture_layout = texture::texture_layout(&gpu.device);
+        let images = ImageRenderer::new(&gpu.device, gpu.config.format, &texture_layout);
+        let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format, &texture_layout);
         let text = TextRenderer::new(&gpu.device, &gpu.queue, gpu.config.format);
         let (depth_texture, depth_view) = Self::create_depth_target(&gpu);
 
@@ -91,6 +106,7 @@ impl Renderer {
             mesh_pipeline,
             ui,
             images,
+            texture_layout,
             text,
             _depth_texture: depth_texture,
             depth_view,
@@ -178,6 +194,17 @@ impl Renderer {
         Mesh3d::new(&self.gpu.device, label, vertices, indices)
     }
 
+    /// Upload indexed triangles with per-vertex texture coordinates. Non-finite
+    /// UVs are rejected; finite UVs may extend beyond the texture bounds.
+    pub fn create_mesh_with_uvs(
+        &self,
+        label: &str,
+        vertices: &[UvMeshVertex],
+        indices: &[u32],
+    ) -> Result<Mesh3d, MeshCreateError> {
+        Mesh3d::new_with_uvs(&self.gpu.device, label, vertices, indices)
+    }
+
     /// Upload the built-in unit cube through the renderer's device.
     pub fn cube_mesh(&self) -> Result<Mesh3d, MeshCreateError> {
         cube_mesh(&self.gpu.device)
@@ -187,8 +214,8 @@ impl Renderer {
     ///
     /// `rgba8` must contain exactly `width * height * 4` bytes. This is a raw
     /// upload primitive: decoding files, atlases, mipmaps, and lifetime policy
-    /// remain consumer decisions. Draw the result with a
-    /// [`UiImage`] inside an [`Overlay`].
+    /// remain consumer decisions. Draw the result with a [`UiImage`] or with
+    /// [`Draw3d::with_texture`].
     pub fn create_texture(
         &self,
         label: &str,
@@ -216,7 +243,7 @@ impl Renderer {
         Texture2d::new(
             &self.gpu.device,
             &self.gpu.queue,
-            self.images.layout(),
+            &self.texture_layout,
             texture::TextureUpload {
                 label,
                 width,
@@ -276,44 +303,44 @@ impl Renderer {
         draws: &[Draw3d<'_>],
         overlay: &Overlay<'_>,
     ) -> bool {
-        use wgpu::CurrentSurfaceTexture;
+        self.render_meshes_with_overlay_report(draws, overlay)
+            .is_some()
+    }
 
-        let (frame, suboptimal) = match self.gpu.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame) => (frame, false),
-            CurrentSurfaceTexture::Suboptimal(frame) => (frame, true),
-            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                log::warn!("surface out of date, reconfiguring");
-                self.gpu.reconfigure();
-                return false;
-            }
-            CurrentSurfaceTexture::Timeout => {
-                log::debug!("surface timeout, skipping 3d frame");
-                return false;
-            }
-            CurrentSurfaceTexture::Occluded => return false,
-            CurrentSurfaceTexture::Validation => {
-                log::error!("surface validation error, skipping 3d frame");
-                return false;
-            }
-        };
-        if suboptimal {
-            self.gpu.reconfigure();
-        }
+    /// Like [`Self::render_meshes_with_overlay`], returning submission counters
+    /// and CPU recording time. Returns `None` when the surface skipped the frame.
+    pub fn render_meshes_with_overlay_report(
+        &mut self,
+        draws: &[Draw3d<'_>],
+        overlay: &Overlay<'_>,
+    ) -> Option<MeshSubmission> {
+        self.render_scene_inner(draws.iter().copied().map(SceneDraw3d::from), overlay)
+    }
+
+    /// Draw a mixed list of opaque textured and untextured meshes, then the
+    /// screen-space overlay, in one submission. All meshes share a depth
+    /// buffer and draw budget. A texture's RGB multiplies vertex color and
+    /// draw tint; its alpha does not affect the opaque mesh.
+    pub fn render_scene(&mut self, draws: &[SceneDraw3d<'_>], overlay: &Overlay<'_>) -> bool {
+        self.render_scene_inner(draws.iter().copied(), overlay)
+            .is_some()
+    }
+
+    fn render_scene_inner<'a>(
+        &mut self,
+        draws: impl ExactSizeIterator<Item = SceneDraw3d<'a>> + Clone,
+        overlay: &Overlay<'_>,
+    ) -> Option<MeshSubmission> {
+        let frame = self.gpu.acquire_frame()?;
+        let record_start = Instant::now();
 
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let count = self.budgeted_instance_count(draws.len());
         let view_projection = self.camera_3d.view_projection(self.gpu.aspect());
-        for (index, draw) in draws.iter().take(count).enumerate() {
-            self.mesh_pipeline.write_draw(
-                &self.gpu.queue,
-                index,
-                view_projection,
-                draw.model,
-                draw.tint,
-            );
-        }
+        self.mesh_pipeline
+            .write_draws(&self.gpu.queue, view_projection, draws.clone().take(count));
 
         let mut encoder = self
             .gpu
@@ -321,7 +348,7 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("3d frame encoder"),
             });
-        {
+        let draw_calls = {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("3d mesh pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -345,10 +372,8 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            for (index, draw) in draws.iter().take(count).enumerate() {
-                self.mesh_pipeline.draw(&mut pass, index, draw.mesh);
-            }
-        }
+            self.mesh_pipeline.draw(&mut pass, draws.take(count))
+        };
 
         let rect_count = self.ui.write(
             &self.gpu.queue,
@@ -396,37 +421,22 @@ impl Renderer {
             }
         }
 
-        self.gpu.queue.submit(Some(encoder.finish()));
+        let commands = encoder.finish();
+        let cpu_record_time = record_start.elapsed();
+        self.gpu.queue.submit(Some(commands));
         self.gpu.queue.present(frame);
-        true
+        Some(MeshSubmission {
+            instances: count,
+            draw_calls,
+            cpu_record_time,
+        })
     }
 
     /// Draw one frame. Returns `false` when the frame was skipped because the
     /// surface was not ready (minimized, timed out, lost).
     pub fn render(&mut self, instances: &[Instance2d]) -> bool {
-        use wgpu::CurrentSurfaceTexture;
-
-        let frame = match self.gpu.surface.get_current_texture() {
-            CurrentSurfaceTexture::Success(frame) => frame,
-            CurrentSurfaceTexture::Suboptimal(frame) => {
-                // Still drawable; fix the swapchain for the next frame.
-                self.gpu.reconfigure();
-                frame
-            }
-            CurrentSurfaceTexture::Outdated | CurrentSurfaceTexture::Lost => {
-                log::warn!("surface out of date, reconfiguring");
-                self.gpu.reconfigure();
-                return false;
-            }
-            CurrentSurfaceTexture::Timeout => {
-                log::debug!("surface timeout, skipping frame");
-                return false;
-            }
-            CurrentSurfaceTexture::Occluded => return false,
-            CurrentSurfaceTexture::Validation => {
-                log::error!("surface validation error, skipping frame");
-                return false;
-            }
+        let Some(frame) = self.gpu.acquire_frame() else {
+            return false;
         };
 
         let view = frame
