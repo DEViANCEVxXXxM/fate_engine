@@ -2,7 +2,7 @@
 //!
 //! This is deliberately an upload primitive, not an asset pipeline: consumers
 //! decide where pixels come from, how they are decoded, and when they are
-//! released. Textures are sampled by [`crate::renderer::UiImage`] draws.
+//! released. The same handle can be sampled by sprites, HUD images, and meshes.
 
 use crate::math::Vec2;
 
@@ -101,6 +101,77 @@ impl std::fmt::Display for TextureCreateError {
 
 impl std::error::Error for TextureCreateError {}
 
+/// Why an in-place RGBA8 texture update was rejected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureUpdateError {
+    EmptyRegion,
+    OutOfBounds {
+        origin: [u32; 2],
+        size: [u32; 2],
+        texture_size: [u32; 2],
+    },
+    InvalidPixelDataLength {
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl std::fmt::Display for TextureUpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyRegion => write!(f, "texture update must have nonzero width and height"),
+            Self::OutOfBounds {
+                origin,
+                size,
+                texture_size,
+            } => write!(
+                f,
+                "texture update at {origin:?} of size {size:?} exceeds texture size {texture_size:?}"
+            ),
+            Self::InvalidPixelDataLength { expected, actual } => {
+                write!(
+                    f,
+                    "texture update needs {expected} RGBA bytes but received {actual}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for TextureUpdateError {}
+
+fn rgba8_len(width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
+}
+
+fn validate_update(
+    texture_size: [u32; 2],
+    origin: [u32; 2],
+    size: [u32; 2],
+    pixel_len: usize,
+) -> Result<(), TextureUpdateError> {
+    if size.contains(&0) {
+        return Err(TextureUpdateError::EmptyRegion);
+    }
+    if (0..2).any(|axis| size[axis] > texture_size[axis].saturating_sub(origin[axis])) {
+        return Err(TextureUpdateError::OutOfBounds {
+            origin,
+            size,
+            texture_size,
+        });
+    }
+    let expected = rgba8_len(size[0], size[1]);
+    if expected != Some(pixel_len) {
+        return Err(TextureUpdateError::InvalidPixelDataLength {
+            expected: expected.unwrap_or(usize::MAX),
+            actual: pixel_len,
+        });
+    }
+    Ok(())
+}
+
 /// Check dimensions and pixel length before allocating GPU resources.
 pub(crate) fn validate_texture(
     width: u32,
@@ -118,13 +189,10 @@ pub(crate) fn validate_texture(
             max: max_dimension,
         });
     }
-    let expected = (width as usize)
-        .checked_mul(height as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(TextureCreateError::InvalidPixelDataLength {
-            expected: usize::MAX,
-            actual: pixel_len,
-        })?;
+    let expected = rgba8_len(width, height).ok_or(TextureCreateError::InvalidPixelDataLength {
+        expected: usize::MAX,
+        actual: pixel_len,
+    })?;
     if pixel_len != expected {
         return Err(TextureCreateError::InvalidPixelDataLength {
             expected,
@@ -138,10 +206,10 @@ pub(crate) fn validate_texture(
 ///
 /// Pixels are interpreted as sRGB with straight alpha. Sampling behavior comes
 /// from the [`TextureOptions`] used at upload and is fixed for the texture's
-/// lifetime. Keep the handle alive while any
-/// [`UiImage`](crate::renderer::UiImage) references it.
+/// lifetime. Keep the handle alive while any draw references it.
 pub struct Texture2d {
-    _texture: wgpu::Texture,
+    texture: wgpu::Texture,
+    queue: wgpu::Queue,
     _view: wgpu::TextureView,
     pub(crate) bind_group: wgpu::BindGroup,
     width: u32,
@@ -195,8 +263,8 @@ impl TextureRegion {
         Self {
             min: Vec2::new(x as f32 / texture_width, y as f32 / texture_height),
             max: Vec2::new(
-                (x + width) as f32 / texture_width,
-                (y + height) as f32 / texture_height,
+                (u64::from(x) + u64::from(width)) as f32 / texture_width,
+                (u64::from(y) + u64::from(height)) as f32 / texture_height,
             ),
         }
     }
@@ -294,25 +362,7 @@ impl Texture2d {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            rgba8,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(width * 4),
-                rows_per_image: Some(height),
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
+        write_rgba8(queue, &texture, [0, 0], [width, height], rgba8);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("2d texture sampler"),
@@ -340,12 +390,39 @@ impl Texture2d {
         });
 
         Ok(Self {
-            _texture: texture,
+            texture,
+            queue: queue.clone(),
             _view: view,
             bind_group,
             width,
             height,
         })
+    }
+
+    /// Replace all texels using tightly packed RGBA8 sRGB rows.
+    ///
+    /// The queued write becomes visible to subsequent submissions on the
+    /// texture's original queue. Dimensions, sampler, and atlas regions stay
+    /// unchanged. Invalid input leaves the texture untouched.
+    pub fn update_rgba8(&self, rgba8: &[u8]) -> Result<(), TextureUpdateError> {
+        self.update_region_rgba8([0, 0], [self.width, self.height], rgba8)
+    }
+
+    /// Replace a rectangle of texels. The origin is measured from the top
+    /// left. Input rows are tightly packed (no stride or alignment padding),
+    /// with exactly `size[0] * size[1] * 4` bytes in RGBA order.
+    ///
+    /// Like [`Self::update_rgba8`], this queues a write rather than waiting
+    /// for GPU completion. It does not recreate the view or bind group.
+    pub fn update_region_rgba8(
+        &self,
+        origin: [u32; 2],
+        size: [u32; 2],
+        rgba8: &[u8],
+    ) -> Result<(), TextureUpdateError> {
+        validate_update([self.width, self.height], origin, size, rgba8.len())?;
+        write_rgba8(&self.queue, &self.texture, origin, size, rgba8);
+        Ok(())
     }
 
     /// Texture width in pixels.
@@ -367,9 +444,83 @@ impl Texture2d {
     }
 }
 
+fn write_rgba8(
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    [x, y]: [u32; 2],
+    [width, height]: [u32; 2],
+    rgba8: &[u8],
+) {
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba8,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(width * 4),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_validation_checks_geometry_and_exact_unpadded_byte_count() {
+        use TextureUpdateError::*;
+
+        assert!(validate_update([8, 8], [5, 6], [3, 2], 24).is_ok());
+        assert_eq!(validate_update([8, 8], [0, 0], [3, 0], 0), Err(EmptyRegion));
+        for (origin, size) in [
+            ([8, 0], [1, 1]),
+            ([0, 7], [1, 2]),
+            ([u32::MAX, 2], [8, 1]),
+            ([1, 1], [u32::MAX, u32::MAX]),
+        ] {
+            assert_eq!(
+                validate_update([8, 8], origin, size, 0),
+                Err(OutOfBounds {
+                    origin,
+                    size,
+                    texture_size: [8, 8]
+                })
+            );
+        }
+        for len in [23, 25] {
+            assert_eq!(
+                validate_update([8, 8], [1, 1], [3, 2], len),
+                Err(InvalidPixelDataLength {
+                    expected: 24,
+                    actual: len
+                })
+            );
+        }
+        assert_eq!(
+            validate_update([u32::MAX; 2], [0, 0], [u32::MAX; 2], usize::MAX),
+            Err(InvalidPixelDataLength {
+                expected: usize::MAX,
+                actual: usize::MAX
+            })
+        );
+    }
+
+    #[test]
+    fn pixel_region_endpoint_does_not_wrap_at_u32_limit() {
+        let region = TextureRegion::from_pixels(u32::MAX, 16, u32::MAX, 0, u32::MAX, 16);
+        assert_eq!(region.min, Vec2::new(1.0, 0.0));
+        assert_eq!(region.max, Vec2::new(2.0, 1.0));
+    }
 
     #[test]
     fn validation_rejects_zero_dimensions() {

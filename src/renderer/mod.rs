@@ -2,13 +2,18 @@
 
 mod camera;
 mod diagnostics;
+mod frame;
 mod gpu;
 mod mesh;
+mod offscreen;
+mod overlay;
 mod pipeline;
+mod sprite;
 #[cfg(test)]
 mod test_support;
 mod text;
 mod texture;
+mod tilemap;
 mod timing;
 mod ui;
 mod visibility;
@@ -23,22 +28,21 @@ pub use camera::{Camera2d, Camera3d};
 pub use diagnostics::{RenderDiagnosticEvent, RenderDiagnosticReceiver, RenderFrameDiagnostics};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex, SceneDraw3d, UvMeshVertex};
+pub use offscreen::{CapturedFrame, OffscreenError, OffscreenRenderer, OffscreenScene};
+pub use sprite::Sprite2d;
 pub use text::{TextDraw, text_width, wrap_text};
 pub use texture::{
     Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
+    TextureUpdateError,
 };
+pub use tilemap::{MAX_DRAWN_TILES, TileLayer2d, TileMap2d, TileMapError};
 pub use timing::{GpuFrameKind, GpuFrameTiming};
 pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiClip, UiImage, UiRect};
-pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
+pub use visibility::{Bounds2d, Bounds3d, Frustum3d, OrientedBounds2d};
 
 use crate::math::{Mat4, Vec2};
-use mesh::MeshPipeline;
-use pipeline::TrianglePipeline;
-use text::TextRenderer;
+use frame::{FrameTarget, RecordedFrame, Scene2d, ScenePipelines, depth_target};
 use timing::GpuTimer;
-use ui::{ImageRenderer, UiRenderer};
-
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub const MAX_DRAWN_INSTANCES: usize = pipeline::MAX_INSTANCES;
 const DRAW_WARNING_THRESHOLD: f32 = 0.75;
@@ -88,18 +92,11 @@ pub struct Renderer {
     pub camera: Camera2d,
     #[allow(dead_code)]
     pub camera_3d: Camera3d,
-    triangle: TrianglePipeline,
-    mesh_pipeline: MeshPipeline,
-    ui: UiRenderer,
-    images: ImageRenderer,
-    texture_layout: wgpu::BindGroupLayout,
-    text: TextRenderer,
+    pipelines: ScenePipelines,
     gpu_timer: Option<GpuTimer>,
     diagnostic_sender: Option<diagnostics::RenderDiagnosticSender>,
     mirrored_timings: std::collections::VecDeque<GpuFrameTiming>,
-    _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
-    clear_color: wgpu::Color,
 }
 
 impl Renderer {
@@ -112,13 +109,8 @@ impl Renderer {
         options: RendererOptions,
     ) -> Result<Self, GpuInitError> {
         let gpu = Gpu::new_with_timestamps(window, options.gpu_timing).await?;
-        let triangle = TrianglePipeline::new(&gpu.device, gpu.config.format);
-        let ui = UiRenderer::new(&gpu.device, gpu.config.format);
-        let texture_layout = texture::texture_layout(&gpu.device);
-        let images = ImageRenderer::new(&gpu.device, gpu.config.format, &texture_layout);
-        let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format, &texture_layout);
-        let text = TextRenderer::new(&gpu.device, &gpu.queue, gpu.config.format);
-        let (depth_texture, depth_view) = Self::create_depth_target(&gpu);
+        let pipelines = ScenePipelines::new(&gpu.device, &gpu.queue, gpu.config.format);
+        let depth_view = depth_target(&gpu.device, (gpu.config.width, gpu.config.height));
         let gpu_timer = if options.gpu_timing {
             GpuTimer::new(&gpu.device, &gpu.queue)
         } else {
@@ -129,23 +121,11 @@ impl Renderer {
             gpu,
             camera: Camera2d::default(),
             camera_3d: Camera3d::default(),
-            triangle,
-            mesh_pipeline,
-            ui,
-            images,
-            texture_layout,
-            text,
+            pipelines,
             gpu_timer,
             diagnostic_sender: None,
             mirrored_timings: std::collections::VecDeque::new(),
-            _depth_texture: depth_texture,
             depth_view,
-            clear_color: wgpu::Color {
-                r: 0.04,
-                g: 0.05,
-                b: 0.07,
-                a: 1.0,
-            },
         })
     }
 
@@ -239,25 +219,6 @@ impl Renderer {
         }
     }
 
-    fn create_depth_target(gpu: &Gpu) -> (wgpu::Texture, wgpu::TextureView) {
-        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("main depth target"),
-            size: wgpu::Extent3d {
-                width: gpu.config.width,
-                height: gpu.config.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
-    }
-
     pub fn budgeted_instance_count_static(instance_count: usize) -> usize {
         let limit = MAX_DRAWN_INSTANCES;
         let count = instance_count.min(limit);
@@ -334,8 +295,8 @@ impl Renderer {
     ///
     /// `rgba8` must contain exactly `width * height * 4` bytes. This is a raw
     /// upload primitive: decoding files, atlases, mipmaps, and lifetime policy
-    /// remain consumer decisions. Draw the result with a [`UiImage`] or with
-    /// [`Draw3d::with_texture`].
+    /// remain consumer decisions. Draw the result with a [`Sprite2d`],
+    /// [`UiImage`], or [`Draw3d::with_texture`].
     pub fn create_texture(
         &self,
         label: &str,
@@ -363,7 +324,7 @@ impl Renderer {
         Texture2d::new(
             &self.gpu.device,
             &self.gpu.queue,
-            &self.texture_layout,
+            &self.pipelines.texture_layout,
             texture::TextureUpload {
                 label,
                 width,
@@ -381,9 +342,7 @@ impl Renderer {
             && size.height > 0
             && previous_size != (self.gpu.config.width, self.gpu.config.height)
         {
-            let (texture, view) = Self::create_depth_target(&self.gpu);
-            self._depth_texture = texture;
-            self.depth_view = view;
+            self.depth_view = depth_target(&self.gpu.device, self.surface_size());
         }
     }
 
@@ -466,90 +425,24 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let count = self.budgeted_instance_count(draws.len());
-        let view_projection = self.camera_3d.view_projection(self.gpu.aspect());
-        self.mesh_pipeline
-            .write_draws(&self.gpu.queue, view_projection, draws.clone().take(count));
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("3d frame encoder"),
-            });
-        let draw_calls = {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("3d mesh pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: timing.map(|(timer, _)| timer.writes(false)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.mesh_pipeline.draw(&mut pass, draws.take(count))
-        };
-
-        let rect_count = self.ui.write(
-            &self.gpu.queue,
-            self.gpu.config.width,
-            self.gpu.config.height,
-            overlay.rects,
+        let RecordedFrame {
+            mut encoder,
+            instances,
+            draw_calls,
+            has_overlay,
+        } = self.pipelines.record_3d(
+            FrameTarget {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                size: (self.gpu.config.width, self.gpu.config.height),
+                color: &view,
+                depth: Some(&self.depth_view),
+                view_projection: self.camera_3d.view_projection(self.gpu.aspect()),
+            },
+            draws,
+            overlay,
+            timing.map(|(timer, _)| timer),
         );
-        let image_count = self.images.write(
-            &self.gpu.queue,
-            self.gpu.config.width,
-            self.gpu.config.height,
-            overlay.images,
-        );
-        let has_overlay = rect_count > 0 || image_count > 0 || !overlay.text.is_empty();
-        if has_overlay {
-            if !overlay.text.is_empty() {
-                self.text.write(
-                    &self.gpu.queue,
-                    self.gpu.config.width,
-                    self.gpu.config.height,
-                    overlay.text,
-                );
-            }
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("overlay pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: timing.map(|(timer, _)| timer.writes(true)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            self.ui.draw(&mut pass);
-            if image_count > 0 {
-                self.images.draw(&mut pass, overlay.images);
-            }
-            if !overlay.text.is_empty() {
-                self.text.draw(&mut pass);
-            }
-        }
 
         if let Some((timer, slot)) = timing {
             timer.resolve(&mut encoder, slot, has_overlay);
@@ -566,7 +459,7 @@ impl Renderer {
         }
         self.gpu.queue.present(frame);
         let submission = MeshSubmission {
-            instances: count,
+            instances,
             draw_calls,
             cpu_record_time,
         };
@@ -574,12 +467,71 @@ impl Renderer {
         Some(submission)
     }
 
-    /// Draw one frame. Returns `false` when the frame was skipped because the
+    /// Draw the built-in 2D triangles, in input order, with one instanced draw.
+    /// An empty list still clears and presents. Returns `false` when the
     /// surface was not ready (minimized, timed out, lost).
     pub fn render(&mut self, instances: &[Instance2d]) -> bool {
+        self.render_with_overlay(instances, &Overlay::default())
+    }
+
+    /// Draw the built-in 2D triangles, then rectangles, images, and text in
+    /// physical pixels, with one surface acquisition and queue submission.
+    ///
+    /// An empty instance list is valid and renders the overlay over the clear
+    /// color. Scene draw counters exclude overlay work. With GPU timing enabled,
+    /// the overlay pass is reported separately when recorded.
+    pub fn render_with_overlay(&mut self, instances: &[Instance2d], overlay: &Overlay<'_>) -> bool {
+        self.render_2d(Scene2d::Triangles(instances), overlay)
+    }
+
+    /// Draw world-space sprites through [`Camera2d`], then the screen-space overlay.
+    ///
+    /// Alpha-blended sprites are drawn in input order. Adjacent sprites using
+    /// the same texture share a draw, even when atlas regions or tints differ.
+    /// Invalid sprites are skipped before the scene instance limit is applied.
+    /// An empty list clears the scene and still presents the overlay.
+    pub fn render_sprites(&mut self, sprites: &[Sprite2d<'_>], overlay: &Overlay<'_>) -> bool {
+        self.render_2d(Scene2d::Sprites(sprites), overlay)
+    }
+
+    /// Draw one atlas-backed tile layer through [`Camera2d`], then the HUD.
+    ///
+    /// Only cells covered by the camera are visited. Valid visible tiles share
+    /// a draw, bounded by [`MAX_DRAWN_TILES`] in row-major order.
+    pub fn render_tiles(&mut self, layer: TileLayer2d<'_>, overlay: &Overlay<'_>) -> bool {
+        self.render_tiles_with_sprites(layer, &[], overlay)
+    }
+
+    /// Draw a tile layer, then world-space sprites, then the screen-space HUD
+    /// in one submission. Tile and sprite limits apply independently.
+    pub fn render_tiles_with_sprites(
+        &mut self,
+        layer: TileLayer2d<'_>,
+        sprites: &[Sprite2d<'_>],
+        overlay: &Overlay<'_>,
+    ) -> bool {
+        self.render_2d(
+            Scene2d::Tiles {
+                layer,
+                sprites,
+                view: self.camera.visible_bounds(self.aspect()),
+            },
+            overlay,
+        )
+    }
+
+    fn render_2d(&mut self, scene: Scene2d<'_>, overlay: &Overlay<'_>) -> bool {
+        let (kind, requested) = match scene {
+            Scene2d::Triangles(items) => (GpuFrameKind::Triangles2d, items.len()),
+            Scene2d::Sprites(items) => (GpuFrameKind::Sprites2d, items.len()),
+            Scene2d::Tiles { layer, sprites, .. } => (
+                GpuFrameKind::TileMap2d,
+                layer.map.cell_count().saturating_add(sprites.len()),
+            ),
+        };
         let probe = self.diagnostic_start();
         let Some(frame) = self.gpu.acquire_frame() else {
-            self.diagnostic_finish(probe, GpuFrameKind::Triangles2d, instances.len(), None);
+            self.diagnostic_finish(probe, kind, requested, None);
             return false;
         };
         let record_start = probe.map(|_| Instant::now());
@@ -592,69 +544,44 @@ impl Renderer {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let view_proj = self.camera.view_projection(self.gpu.aspect());
-        let count = self.budgeted_instance_count(instances.len());
-
-        for (index, instance) in instances.iter().take(count).enumerate() {
-            self.triangle.write_instance(
-                &self.gpu.queue,
-                index,
-                view_proj,
-                instance.model_matrix(),
-            );
-        }
-
-        let mut encoder = self
-            .gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame encoder"),
-            });
-
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: timing.map(|(timer, _)| timer.writes(false)),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            for index in 0..count {
-                self.triangle.draw(&mut pass, index);
-            }
-        }
-
+        let RecordedFrame {
+            mut encoder,
+            instances,
+            draw_calls,
+            has_overlay,
+        } = self.pipelines.record_2d(
+            FrameTarget {
+                device: &self.gpu.device,
+                queue: &self.gpu.queue,
+                size: (self.gpu.config.width, self.gpu.config.height),
+                color: &view,
+                depth: None,
+                view_projection: self.camera.view_projection(self.gpu.aspect()),
+            },
+            scene,
+            overlay,
+            timing.map(|(timer, _)| timer),
+        );
         if let Some((timer, slot)) = timing {
-            timer.resolve(&mut encoder, slot, false);
+            timer.resolve(&mut encoder, slot, has_overlay);
         }
         let commands = encoder.finish();
         let cpu_record_time = record_start.map_or(Duration::ZERO, |start| start.elapsed());
         self.gpu.queue.submit(Some(commands));
         if let Some(slot) = timing.map(|(_, slot)| slot) {
-            self.gpu_timer.as_mut().expect("timing enabled").submitted(
-                slot,
-                GpuFrameKind::Triangles2d,
-                false,
-            );
+            self.gpu_timer
+                .as_mut()
+                .expect("timing enabled")
+                .submitted(slot, kind, has_overlay);
         }
         self.gpu.queue.present(frame);
         self.diagnostic_finish(
             probe,
-            GpuFrameKind::Triangles2d,
-            instances.len(),
+            kind,
+            requested,
             Some(MeshSubmission {
-                instances: count,
-                draw_calls: count,
+                instances,
+                draw_calls,
                 cpu_record_time,
             }),
         );

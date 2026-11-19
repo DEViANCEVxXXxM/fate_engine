@@ -87,6 +87,10 @@ impl Camera2d {
     /// Consumers can use this to filter draw candidates before submitting them;
     /// the renderer does not cull automatically.
     pub fn visible_bounds(&self, aspect: f32) -> Bounds2d {
+        Bounds2d::new(self.center, self.visible_half_extent(aspect))
+    }
+
+    fn visible_half_extent(&self, aspect: f32) -> Vec2 {
         let safe_aspect = Self::sanitize_aspect(aspect);
         let safe_zoom = Self::sanitize_zoom(self.zoom);
         let size = self.safe_visible_size() * (1.0 / safe_zoom);
@@ -97,8 +101,47 @@ impl Camera2d {
             (size.y * 0.5 * safe_aspect, size.y * 0.5)
         };
 
-        Bounds2d::new(self.center, Vec2::new(half_w, half_h))
+        Vec2::new(half_w, half_h)
     }
+
+    /// Convert from physical pixels (top-left origin, +Y down) to world space
+    /// (+Y up). Viewport edges map to the corresponding camera bounds.
+    ///
+    /// Coordinates outside the viewport are extrapolated, not clamped. Returns
+    /// `None` for a zero-sized viewport or a non-finite input or result.
+    pub fn pixel_to_world(&self, pixel: Vec2, viewport: (u32, u32)) -> Option<Vec2> {
+        let (size, half) = self.pixel_transform(viewport)?;
+        let world = self.center
+            + Vec2::new(
+                (pixel.x / size.x * 2.0 - 1.0) * half.x,
+                (1.0 - pixel.y / size.y * 2.0) * half.y,
+            );
+        finite_vec2(world)
+    }
+
+    /// Project a world point into physical pixels, including offscreen points.
+    ///
+    /// Uses the same viewport and invalid-input rules as [`Self::pixel_to_world`].
+    pub fn world_to_pixel(&self, world: Vec2, viewport: (u32, u32)) -> Option<Vec2> {
+        let (size, half) = self.pixel_transform(viewport)?;
+        let delta = world - self.center;
+        finite_vec2(Vec2::new(
+            (delta.x / half.x * 0.5 + 0.5) * size.x,
+            (0.5 - delta.y / half.y * 0.5) * size.y,
+        ))
+    }
+
+    fn pixel_transform(&self, (width, height): (u32, u32)) -> Option<(Vec2, Vec2)> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let size = Vec2::new(width as f32, height as f32);
+        Some((size, self.visible_half_extent(size.x / size.y)))
+    }
+}
+
+fn finite_vec2(value: Vec2) -> Option<Vec2> {
+    (value.x.is_finite() && value.y.is_finite()).then_some(value)
 }
 
 /// Perspective camera using +Y as world up and -Z as its forward direction
@@ -238,6 +281,69 @@ impl Camera3d {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_2d_picks_and_projects_with_pan_zoom_and_viewport_aspect() {
+        let camera = Camera2d {
+            center: Vec2::new(3.5, -2.0),
+            zoom: 2.0,
+            view_size: Vec2::new(20.0, 30.0),
+        };
+        for (width, height) in [(800, 400), (400, 800), (1600, 100), (100, 1600)] {
+            let viewport = (width, height);
+            let pixel_size = Vec2::new(width as f32, height as f32);
+            let bounds = camera.visible_bounds(pixel_size.x / pixel_size.y);
+            assert_eq!(
+                camera.pixel_to_world(pixel_size * 0.5, viewport),
+                Some(camera.center)
+            );
+            assert_eq!(
+                camera.pixel_to_world(Vec2::ZERO, viewport),
+                Some(Vec2::new(bounds.min().x, bounds.max().y))
+            );
+            assert_eq!(
+                camera.pixel_to_world(pixel_size, viewport),
+                Some(Vec2::new(bounds.max().x, bounds.min().y))
+            );
+
+            // Include a point outside the viewport to verify extrapolation.
+            let pixel = Vec2::new(-0.3 * pixel_size.x, 0.71 * pixel_size.y);
+            let world = camera.pixel_to_world(pixel, viewport).unwrap();
+            let projected = camera.world_to_pixel(world, viewport).unwrap();
+            assert!((projected.x - pixel.x).abs() < 0.001);
+            assert!((projected.y - pixel.y).abs() < 0.001);
+
+            let m = camera
+                .view_projection(pixel_size.x / pixel_size.y)
+                .to_cols_array();
+            let ndc = Vec2::new(m[0] * world.x + m[12], m[5] * world.y + m[13]);
+            assert!((ndc.x - (2.0 * pixel.x / pixel_size.x - 1.0)).abs() < 1e-6);
+            assert!((ndc.y - (1.0 - 2.0 * pixel.y / pixel_size.y)).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn camera_2d_pixel_conversions_reject_invalid_coordinates_and_viewports() {
+        let camera = Camera2d::default();
+        assert!(camera.pixel_to_world(Vec2::ZERO, (0, 100)).is_none());
+        assert!(camera.world_to_pixel(Vec2::ZERO, (100, 0)).is_none());
+        assert!(
+            camera
+                .pixel_to_world(Vec2::new(f32::NAN, 0.0), (100, 100))
+                .is_none()
+        );
+        assert!(
+            camera
+                .world_to_pixel(Vec2::new(f32::INFINITY, 0.0), (100, 100))
+                .is_none()
+        );
+        let invalid = Camera2d {
+            center: Vec2::new(f32::INFINITY, 0.0),
+            ..camera
+        };
+        assert!(invalid.pixel_to_world(Vec2::ZERO, (100, 100)).is_none());
+        assert!(invalid.world_to_pixel(Vec2::ZERO, (100, 100)).is_none());
+    }
     use crate::renderer::visibility::Bounds3d;
 
     #[test]

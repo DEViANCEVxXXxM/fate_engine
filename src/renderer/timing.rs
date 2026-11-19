@@ -10,6 +10,8 @@ const BUFFER_SIZE: u64 = QUERY_COUNT as u64 * QUERY_SIZE;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GpuFrameKind {
     Triangles2d,
+    Sprites2d,
+    TileMap2d,
     Meshes3d,
 }
 

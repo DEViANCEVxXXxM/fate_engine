@@ -507,13 +507,68 @@ interpolation, ownership, or production server policy.
 
 ## 8. Rendering
 
-### Available paths
+### Windowless capture
+
+`OffscreenRenderer` uses the same triangle, sprite, tilemap, mesh, and overlay pipelines
+without creating a window or surface. It still needs a `wgpu` adapter. The
+target size is fixed at construction, and assets must be uploaded through
+this renderer: resources from a windowed renderer belong to another device.
+
+```rust,ignore
+let mut renderer = OffscreenRenderer::new((641, 360)).await?;
+renderer.capture(OffscreenScene::Triangles(&instances), &overlay)?;
+// Poll during later updates, or wait with a timeout in a native command-line tool.
+if let Some(frame) = renderer.poll_capture()? {
+    // frame.rgba8 is tightly packed sRGB RGBA8, top row first.
+}
+```
+
+One capture can be pending at a time. A new request returns `OffscreenError::Busy`
+until the result is retrieved; a timeout does not discard it. The renderer
+reuses its readback buffer and strips GPU row padding. It does not encode files.
+To try an export without a window:
+
+```powershell
+cargo run --release --locked -p fate_engine --example offscreen_capture -- capture.ppm
+```
+
+### Available windowed paths
 
 `fate_engine::renderer::Renderer` provides these draw entry points:
 
-- `render(&[Instance2d])` draws a built-in 2D triangle for each transform.
-  `Instance2d` supplies world `position`, `rotation`, and `scale`; it does not
-  provide a general 2D mesh/material API.
+- `render(&[Instance2d])` draws the built-in 2D triangle in one instanced
+  draw, taking up to 256 transforms in input order. An empty list clears and
+  presents without a draw call. `Instance2d` supplies world `position`,
+  `rotation`, and `scale`; it does not provide a general 2D mesh/material API.
+- `render_with_overlay(&[Instance2d], &Overlay)` adds the same physical-pixel
+  rectangle, image, and text layers used by 3D, with one surface acquisition
+  and queue submission. Pass an empty instance list for overlay-only screens.
+  When GPU timing is enabled, the 2D scene and overlay durations are separate.
+- `render_sprites(&[Sprite2d], &Overlay)` draws a textured 2D scene instead
+  of the built-in triangles. Sprites use world-space centers, sizes, and
+  counterclockwise rotation (+Y up). They follow `Camera2d`; the overlay
+  stays in physical pixels. Sprites share `Texture2d` and `TextureRegion` with
+  HUD images. Adjacent sprites using the same texture share a draw without
+  reordering, and invalid records do not count toward the 256-instance limit.
+- For 2D picking, pass the physical cursor position and drawable size to
+  `Camera2d::pixel_to_world`. `world_to_pixel` does the reverse. Use
+  `Sprite2d::world_bounds().is_some_and(|b| b.contains_point(world))` to
+  test the rotated quad, and walk the submitted sprites back-to-front if
+  the last drawn hit should win. This tests geometry, not texture alpha.
+  For conservative culling, intersect `bounds.axis_aligned()` with the
+  camera's `visible_bounds(renderer.aspect())` before submitting. The
+  renderer does not apply that culling automatically.
+- `render_tiles(TileLayer2d, &Overlay)` renders a retained orthogonal
+  `TileMap2d` with one atlas. The map is row-major with a world-space top-left
+  origin: columns go right and rows go down. Each cell is `None` (empty) or a
+  `u16` index into the layer's `TextureRegion` palette. Edit cells with `set`
+  and pick coordinates with `cell_at_world`. The renderer visits only rows
+  and columns intersecting the camera, skips invalid palette entries, and
+  submits up to `MAX_DRAWN_TILES` (4,096) visible tiles in one draw. This is a
+  single tile layer, not a map file loader or level editor. Use
+  `render_tiles_with_sprites` to draw sprites above the layer in the same
+  scene pass; the tile and sprite budgets are independent. For windowless
+  capture use `OffscreenScene::Tiles { layer, sprites }`.
 - `render_meshes(&[Draw3d])` draws indexed `Mesh3d` geometry with perspective
   projection and a depth buffer. `MeshVertex` contains position and vertex
   color; each `Draw3d` adds a model matrix and RGB tint.
@@ -527,6 +582,25 @@ interpolation, ownership, or production server policy.
 - `render_scene(&[SceneDraw3d], &Overlay)` draws a mixed list of opaque textured
   and untextured meshes with the same depth buffer and draw budget, then draws
   the overlay in the same submission.
+
+Adjacent overlay images using the same `Texture2d` and effective scissor
+share a draw, even when their atlas regions, transforms, or tints differ.
+Images are never reordered. Invalid quads and clips that resolve to an empty
+scissor are skipped before applying the image limit.
+
+Use `Texture2d::update_rgba8` to replace a texture's pixels, or update just
+one atlas rectangle without changing its sampler, dimensions, or draw
+references. Both take tightly packed RGBA8 sRGB pixels (straight alpha).
+
+```rust,ignore
+// Replace a 2×2 tile at texel (16, 4), leaving the rest of the atlas alone.
+atlas.update_region_rgba8([16, 4], [2, 2], &[255_u8; 16])?;
+renderer.render_sprites(&sprites, &overlay);
+```
+
+Updates are validated before queueing and become visible to subsequent
+submissions. The origin is in texels from the top left, not normalized UVs.
+No row alignment padding is needed; invalid updates leave the texture unchanged.
 
 `UiRect` is one axis-aligned screen-space rectangle in physical pixels, using
 the same top-left origin as `TextDraw`. `position` is the top-left corner,

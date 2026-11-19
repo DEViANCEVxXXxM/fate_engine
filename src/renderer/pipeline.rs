@@ -25,16 +25,19 @@ impl Vertex {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-struct Uniforms {
-    view_proj: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
+struct Model {
+    columns: [[f32; 4]; 4],
 }
 
-impl Uniforms {
-    fn new(view_proj: Mat4, model: Mat4) -> Self {
-        Self {
-            view_proj: to_columns(view_proj),
-            model: to_columns(model),
+impl Model {
+    const ATTRIBS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4];
+
+    const fn layout() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &Self::ATTRIBS,
         }
     }
 }
@@ -49,18 +52,17 @@ fn to_columns(matrix: Mat4) -> [[f32; 4]; 4] {
     ]
 }
 
-/// Upper bound on instances drawn per frame. Each one gets a 256-byte slice of
-/// the uniform buffer via dynamic offsets.
+/// Shared upper bound on scene instances drawn per frame.
 pub const MAX_INSTANCES: usize = 256;
 
-/// One vertex buffer, one uniform buffer (sliced per instance) and the pipeline
-/// that draws them.
+/// Static triangle mesh, shared camera uniform, and streamed model matrices.
 pub struct TrianglePipeline {
     pipeline: wgpu::RenderPipeline,
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    uniform_stride: u64,
+    instance_buffer: wgpu::Buffer,
+    models: Vec<Model>,
     vertex_count: u32,
 }
 
@@ -68,9 +70,7 @@ impl TrianglePipeline {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
 
-        let alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
-        let uniform_size = std::mem::size_of::<Uniforms>() as u64;
-        let uniform_stride = uniform_size.div_ceil(alignment.max(1)) * alignment.max(1);
+        let uniform_size = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("triangle bind group layout"),
@@ -79,7 +79,7 @@ impl TrianglePipeline {
                 visibility: wgpu::ShaderStages::VERTEX,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: true,
+                    has_dynamic_offset: false,
                     min_binding_size: wgpu::BufferSize::new(uniform_size),
                 },
                 count: None,
@@ -87,8 +87,8 @@ impl TrianglePipeline {
         });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("triangle uniforms"),
-            size: uniform_stride * MAX_INSTANCES as u64,
+            label: Some("triangle camera uniform"),
+            size: uniform_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -98,11 +98,7 @@ impl TrianglePipeline {
             layout: &bind_group_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform_buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(uniform_size),
-                }),
+                resource: uniform_buffer.as_entire_binding(),
             }],
         });
 
@@ -119,7 +115,7 @@ impl TrianglePipeline {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(Vertex::layout())],
+                buffers: &[Some(Vertex::layout()), Some(Model::layout())],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -166,35 +162,55 @@ impl TrianglePipeline {
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
+        let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("triangle instance models"),
+            size: (MAX_INSTANCES * std::mem::size_of::<Model>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             pipeline,
             vertex_buffer,
             uniform_buffer,
             bind_group,
-            uniform_stride,
+            instance_buffer,
+            models: Vec::with_capacity(MAX_INSTANCES),
             vertex_count: vertices.len() as u32,
         }
     }
 
-    /// Upload the matrices for instance `index`. Call before the render pass,
-    /// once per instance.
-    pub fn write_instance(&self, queue: &wgpu::Queue, index: usize, view_proj: Mat4, model: Mat4) {
-        debug_assert!(index < MAX_INSTANCES);
-        let uniforms = Uniforms::new(view_proj, model);
-        queue.write_buffer(
-            &self.uniform_buffer,
-            index as u64 * self.uniform_stride,
-            bytemuck::bytes_of(&uniforms),
-        );
+    pub fn write_instances(
+        &mut self,
+        queue: &wgpu::Queue,
+        view_proj: Mat4,
+        models: impl IntoIterator<Item = Mat4>,
+    ) {
+        self.models.clear();
+        self.models
+            .extend(models.into_iter().take(MAX_INSTANCES).map(|model| Model {
+                columns: to_columns(model),
+            }));
+        if !self.models.is_empty() {
+            queue.write_buffer(
+                &self.uniform_buffer,
+                0,
+                bytemuck::bytes_of(&to_columns(view_proj)),
+            );
+            queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.models));
+        }
     }
 
-    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>, index: usize) {
-        let offset = (index as u64 * self.uniform_stride) as u32;
+    pub fn draw(&self, pass: &mut wgpu::RenderPass<'_>) -> usize {
+        if self.models.is_empty() {
+            return 0;
+        }
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[offset]);
+        pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-        pass.draw(0..self.vertex_count, 0..1);
+        pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        pass.draw(0..self.vertex_count, 0..self.models.len() as u32);
+        1
     }
 }
 
@@ -204,11 +220,23 @@ mod tests {
     use crate::math::{Mat4, Vec3};
     use crate::renderer::test_support::{skip_without_adapter, test_device};
 
-    /// Render the triangle into an offscreen texture and make sure it actually
-    /// produced coloured pixels. This is the regression test for the whole
-    /// window -> pipeline -> shader path minus the swapchain.
     #[test]
-    fn triangle_is_visible_offscreen() {
+    fn instance_layout_matches_shader_model_columns() {
+        let layout = Model::layout();
+        assert_eq!(layout.array_stride, 64);
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
+        for (i, attr) in layout.attributes.iter().enumerate() {
+            assert_eq!(attr.shader_location, 2 + i as u32);
+            assert_eq!(attr.offset, 16 * i as u64);
+            assert_eq!(attr.format, wgpu::VertexFormat::Float32x4);
+        }
+        let model = Mat4::translation(Vec3::new(2.0, 3.0, 4.0));
+        assert_eq!(to_columns(model)[3], [2.0, 3.0, 4.0, 1.0]);
+    }
+
+    /// Verify two different matrices are fetched in the same instanced draw.
+    #[test]
+    fn two_instances_render_in_one_offscreen_draw() {
         let Some((device, queue)) = test_device() else {
             skip_without_adapter();
             return;
@@ -216,7 +244,7 @@ mod tests {
 
         let size: u32 = 64;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let pipeline = TrianglePipeline::new(&device, format);
+        let mut pipeline = TrianglePipeline::new(&device, format);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test target"),
@@ -234,13 +262,10 @@ mod tests {
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Identity projection + 2x scale: the triangle fills most of the target.
-        pipeline.write_instance(
-            &queue,
-            0,
-            Mat4::IDENTITY,
-            Mat4::scale(Vec3::new(2.0, 2.0, 1.0)),
-        );
+        let model = |x| {
+            Mat4::translation(Vec3::new(x, 0.0, 0.0)).mul(Mat4::scale(Vec3::new(0.55, 0.55, 1.0)))
+        };
+        pipeline.write_instances(&queue, Mat4::IDENTITY, [model(-0.5), model(0.5)]);
 
         let bytes_per_row = size * 4;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -270,7 +295,9 @@ mod tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pipeline.draw(&mut pass, 0);
+            assert_eq!(pipeline.draw(&mut pass), 1);
+            pipeline.write_instances(&queue, Mat4::IDENTITY, []);
+            assert_eq!(pipeline.draw(&mut pass), 0);
         }
 
         encoder.copy_texture_to_buffer(
@@ -313,17 +340,17 @@ mod tests {
         let data = slice.get_mapped_range().expect("mapped range");
         let bytes = data.as_ref();
         let (pixels, _) = bytes.as_chunks::<4>();
-        let lit_pixels = pixels
-            .iter()
-            .filter(|px| px[0] > 10 || px[1] > 10 || px[2] > 10)
-            .count();
+        let lit = |x: usize, y: usize| pixels[y * size as usize + x][..3].iter().any(|&v| v > 10);
+        assert!(
+            lit(16, 32) && lit(48, 32),
+            "both instance centers should be lit"
+        );
+        assert!(
+            !lit(32, 32),
+            "the gap between instances should remain clear"
+        );
         drop(data);
         readback.unmap();
-
-        assert!(
-            lit_pixels > 100,
-            "expected the triangle to light up pixels, got {lit_pixels}"
-        );
     }
 }
 
@@ -347,7 +374,7 @@ mod camera_scale_tests {
         let width = 1280u32;
         let height = 720u32;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        let pipeline = TrianglePipeline::new(&device, format);
+        let mut pipeline = TrianglePipeline::new(&device, format);
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("test target"),
@@ -371,14 +398,11 @@ mod camera_scale_tests {
             rotation: 0.1,
             scale: 1.0,
         };
-        for _ in 0..5 {
-            pipeline.write_instance(
-                &queue,
-                0,
-                camera.view_projection(width as f32 / height as f32),
-                instance.model_matrix(),
-            );
-        }
+        pipeline.write_instances(
+            &queue,
+            camera.view_projection(width as f32 / height as f32),
+            [instance.model_matrix()],
+        );
 
         let bytes_per_row = width * 4;
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
@@ -408,7 +432,7 @@ mod camera_scale_tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pipeline.draw(&mut pass, 0);
+            assert_eq!(pipeline.draw(&mut pass), 1);
         }
 
         encoder.copy_texture_to_buffer(

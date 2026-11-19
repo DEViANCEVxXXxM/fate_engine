@@ -230,6 +230,12 @@ impl UiRenderer {
         let mut clipped = false;
 
         for rect in rects {
+            if rect
+                .clip
+                .is_some_and(|clip| clip.to_scissor(width, height).is_none())
+            {
+                continue;
+            }
             if count >= MAX_UI_RECTS {
                 clipped = true;
                 break;
@@ -355,7 +361,7 @@ impl<'a> UiImage<'a> {
     }
 }
 
-/// Screen-space content composited between the 3D scene and the frame's end.
+/// Screen-space content composited after the 2D or 3D scene.
 ///
 /// Fields draw in order: [`rects`](Self::rects), then
 /// [`images`](Self::images), then [`text`](Self::text). The default overlay is
@@ -388,13 +394,27 @@ impl ImageVertex {
     }
 }
 
-/// Copy the latest image batch and the pipeline that draws it.
+struct ImageRun {
+    texture_source: usize,
+    scissor: Scissor,
+    vertices: std::ops::Range<u32>,
+}
+
+struct TexturedQuad<'a> {
+    source: usize,
+    texture: &'a Texture2d,
+    scissor: Scissor,
+    vertices: [ImageVertex; 6],
+}
+
+/// Upload accepted quads and record adjacent images with compatible GPU state.
 pub(crate) struct ImageRenderer {
     pipeline: wgpu::RenderPipeline,
     vertices: wgpu::Buffer,
     scratch: Vec<ImageVertex>,
-    vertex_count: u32,
-    surface: (u32, u32),
+    runs: Vec<ImageRun>,
+    limit: usize,
+    label: &'static str,
     last_clipped: bool,
 }
 
@@ -444,9 +464,18 @@ impl ImageRenderer {
             cache: None,
         });
 
+        Self::with_pipeline(device, pipeline, MAX_UI_IMAGES, "overlay images")
+    }
+
+    fn with_pipeline(
+        device: &wgpu::Device,
+        pipeline: wgpu::RenderPipeline,
+        limit: usize,
+        label: &'static str,
+    ) -> Self {
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("ui image vertices"),
-            size: (MAX_UI_IMAGES * 6 * std::mem::size_of::<ImageVertex>()) as u64,
+            label: Some(label),
+            size: (limit * 6 * std::mem::size_of::<ImageVertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -454,11 +483,30 @@ impl ImageRenderer {
         Self {
             pipeline,
             vertices,
-            scratch: Vec::new(),
-            vertex_count: 0,
-            surface: (0, 0),
+            scratch: Vec::with_capacity(limit * 6),
+            runs: Vec::with_capacity(limit),
+            limit,
+            label,
             last_clipped: false,
         }
+    }
+
+    pub(super) fn for_sprites(&self, device: &wgpu::Device) -> Self {
+        Self::with_pipeline(
+            device,
+            self.pipeline.clone(),
+            super::MAX_DRAWN_INSTANCES,
+            "2D sprites",
+        )
+    }
+
+    pub(super) fn for_tiles(&self, device: &wgpu::Device) -> Self {
+        Self::with_pipeline(
+            device,
+            self.pipeline.clone(),
+            super::MAX_DRAWN_TILES,
+            "2D tiles",
+        )
     }
 
     /// Build this frame's image batch and upload it. Call before the pass.
@@ -471,63 +519,208 @@ impl ImageRenderer {
         height: u32,
         images: &[UiImage<'_>],
     ) -> usize {
+        let full = Scissor {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
+
+        self.write_quads(
+            queue,
+            images.iter().enumerate().filter_map(|(source, image)| {
+                let scissor = match image.clip {
+                    None => full,
+                    Some(clip) => clip.to_scissor(width, height)?,
+                };
+                Some(TexturedQuad {
+                    source,
+                    texture: image.texture,
+                    scissor,
+                    vertices: image_vertices(image, width as f32, height as f32)?,
+                })
+            }),
+        )
+    }
+
+    pub(super) fn write_sprites(
+        &mut self,
+        queue: &wgpu::Queue,
+        surface: (u32, u32),
+        view_projection: crate::math::Mat4,
+        sprites: &[super::Sprite2d<'_>],
+    ) -> usize {
+        let scissor = Scissor {
+            x: 0,
+            y: 0,
+            width: surface.0,
+            height: surface.1,
+        };
+        self.write_quads(
+            queue,
+            sprites.iter().enumerate().filter_map(|(source, sprite)| {
+                if !sprite.region.is_finite() || !sprite.tint.iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                let corners = super::sprite::project_corners(
+                    view_projection,
+                    sprite.center,
+                    sprite.size,
+                    sprite.rotation,
+                )?;
+                Some(TexturedQuad {
+                    source,
+                    texture: sprite.texture,
+                    scissor,
+                    vertices: textured_vertices(corners, sprite.region, sprite.tint),
+                })
+            }),
+        )
+    }
+
+    pub(super) fn write_tiles(
+        &mut self,
+        queue: &wgpu::Queue,
+        surface: (u32, u32),
+        projection: crate::math::Mat4,
+        layer: super::TileLayer2d<'_>,
+        view: super::Bounds2d,
+    ) -> usize {
+        let scissor = Scissor {
+            x: 0,
+            y: 0,
+            width: surface.0,
+            height: surface.1,
+        };
+        let m = projection.to_cols_array();
+        let project_x = |x| m[0] * x + m[12];
+        let project_y = |y| m[5] * y + m[13];
+        self.write_quads(
+            queue,
+            layer.map.visible_cells(view).filter_map(|(cell, id)| {
+                let region = *layer.regions.get(usize::from(id))?;
+                if !region.is_finite() {
+                    return None;
+                }
+                let [left, top, right, bottom] = layer.map.world_edges(cell);
+                let (left, right, top, bottom) = (
+                    project_x(left),
+                    project_x(right),
+                    project_y(top),
+                    project_y(bottom),
+                );
+                if ![left, right, top, bottom].into_iter().all(f32::is_finite)
+                    || left >= right
+                    || bottom >= top
+                {
+                    return None;
+                }
+                Some(TexturedQuad {
+                    source: 0,
+                    texture: layer.texture,
+                    scissor,
+                    vertices: textured_vertices(
+                        [[left, top], [right, top], [right, bottom], [left, bottom]],
+                        region,
+                        [1.0; 4],
+                    ),
+                })
+            }),
+        )
+    }
+
+    fn write_quads<'a>(
+        &mut self,
+        queue: &wgpu::Queue,
+        quads: impl Iterator<Item = TexturedQuad<'a>>,
+    ) -> usize {
         self.scratch.clear();
-        self.surface = (width, height);
+        self.runs.clear();
         let mut count = 0;
         let mut clipped = false;
-
-        for image in images {
-            if count >= MAX_UI_IMAGES {
+        let mut previous_texture = None;
+        for quad in quads {
+            if count == self.limit {
                 clipped = true;
                 break;
             }
-            if push_image(&mut self.scratch, image, width as f32, height as f32) {
-                count += 1;
+            let start = self.scratch.len() as u32;
+            self.scratch.extend_from_slice(&quad.vertices);
+            let end = self.scratch.len() as u32;
+            // Only merge with the last accepted run: regrouping translucent
+            // images across intervening draws would change compositing order.
+            if let Some(run) = self.runs.last_mut()
+                && run.scissor == quad.scissor
+                && previous_texture.is_some_and(|texture| std::ptr::eq(texture, quad.texture))
+            {
+                run.vertices.end = end;
+            } else {
+                self.runs.push(ImageRun {
+                    texture_source: quad.source,
+                    scissor: quad.scissor,
+                    vertices: start..end,
+                });
             }
+            previous_texture = Some(quad.texture);
+            count += 1;
         }
 
         if clipped && !self.last_clipped {
             log::warn!(
-                "ui image budget exceeded: {MAX_UI_IMAGES} images per frame; dropping the rest of the frame's images",
+                "{} budget exceeded: {} quads per frame; dropping the rest",
+                self.label,
+                self.limit
             );
         }
         self.last_clipped = clipped;
 
-        self.vertex_count = self.scratch.len() as u32;
         if !self.scratch.is_empty() {
             queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
         }
         count
     }
 
-    /// Record the image batch into an existing pass.
-    pub(crate) fn draw<'pass>(
-        &'pass self,
-        pass: &mut wgpu::RenderPass<'pass>,
-        images: &[UiImage<'_>],
-    ) {
-        if self.vertex_count == 0 {
-            return;
+    /// Record the prepared runs with the same input used for `write`.
+    /// Returns the number of draws actually recorded.
+    pub(crate) fn draw(&self, pass: &mut wgpu::RenderPass<'_>, images: &[UiImage<'_>]) -> usize {
+        self.draw_quads(pass, |index| images[index].texture)
+    }
+
+    pub(super) fn draw_sprites(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        sprites: &[super::Sprite2d<'_>],
+    ) -> usize {
+        self.draw_quads(pass, |index| sprites[index].texture)
+    }
+
+    pub(super) fn draw_tiles(&self, pass: &mut wgpu::RenderPass<'_>, texture: &Texture2d) -> usize {
+        self.draw_quads(pass, |_| texture)
+    }
+
+    fn draw_quads<'a>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        texture_at: impl Fn(usize) -> &'a Texture2d,
+    ) -> usize {
+        if self.runs.is_empty() {
+            return 0;
         }
-        let mut index = 0;
-        for image in images {
-            if index >= MAX_UI_IMAGES {
-                break;
-            }
-            if !image.is_drawable() || !rect_fits_surface(image.position, image.size) {
-                continue;
-            }
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &image.texture.bind_group, &[]);
-            pass.set_vertex_buffer(0, self.vertices.slice(..));
-            if !apply_scissor(pass, self.surface, image.clip) {
-                index += 1;
-                continue;
-            }
-            let start = (index * 6) as u32;
-            pass.draw(start..start + 6, 0..1);
-            index += 1;
+        pass.set_pipeline(&self.pipeline);
+        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        for run in &self.runs {
+            let texture = texture_at(run.texture_source);
+            let Scissor {
+                x,
+                y,
+                width,
+                height,
+            } = run.scissor;
+            pass.set_bind_group(0, &texture.bind_group, &[]);
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(run.vertices.clone(), 0..1);
         }
+        self.runs.len()
     }
 }
 
@@ -598,39 +791,55 @@ fn rotated_corners(position: Vec2, size: Vec2, rotation: f32) -> Option<[[f32; 2
         .then_some(corners)
 }
 
-/// Append two triangles covering `image`, in normalized device coordinates.
-fn push_image(out: &mut Vec<ImageVertex>, image: &UiImage<'_>, width: f32, height: f32) -> bool {
+/// Build two triangles covering `image`, in normalized device coordinates.
+fn image_vertices(image: &UiImage<'_>, width: f32, height: f32) -> Option<[ImageVertex; 6]> {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
-        return false;
+        return None;
     }
     if !image.is_drawable() || !rect_fits_surface(image.position, image.size) {
-        return false;
+        return None;
     }
-    let Some([top_left, top_right, bottom_right, bottom_left]) =
-        rotated_corners(image.position, image.size, image.rotation)
-    else {
-        return false;
-    };
+    let [top_left, top_right, bottom_right, bottom_left] =
+        rotated_corners(image.position, image.size, image.rotation)?;
 
-    let ndc = |[x, y]: [f32; 2]| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
-    let color = image.color;
-    let [u0, v0] = [image.region.min.x, image.region.min.y];
-    let [u1, v1] = [image.region.max.x, image.region.max.y];
+    let corners = image_corners_to_ndc(
+        [top_left, top_right, bottom_right, bottom_left],
+        width,
+        height,
+    )?;
+    Some(textured_vertices(corners, image.region, image.color))
+}
+
+fn textured_vertices(
+    [top_left, top_right, bottom_right, bottom_left]: [[f32; 2]; 4],
+    region: TextureRegion,
+    color: [f32; 4],
+) -> [ImageVertex; 6] {
+    let [u0, v0] = [region.min.x, region.min.y];
+    let [u1, v1] = [region.max.x, region.max.y];
     let vertex = |position, uv| ImageVertex {
         position,
         uv,
         color,
     };
 
-    out.extend_from_slice(&[
-        vertex(ndc(top_left), [u0, v0]),
-        vertex(ndc(bottom_left), [u0, v1]),
-        vertex(ndc(bottom_right), [u1, v1]),
-        vertex(ndc(top_left), [u0, v0]),
-        vertex(ndc(bottom_right), [u1, v1]),
-        vertex(ndc(top_right), [u1, v0]),
-    ]);
-    true
+    [
+        vertex(top_left, [u0, v0]),
+        vertex(bottom_left, [u0, v1]),
+        vertex(bottom_right, [u1, v1]),
+        vertex(top_left, [u0, v0]),
+        vertex(bottom_right, [u1, v1]),
+        vertex(top_right, [u1, v0]),
+    ]
+}
+
+fn image_corners_to_ndc(corners: [[f32; 2]; 4], width: f32, height: f32) -> Option<[[f32; 2]; 4]> {
+    let corners = corners.map(|[x, y]| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0]);
+    corners
+        .iter()
+        .flatten()
+        .all(|v| v.is_finite())
+        .then_some(corners)
 }
 
 /// Append two triangles covering `rect`, in normalized device coordinates.
@@ -646,6 +855,9 @@ fn push_rect(out: &mut Vec<UiVertex>, rect: &UiRect, width: f32, height: f32) ->
     let x1 = (rect.position.x + rect.size.x) / width * 2.0 - 1.0;
     let y0 = 1.0 - rect.position.y / height * 2.0;
     let y1 = 1.0 - (rect.position.y + rect.size.y) / height * 2.0;
+    if ![x0, x1, y0, y1].into_iter().all(f32::is_finite) {
+        return false;
+    }
     let color = rect.color;
     let vertex = |position| UiVertex { position, color };
 
@@ -716,6 +928,7 @@ mod tests {
             UiRect::new(Vec2::new(f32::NAN, 0.0), Vec2::new(5.0, 10.0), [1.0; 4]),
             UiRect::new(Vec2::ZERO, Vec2::new(5.0, f32::INFINITY), [1.0; 4]),
             UiRect::new(Vec2::ZERO, Vec2::new(5.0, 10.0), [f32::NAN; 4]),
+            UiRect::new(Vec2::new(f32::MAX, 0.0), Vec2::new(f32::MAX, 1.0), [1.0; 4]),
         ];
 
         for rect in cases {
@@ -854,9 +1067,30 @@ mod tests {
         renderer: &mut ImageRenderer,
         images: &[UiImage<'_>],
     ) -> Vec<[u8; 4]> {
+        let (pixels, queued, _) = render_image_batch(device, queue, renderer, images);
+        assert_eq!(queued, images.len());
+        pixels
+    }
+
+    fn render_image_batch(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut ImageRenderer,
+        images: &[UiImage<'_>],
+    ) -> (Vec<[u8; 4]>, usize, usize) {
+        let size = IMAGE_TEST_SIZE;
+        let queued = renderer.write(queue, size, size, images);
+        let (pixels, draws) = read_quad_pixels(device, queue, |pass| renderer.draw(pass, images));
+        (pixels, queued, draws)
+    }
+
+    fn read_quad_pixels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        draw: impl FnOnce(&mut wgpu::RenderPass<'_>) -> usize,
+    ) -> (Vec<[u8; 4]>, usize) {
         let size = IMAGE_TEST_SIZE;
         let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-        assert_eq!(renderer.write(queue, size, size, images), images.len());
 
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("image test target"),
@@ -884,7 +1118,7 @@ mod tests {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("image test encoder"),
         });
-        {
+        let draws = {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("image test pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -901,8 +1135,8 @@ mod tests {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            renderer.draw(&mut pass, images);
-        }
+            draw(&mut pass)
+        };
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target,
@@ -944,7 +1178,7 @@ mod tests {
         let pixels = pixels.to_vec();
         drop(data);
         readback.unmap();
-        pixels
+        (pixels, draws)
     }
 
     fn test_image_texture(
@@ -966,6 +1200,190 @@ mod tests {
             },
         )
         .expect("texture")
+    }
+
+    #[test]
+    fn in_place_updates_keep_existing_image_binding_and_untouched_texels() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+        use crate::renderer::{TextureOptions, TextureUpdateError};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer =
+            ImageRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, &layout);
+        const RED: [u8; 4] = [255, 0, 0, 255];
+        const GREEN: [u8; 4] = [0, 255, 0, 255];
+        const BLUE: [u8; 4] = [0, 0, 255, 255];
+        let original = [RED; 16];
+        let texture = Texture2d::new(
+            &device,
+            &queue,
+            &layout,
+            crate::renderer::texture::TextureUpload {
+                label: "mutable atlas",
+                width: 4,
+                height: 4,
+                rgba8: original.as_flattened(),
+                options: TextureOptions::NEAREST,
+            },
+        )
+        .unwrap();
+        let size = IMAGE_TEST_SIZE as f32;
+        let image = UiImage::new(&texture, Vec2::ZERO, Vec2::new(size, size));
+        let draw =
+            |renderer: &mut ImageRenderer| render_images(&device, &queue, renderer, &[image]);
+        assert!(draw(&mut renderer).iter().all(|&p| p == RED));
+
+        // Two tightly packed 8-byte rows at a nonzero origin, using the same
+        // image value and bind group as the initial draw.
+        texture
+            .update_region_rgba8([1, 1], [2, 2], [GREEN, BLUE, BLUE, GREEN].as_flattened())
+            .unwrap();
+        assert!(matches!(
+            texture.update_region_rgba8([1, 1], [2, 2], &original.as_flattened()[..15]),
+            Err(TextureUpdateError::InvalidPixelDataLength { .. })
+        ));
+        let pixels = draw(&mut renderer);
+        let at = |x: u32, y: u32| pixels[(IMAGE_TEST_SIZE * (16 * y + 8) + 16 * x + 8) as usize];
+        for y in 0..4 {
+            for x in 0..4 {
+                let expected = match (x, y) {
+                    (1, 1) | (2, 2) => GREEN,
+                    (1, 2) | (2, 1) => BLUE,
+                    _ => RED,
+                };
+                assert_eq!(at(x, y), expected, "texel ({x}, {y})");
+            }
+        }
+
+        texture.update_rgba8([BLUE; 16].as_flattened()).unwrap();
+        assert!(draw(&mut renderer).iter().all(|&p| p == BLUE));
+    }
+
+    #[test]
+    fn world_sprites_sample_atlas_and_blend_in_one_draw() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+        use crate::renderer::{Camera2d, Sprite2d, TextureOptions};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let image_renderer =
+            ImageRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, &layout);
+        let mut renderer = image_renderer.for_sprites(&device);
+        let atlas = test_image_texture(&device, &queue, &layout, TextureOptions::NEAREST);
+        let camera = Camera2d {
+            center: Vec2::new(5.0, -3.0),
+            ..Default::default()
+        };
+        let red = Sprite2d::new(&atlas, camera.center, Vec2::new(10.0, 10.0))
+            .with_region(atlas.region(0, 0, 1, 1));
+        let green = Sprite2d::new(&atlas, camera.center, Vec2::new(4.0, 4.0))
+            .with_region(atlas.region(1, 0, 1, 1))
+            .with_tint([1.0, 1.0, 1.0, 0.75]);
+        let invalid = Sprite2d::new(&atlas, camera.center, Vec2::ZERO);
+        let sprites = [red, invalid, green];
+        let side = IMAGE_TEST_SIZE;
+        let vp = camera.view_projection(1.0);
+        assert_eq!(
+            renderer.write_sprites(&queue, (side, side), vp, &sprites),
+            2
+        );
+        let (pixels, draws) = read_quad_pixels(&device, &queue, |pass| {
+            renderer.draw_sprites(pass, &sprites)
+        });
+        assert_eq!(draws, 1);
+        let at = |x, y| pixels[(side * y + x) as usize];
+        assert_eq!(at(2, 32), [0, 0, 0, 255]);
+        assert_eq!(at(20, 32), [255, 0, 0, 255]);
+        let center = at(32, 32);
+        assert!(
+            center[1] > center[0] && center[0] > 120 && center[2] == 0,
+            "{center:?}"
+        );
+
+        let over_budget = [red; crate::renderer::MAX_DRAWN_INSTANCES + 1];
+        assert_eq!(
+            renderer.write_sprites(&queue, (side, side), vp, &over_budget),
+            crate::renderer::MAX_DRAWN_INSTANCES
+        );
+        assert_eq!(renderer.runs.len(), 1);
+    }
+
+    #[test]
+    fn image_runs_preserve_blend_order_across_texture_and_clip_changes() {
+        use crate::renderer::test_support::{skip_without_adapter, test_device};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let layout = crate::renderer::texture::texture_layout(&device);
+        let mut renderer =
+            ImageRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb, &layout);
+        let options = crate::renderer::TextureOptions::NEAREST;
+        let atlas = test_image_texture(&device, &queue, &layout, options);
+        let blue_texture = Texture2d::new(
+            &device,
+            &queue,
+            &layout,
+            crate::renderer::texture::TextureUpload {
+                label: "blue test texture",
+                width: 1,
+                height: 1,
+                rgba8: &[0, 0, 255, 255],
+                options,
+            },
+        )
+        .unwrap();
+        let side = IMAGE_TEST_SIZE as f32;
+        let size = Vec2::new(side, side);
+        let image =
+            |texture| UiImage::new(texture, Vec2::ZERO, size).with_color([1.0, 1.0, 1.0, 0.5]);
+        let red = image(&atlas).with_region(atlas.region(0, 0, 1, 1));
+        let green = image(&atlas).with_region(atlas.region(1, 0, 1, 1));
+        let rejected = UiImage::new(
+            &blue_texture,
+            Vec2::new(f32::MAX, 1.0),
+            Vec2::new(64.0, f32::MAX),
+        )
+        .with_rotation(std::f32::consts::FRAC_PI_4);
+        let images = [
+            rejected,
+            red,
+            green.with_clip(UiClip::new(Vec2::ZERO, size)),
+            green.with_clip(UiClip::new(Vec2::new(side / 2.0, 0.0), size)),
+            image(&blue_texture),
+            red,
+        ];
+        let (pixels, queued, draws) = render_image_batch(&device, &queue, &mut renderer, &images);
+        assert_eq!((queued, draws), (5, 4));
+        assert_eq!(renderer.runs[0].vertices, 0..12);
+        let at = |x| pixels[(IMAGE_TEST_SIZE * (IMAGE_TEST_SIZE / 2) + x) as usize];
+        let linear = |value: u8| ((f32::from(value) / 255.0 + 0.055) / 1.055).powf(2.4);
+        for (pixel, expected) in [
+            (at(12), [0.5625, 0.125, 0.25]),
+            (at(52), [0.53125, 0.1875, 0.25]),
+        ] {
+            for (channel, expected) in pixel.into_iter().zip(expected) {
+                assert!((linear(channel) - expected).abs() < 0.015, "{pixel:?}");
+            }
+        }
+
+        let clipped = red.with_clip(UiClip::new(size, size));
+        let mut over_budget = vec![clipped; MAX_UI_IMAGES];
+        over_budget.extend([red; MAX_UI_IMAGES + 1]);
+        let (_, queued, draws) = render_image_batch(&device, &queue, &mut renderer, &over_budget);
+        assert_eq!((queued, draws), (MAX_UI_IMAGES, 1));
+        let (pixels, queued, draws) =
+            render_image_batch(&device, &queue, &mut renderer, &[clipped]);
+        assert_eq!((queued, draws), (0, 0));
+        assert!(pixels.iter().all(|p| *p == [0, 0, 0, 255]));
     }
 
     #[test]
@@ -1107,6 +1525,16 @@ mod tests {
     #[test]
     fn image_corners_reject_non_finite_rotation() {
         assert!(rotated_corners(Vec2::ZERO, Vec2::new(4.0, 4.0), f32::NAN).is_none());
+    }
+
+    #[test]
+    fn finite_image_corners_can_overflow_during_projection() {
+        assert!(image_corners_to_ndc([[f32::MAX, 0.0]; 4], 1.0, 1.0).is_none());
+        let corners = [[0.0, 0.0], [8.0, 0.0], [8.0, 4.0], [0.0, 4.0]];
+        assert_eq!(
+            image_corners_to_ndc(corners, 8.0, 4.0),
+            Some([[-1.0, 1.0], [1.0, 1.0], [1.0, -1.0], [-1.0, -1.0]])
+        );
     }
 
     #[test]

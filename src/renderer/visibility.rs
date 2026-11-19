@@ -62,6 +62,113 @@ impl Bounds2d {
     }
 }
 
+/// A rotated world-space rectangle for geometric picking and broad-phase
+/// visibility checks. Rendering order and texture alpha are not part of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OrientedBounds2d {
+    center: Vec2,
+    half_extent: Vec2,
+    sin: f32,
+    cos: f32,
+}
+
+impl OrientedBounds2d {
+    /// Construct from full, positive dimensions and a counterclockwise angle
+    /// in radians. Returns `None` for invalid or degenerate geometry.
+    pub fn from_center_size(center: Vec2, size: Vec2, radians: f32) -> Option<Self> {
+        if ![center.x, center.y, size.x, size.y, radians]
+            .into_iter()
+            .all(f32::is_finite)
+        {
+            return None;
+        }
+        let half_extent = size * 0.5;
+        if half_extent.x <= 0.0 || half_extent.y <= 0.0 {
+            return None;
+        }
+        let (sin, cos) = radians.sin_cos();
+        Some(Self {
+            center,
+            half_extent,
+            sin,
+            cos,
+        })
+    }
+
+    /// Test the rotated rectangle, not the larger axis-aligned box.
+    pub fn contains_point(self, point: Vec2) -> bool {
+        let delta = point - self.center;
+        let x = self.cos * delta.x + self.sin * delta.y;
+        let y = -self.sin * delta.x + self.cos * delta.y;
+        x.abs() <= self.half_extent.x && y.abs() <= self.half_extent.y
+    }
+
+    /// The enclosing axis-aligned box, suitable for conservative culling.
+    pub fn axis_aligned(self) -> Bounds2d {
+        let (s, c) = (self.sin.abs(), self.cos.abs());
+        let half = self.half_extent;
+        Bounds2d::new(
+            self.center,
+            Vec2::new(c * half.x + s * half.y, s * half.x + c * half.y),
+        )
+    }
+
+    /// Corner offsets in top-left, top-right, bottom-right, bottom-left
+    /// order, measured from the center in +Y-up world coordinates.
+    pub(super) fn corner_offsets(self) -> [[f32; 2]; 4] {
+        let half = self.half_extent;
+        [
+            [-half.x, half.y],
+            [half.x, half.y],
+            [half.x, -half.y],
+            [-half.x, -half.y],
+        ]
+        .map(|[x, y]| [self.cos * x - self.sin * y, self.sin * x + self.cos * y])
+    }
+}
+
+#[cfg(test)]
+mod oriented_tests {
+    use super::*;
+
+    #[test]
+    fn rotated_picking_and_broad_phase_use_different_bounds() {
+        let center = Vec2::new(2.0, -3.0);
+        let bounds = OrientedBounds2d::from_center_size(
+            center,
+            Vec2::new(4.0, 1.0),
+            std::f32::consts::FRAC_PI_4,
+        )
+        .unwrap();
+        let broad = bounds.axis_aligned();
+        for [x, y] in bounds.corner_offsets() {
+            assert!(
+                broad
+                    .expanded(1e-6)
+                    .contains_point(center + Vec2::new(x, y))
+            );
+        }
+        assert!(bounds.contains_point(center + Vec2::new(1.0, 1.0)));
+        let outside = center + Vec2::new(1.0, -1.0);
+        assert!(broad.contains_point(outside));
+        assert!(!bounds.contains_point(outside));
+        assert!(!bounds.contains_point(Vec2::new(f32::NAN, 0.0)));
+        assert!(!broad.intersects(Bounds2d::from_center_size(Vec2::new(20.0, 0.0), Vec2::ONE)));
+    }
+
+    #[test]
+    fn oriented_bounds_reject_degenerate_geometry() {
+        for size in [
+            Vec2::ZERO,
+            Vec2::new(-1.0, 1.0),
+            Vec2::new(f32::INFINITY, 1.0),
+        ] {
+            assert!(OrientedBounds2d::from_center_size(Vec2::ZERO, size, 0.0).is_none());
+        }
+        assert!(OrientedBounds2d::from_center_size(Vec2::ZERO, Vec2::ONE, f32::NAN).is_none());
+    }
+}
+
 /// Axis-aligned 3D world-space bounds used for render visibility checks.
 ///
 /// Construction sanitizes degenerate input the same way as [`Bounds2d`].

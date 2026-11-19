@@ -32,6 +32,34 @@ The default run is a seam check, not a performance benchmark.
 
 ### Optional GPU timings
 
+Use `--2d` to run the same HUD showcase over instanced 2D triangles instead
+of meshes. With GPU timing enabled, the smoke checks both 2D frames with an
+overlay pass and frames without one:
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --2d --gpu-timing --dbg
+```
+
+Use `--sprites` to exercise world-space atlas sprites with camera movement
+and a fixed HUD. A rectangular in-place update animates part of the atlas
+shown by both layers. Diagnostics check that three valid sprites sharing
+the atlas submit in one draw and that the invalid fourth record is skipped.
+The consumer culls an additional offscreen sprite before submission. Move
+the pointer over the sprites to highlight the last drawn quad under it.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --sprites --gpu-timing --dbg
+```
+
+Use `--tiles` to pan and zoom across a 128×96 atlas-backed map with empty
+cells, live cell edits, and a moving sprite drawn above the tiles.
+Diagnostics report the map and sprite input count, visible tiles
+submitted, draw count, and separate tilemap/HUD pass timings.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --tiles --gpu-timing --dbg
+```
+
 Add `--dbg` to open the reusable native diagnostics companion alongside this
 consumer, including with `--mesh-load` or `--surface-lifecycle`:
 

@@ -1,4 +1,4 @@
-// Screen-space textured UI image, alpha blended over the scene.
+// Textured quad projected to clip space: a world-space sprite or a HUD image.
 
 @group(0) @binding(0)
 var image: texture_2d<f32>;

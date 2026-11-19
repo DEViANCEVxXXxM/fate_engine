@@ -600,20 +600,26 @@ impl TextRenderer {
         }
     }
 
-    /// Build this frame's glyph batch and upload it. Call before the pass.
+    /// Build and upload this frame's glyph batch. Returns whether it has glyphs.
     pub(crate) fn write(
         &mut self,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
         draws: &[TextDraw<'_>],
-    ) {
+    ) -> bool {
         self.scratch.clear();
         self.runs.clear();
         self.surface = (width, height);
         let mut clipped = false;
 
         'draws: for draw in draws {
+            if draw
+                .clip
+                .is_some_and(|clip| clip.to_scissor(width, height).is_none())
+            {
+                continue;
+            }
             layout_text(draw.text, draw.position, draw.scale, &mut self.placements);
             let first_vertex = self.scratch.len() as u32;
             for placement in &self.placements {
@@ -648,14 +654,16 @@ impl TextRenderer {
         }
         self.last_clipped = clipped;
 
+        if self.scratch.is_empty() {
+            return false;
+        }
         queue.write_buffer(
             &self.uniforms,
             0,
             bytemuck::bytes_of(&TextUniforms::new(width as f32, height as f32)),
         );
-        if !self.scratch.is_empty() {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
-        }
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
+        true
     }
 
     /// Record the glyph batch into an existing pass.

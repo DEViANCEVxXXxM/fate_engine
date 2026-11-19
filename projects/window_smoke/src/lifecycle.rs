@@ -2,8 +2,8 @@
 
 use std::time::{Duration, Instant};
 
-use fate_engine::math::{Mat4, Vec3};
-use fate_engine::renderer::{Draw3d, Instance2d, Mesh3d, Overlay, Renderer};
+use fate_engine::math::{Mat4, Vec2, Vec3};
+use fate_engine::renderer::{Draw3d, Instance2d, MAX_DRAWN_INSTANCES, Mesh3d, Overlay, Renderer};
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
@@ -45,7 +45,12 @@ impl Lifecycle {
         );
 
         let draw = |renderer: &mut Renderer| {
-            let submitted_2d = renderer.render(&[Instance2d::default()]);
+            let triangles: [_; MAX_DRAWN_INSTANCES + 1] = std::array::from_fn(|index| Instance2d {
+                position: Vec2::new((index % 16) as f32 - 7.5, (index / 16) as f32 * 0.5 - 4.0),
+                rotation: index as f32 * 0.1,
+                scale: 0.4,
+            });
+            let submitted_2d = renderer.render(&triangles);
             let submitted_3d = renderer.render_meshes_with_overlay_report(
                 &[Draw3d {
                     mesh,
@@ -109,7 +114,7 @@ impl Lifecycle {
                 if window.is_minimized() == Some(false) && size.width > 0 && size.height > 0 {
                     // Some platforms do not emit a resize when restoring to the same size.
                     renderer.resize(size);
-                    if draw(renderer) == (true, true) {
+                    if draw(renderer) == (true, true) && renderer.render(&[]) {
                         self.stage = Stage::Complete;
                     }
                 }

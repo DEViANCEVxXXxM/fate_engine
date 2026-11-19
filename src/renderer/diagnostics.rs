@@ -18,6 +18,8 @@ pub struct RenderFrameDiagnostics {
     pub render_time: Duration,
     /// Command recording/upload preparation, a subset of render_time.
     pub record_time: Duration,
+    /// Input count before validation or budgeting. For tilemaps this is the
+    /// entire grid capacity (including empty and offscreen cells) plus sprites.
     pub requested_instances: usize,
     pub submitted_instances: usize,
     pub draw_calls: usize,

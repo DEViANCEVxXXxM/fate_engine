@@ -220,6 +220,72 @@ and resumes after resize or restore. `window_smoke --surface-lifecycle`
 provides a separate windowed regression for 2D and 3D. GPU device loss recovery
 remains deferred.
 
+## Step 9 — Batch built-in 2D triangles
+
+**Status: done.** `Renderer::render` streams the model matrices for the built-in
+triangles together, shares one camera uniform, and issues one instanced draw
+in input order. Empty lists clear and present without issuing a draw. The
+256-instance budget is unchanged. `window_smoke --surface-lifecycle --dbg`
+checks submitted, empty, and skipped batch counts through renderer telemetry.
+
+## Step 10 — Batch atlas-backed overlay images
+
+**Status: done.** The image layer combines adjacent quads with the same
+texture and scissor without changing alpha-blend order. The upload and draw
+paths use the same accepted quad ranges. Offscreen tests check blend order,
+texture and clip boundaries, invalid geometry, and the 64-image limit.
+
+## Step 11 — Compose overlays over 2D scenes
+
+**Status: done.** 2D and 3D now share one overlay path. `Renderer::render_with_overlay`
+supports 2D scenes and overlay-only frames without a custom render pass or
+direct `wgpu` calls. GPU timing samples the overlay only when a pass is recorded.
+`window_smoke --2d --gpu-timing` exercises scene-plus-overlay, overlay-only,
+and frames whose overlay inputs produce no draws.
+
+## Step 12 — Draw textured world-space sprites
+
+**Status: done.** `Sprite2d` reuses the existing texture, atlas, and sampling
+options with the orthographic camera. The renderer batches in list order,
+preserves alpha blending, and keeps the screen-space overlay separate.
+`window_smoke --sprites --dbg --gpu-timing` exercises camera pan and zoom and
+checks the batch counts through diagnostics.
+
+## Step 13 — Update atlas pixels in place
+
+**Status: done.** `Texture2d` supports full and rectangular RGBA8 updates
+on its original queue. The existing texture bindings and atlas UVs are kept.
+`window_smoke --sprites` animates part of one tile shared by the world scene
+and HUD. An offscreen test checks unchanged neighboring texels and rejected
+updates.
+
+## Step 14 — Pick and cull world-space sprites
+
+**Status: done.** `Camera2d` converts between world space and physical window
+pixels using the render projection's pan, zoom, and aspect rules. Sprites
+expose oriented bounds for picking and enclosing axis-aligned bounds for
+conservative culling. `window_smoke --sprites` filters an offscreen sprite
+before submission and highlights the last drawn sprite under the cursor.
+
+## Step 15 — Render and capture without a window
+
+**Status: done.** The windowed and offscreen renderers share scene and overlay
+recording. `OffscreenRenderer` captures triangles, sprites, or depth-tested
+meshes with optional HUD into tightly packed RGBA8 pixels. A reusable async
+readback buffer limits the target to one pending capture. CPU tests validate
+row alignment; offscreen GPU tests check compositing and depth. The
+`offscreen_capture` example exports an image without a window.
+
+## Step 16 — Render atlas-backed tilemaps
+
+**Status: done.** A retained, editable `TileMap2d` holds an orthogonal
+grid. Windowed and offscreen renderers traverse only the visible rows and
+columns, batch one atlas per layer, and apply a dedicated visible-tile
+limit. Sprites can draw above the map in the same scene pass.
+`window_smoke --tiles --dbg --gpu-timing` pans and zooms over a
+12,288-cell grid. Offscreen tests check atlas selection, edits, camera culling,
+and the batch limit.
+
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.
