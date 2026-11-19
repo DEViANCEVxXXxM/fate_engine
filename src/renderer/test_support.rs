@@ -5,12 +5,24 @@
 
 /// Request a test adapter and device, or `None` when none is available.
 pub(crate) fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    test_device_with_features(wgpu::Features::empty())
+}
+
+pub(crate) fn test_device_with_features(
+    required_features: wgpu::Features,
+) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter =
         pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .ok()?;
-    let (device, queue) =
-        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
+    if !adapter.features().contains(required_features) {
+        return None;
+    }
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features,
+        ..Default::default()
+    }))
+    .ok()?;
     Some((device, queue))
 }
 

@@ -89,7 +89,21 @@ pub fn build_draws<'a>(
     aspect: f32,
     instances: &[CubeInstance],
 ) -> (Vec<Draw3d<'a>>, usize) {
-    let visible = visible_indices(camera, aspect, instances);
+    build_draws_with_culling(mesh, camera, aspect, instances, true)
+}
+
+pub fn build_draws_with_culling<'a>(
+    mesh: &'a Mesh3d,
+    camera: &Camera3d,
+    aspect: f32,
+    instances: &[CubeInstance],
+    culling: bool,
+) -> (Vec<Draw3d<'a>>, usize) {
+    let visible = if culling {
+        visible_indices(camera, aspect, instances)
+    } else {
+        (0..instances.len()).collect()
+    };
     let mut draws = Vec::with_capacity(visible.len());
     for &index in &visible {
         let instance = &instances[index];

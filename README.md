@@ -37,6 +37,9 @@ expanding content.
 - Reusable frame diagnostics and metric sink/source seams live in
   `fate_engine::diagnostics`; `fate_sim` and `fate_net` expose read-only
   inspection snapshots. Consumers own presentation and export.
+- [`fate_debug`](crates/fate_debug/) provides an opt-in native diagnostics
+  companion with live charts, inspectors, event filtering and capture/export.
+  Render telemetry attaches to existing 2D/3D renderers without changing draw calls.
 
 ## Build and test
 
@@ -45,6 +48,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p fate_demo
+cargo run --release -p fate_demo -- --dbg
 cargo run -p fate_combat_slice
 ```
 

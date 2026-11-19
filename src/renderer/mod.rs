@@ -1,6 +1,7 @@
 //! Engine renderer: owns the GPU context, the camera and the draw pipelines.
 
 mod camera;
+mod diagnostics;
 mod gpu;
 mod mesh;
 mod pipeline;
@@ -8,6 +9,7 @@ mod pipeline;
 mod test_support;
 mod text;
 mod texture;
+mod timing;
 mod ui;
 mod visibility;
 
@@ -18,12 +20,14 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 pub use camera::{Camera2d, Camera3d};
+pub use diagnostics::{RenderDiagnosticEvent, RenderDiagnosticReceiver, RenderFrameDiagnostics};
 pub use gpu::{Gpu, GpuInitError};
 pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex, SceneDraw3d, UvMeshVertex};
 pub use text::{TextDraw, text_width, wrap_text};
 pub use texture::{
     Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
 };
+pub use timing::{GpuFrameKind, GpuFrameTiming};
 pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiClip, UiImage, UiRect};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d};
 
@@ -31,12 +35,20 @@ use crate::math::{Mat4, Vec2};
 use mesh::MeshPipeline;
 use pipeline::TrianglePipeline;
 use text::TextRenderer;
+use timing::GpuTimer;
 use ui::{ImageRenderer, UiRenderer};
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 pub const MAX_DRAWN_INSTANCES: usize = pipeline::MAX_INSTANCES;
 const DRAW_WARNING_THRESHOLD: f32 = 0.75;
+
+/// Optional renderer capabilities. Defaults leave GPU timing disabled.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RendererOptions {
+    /// Request asynchronous GPU pass timestamps when supported by the adapter.
+    pub gpu_timing: bool,
+}
 
 /// CPU-side report for a submitted 3D frame. Overlay draws are not counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -82,6 +94,9 @@ pub struct Renderer {
     images: ImageRenderer,
     texture_layout: wgpu::BindGroupLayout,
     text: TextRenderer,
+    gpu_timer: Option<GpuTimer>,
+    diagnostic_sender: Option<diagnostics::RenderDiagnosticSender>,
+    mirrored_timings: std::collections::VecDeque<GpuFrameTiming>,
     _depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
     clear_color: wgpu::Color,
@@ -89,7 +104,14 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Result<Self, GpuInitError> {
-        let gpu = Gpu::new(window).await?;
+        Self::new_with_options(window, RendererOptions::default()).await
+    }
+
+    pub async fn new_with_options(
+        window: Arc<Window>,
+        options: RendererOptions,
+    ) -> Result<Self, GpuInitError> {
+        let gpu = Gpu::new_with_timestamps(window, options.gpu_timing).await?;
         let triangle = TrianglePipeline::new(&gpu.device, gpu.config.format);
         let ui = UiRenderer::new(&gpu.device, gpu.config.format);
         let texture_layout = texture::texture_layout(&gpu.device);
@@ -97,6 +119,11 @@ impl Renderer {
         let mesh_pipeline = MeshPipeline::new(&gpu.device, gpu.config.format, &texture_layout);
         let text = TextRenderer::new(&gpu.device, &gpu.queue, gpu.config.format);
         let (depth_texture, depth_view) = Self::create_depth_target(&gpu);
+        let gpu_timer = if options.gpu_timing {
+            GpuTimer::new(&gpu.device, &gpu.queue)
+        } else {
+            None
+        };
 
         Ok(Self {
             gpu,
@@ -108,6 +135,9 @@ impl Renderer {
             images,
             texture_layout,
             text,
+            gpu_timer,
+            diagnostic_sender: None,
+            mirrored_timings: std::collections::VecDeque::new(),
             _depth_texture: depth_texture,
             depth_view,
             clear_color: wgpu::Color {
@@ -117,6 +147,96 @@ impl Renderer {
                 a: 1.0,
             },
         })
+    }
+
+    /// Whether GPU timing was requested and is available on this device.
+    pub fn gpu_timing_available(&self) -> bool {
+        self.gpu_timer.is_some()
+    }
+
+    /// Drain completed GPU samples without waiting for in-flight submissions.
+    ///
+    /// Returns an empty list when disabled, unsupported, or not ready. Call
+    /// regularly to free readback slots; frames are not sampled when the
+    /// bounded pool is full.
+    pub fn poll_gpu_timings(&mut self) -> Vec<GpuFrameTiming> {
+        let mut ready: Vec<_> = self.mirrored_timings.drain(..).collect();
+        let completed = self
+            .gpu_timer
+            .as_mut()
+            .map_or_else(Vec::new, |timer| timer.poll(&self.gpu.device));
+        if let Some(sender) = &self.diagnostic_sender {
+            for &sample in &completed {
+                sender.send(RenderDiagnosticEvent::Gpu(sample));
+            }
+        }
+        ready.extend(completed);
+        ready
+    }
+
+    /// Subscribe to automatic 2D/3D render telemetry. Replaces any previous
+    /// subscription. No presentation dependency is introduced into the engine.
+    ///
+    /// GPU samples are forwarded when timing was enabled at creation. The
+    /// normal `poll_gpu_timings` API remains usable, retaining up to 1,200
+    /// mirrored samples while a subscription is active.
+    pub fn subscribe_diagnostics(&mut self) -> RenderDiagnosticReceiver {
+        let (sender, receiver) = diagnostics::channel();
+        self.diagnostic_sender = Some(sender);
+        receiver
+    }
+
+    fn diagnostic_start(&mut self) -> Option<(Instant, Option<Duration>, u64)> {
+        let sender = self.diagnostic_sender.as_mut()?;
+        let now = Instant::now();
+        let interval = sender
+            .last_start
+            .replace(now)
+            .map(|last| now.duration_since(last));
+        let id = sender.next_id;
+        sender.next_id = sender.next_id.wrapping_add(1);
+        Some((now, interval, id))
+    }
+
+    fn diagnostic_finish(
+        &mut self,
+        probe: Option<(Instant, Option<Duration>, u64)>,
+        kind: GpuFrameKind,
+        requested: usize,
+        submission: Option<MeshSubmission>,
+    ) {
+        let Some((start, interval, frame_id)) = probe else {
+            return;
+        };
+        let Some(sender) = &self.diagnostic_sender else {
+            return;
+        };
+        let connected = sender.send(RenderDiagnosticEvent::Frame(RenderFrameDiagnostics {
+            frame_id,
+            kind,
+            interval,
+            render_time: start.elapsed(),
+            record_time: submission.map_or(Duration::ZERO, |s| s.cpu_record_time),
+            requested_instances: requested,
+            submitted_instances: submission.map_or(0, |s| s.instances),
+            draw_calls: submission.map_or(0, |s| s.draw_calls),
+            submitted: submission.is_some(),
+            surface_size: self.surface_size(),
+        }));
+        if !connected {
+            self.diagnostic_sender = None;
+            self.mirrored_timings.clear();
+            return;
+        }
+        if let Some(timer) = &mut self.gpu_timer {
+            for timing in timer.poll(&self.gpu.device) {
+                sender.send(RenderDiagnosticEvent::Gpu(timing));
+                if self.mirrored_timings.len() == 1200 {
+                    self.mirrored_timings.pop_front();
+                }
+                self.mirrored_timings.push_back(timing);
+            }
+        }
     }
 
     fn create_depth_target(gpu: &Gpu) -> (wgpu::Texture, wgpu::TextureView) {
@@ -331,8 +451,17 @@ impl Renderer {
         draws: impl ExactSizeIterator<Item = SceneDraw3d<'a>> + Clone,
         overlay: &Overlay<'_>,
     ) -> Option<MeshSubmission> {
-        let frame = self.gpu.acquire_frame()?;
+        let probe = self.diagnostic_start();
+        let requested = draws.len();
+        let Some(frame) = self.gpu.acquire_frame() else {
+            self.diagnostic_finish(probe, GpuFrameKind::Meshes3d, requested, None);
+            return None;
+        };
         let record_start = Instant::now();
+        let timing = self
+            .gpu_timer
+            .as_ref()
+            .and_then(|timer| timer.free_slot().map(|slot| (timer, slot)));
 
         let view = frame
             .texture
@@ -368,7 +497,7 @@ impl Renderer {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: timing.map(|(timer, _)| timer.writes(false)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -387,7 +516,8 @@ impl Renderer {
             self.gpu.config.height,
             overlay.images,
         );
-        if rect_count > 0 || image_count > 0 || !overlay.text.is_empty() {
+        let has_overlay = rect_count > 0 || image_count > 0 || !overlay.text.is_empty();
+        if has_overlay {
             if !overlay.text.is_empty() {
                 self.text.write(
                     &self.gpu.queue,
@@ -408,7 +538,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: timing.map(|(timer, _)| timer.writes(true)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -421,23 +551,42 @@ impl Renderer {
             }
         }
 
+        if let Some((timer, slot)) = timing {
+            timer.resolve(&mut encoder, slot, has_overlay);
+        }
         let commands = encoder.finish();
         let cpu_record_time = record_start.elapsed();
         self.gpu.queue.submit(Some(commands));
+        if let Some(slot) = timing.map(|(_, slot)| slot) {
+            self.gpu_timer.as_mut().expect("timing enabled").submitted(
+                slot,
+                GpuFrameKind::Meshes3d,
+                has_overlay,
+            );
+        }
         self.gpu.queue.present(frame);
-        Some(MeshSubmission {
+        let submission = MeshSubmission {
             instances: count,
             draw_calls,
             cpu_record_time,
-        })
+        };
+        self.diagnostic_finish(probe, GpuFrameKind::Meshes3d, requested, Some(submission));
+        Some(submission)
     }
 
     /// Draw one frame. Returns `false` when the frame was skipped because the
     /// surface was not ready (minimized, timed out, lost).
     pub fn render(&mut self, instances: &[Instance2d]) -> bool {
+        let probe = self.diagnostic_start();
         let Some(frame) = self.gpu.acquire_frame() else {
+            self.diagnostic_finish(probe, GpuFrameKind::Triangles2d, instances.len(), None);
             return false;
         };
+        let record_start = probe.map(|_| Instant::now());
+        let timing = self
+            .gpu_timer
+            .as_ref()
+            .and_then(|timer| timer.free_slot().map(|slot| (timer, slot)));
 
         let view = frame
             .texture
@@ -475,7 +624,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: timing.map(|(timer, _)| timer.writes(false)),
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -485,8 +634,30 @@ impl Renderer {
             }
         }
 
-        self.gpu.queue.submit(Some(encoder.finish()));
+        if let Some((timer, slot)) = timing {
+            timer.resolve(&mut encoder, slot, false);
+        }
+        let commands = encoder.finish();
+        let cpu_record_time = record_start.map_or(Duration::ZERO, |start| start.elapsed());
+        self.gpu.queue.submit(Some(commands));
+        if let Some(slot) = timing.map(|(_, slot)| slot) {
+            self.gpu_timer.as_mut().expect("timing enabled").submitted(
+                slot,
+                GpuFrameKind::Triangles2d,
+                false,
+            );
+        }
         self.gpu.queue.present(frame);
+        self.diagnostic_finish(
+            probe,
+            GpuFrameKind::Triangles2d,
+            instances.len(),
+            Some(MeshSubmission {
+                instances: count,
+                draw_calls: count,
+                cpu_record_time,
+            }),
+        );
         true
     }
 }

@@ -5,6 +5,8 @@
 //! pattern at a fixed rate, renders the resulting cube grid, and continuously
 //! verifies the engine features it is demonstrating.
 
+mod debug;
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,7 +26,7 @@ use fate_engine::diagnostics::{
     BudgetPolicy, Diagnostics, FrameDiagnostics, FrameReport, FrameSample,
 };
 use fate_engine::math::Vec3;
-use fate_engine::renderer::{Camera3d, Mesh3d, Renderer};
+use fate_engine::renderer::{Camera3d, Mesh3d, Overlay, Renderer, RendererOptions};
 use fate_engine::time::Time;
 
 const CAMERA_LOOK_SENSITIVITY: f32 = 0.0025;
@@ -49,6 +51,8 @@ struct RenderFrame {
     submit_ms: f32,
     visible: usize,
     drawn: usize,
+    draw_calls: usize,
+    record_ms: f32,
 }
 
 struct App {
@@ -71,6 +75,9 @@ struct App {
     paused: bool,
     title_timer: f32,
     status_timer: f32,
+    debug: Option<debug::DebugSession>,
+    culling: bool,
+    instance_limit: usize,
 }
 
 impl App {
@@ -103,6 +110,9 @@ impl App {
             paused: false,
             title_timer: 0.0,
             status_timer: 0.0,
+            debug: None,
+            culling: true,
+            instance_limit: Renderer::max_instance_budget(),
         }
     }
 
@@ -115,7 +125,7 @@ impl App {
         self.last_verify_ms = verify_ms;
         self.update_camera(frame_dt);
 
-        if !self.focused {
+        if !self.focused && !self.debug.as_ref().is_some_and(|d| d.window.is_some()) {
             self.input.end_frame();
             self.update_presentation(frame_dt);
             return false;
@@ -130,6 +140,7 @@ impl App {
         self.last_report = self.diagnostics.record_frame(sample);
         self.refresh_source(alpha, frame.drawn, frame.visible);
         self.sample_source();
+        self.record_debug_frame(frame, sim_ms);
 
         if self.last_report.policy != self.last_policy {
             if self.last_report.policy == BudgetPolicy::Healthy {
@@ -211,24 +222,34 @@ impl App {
         let mut instances = Vec::with_capacity(scene::ARENA.len() + self.sim.tracked_count());
         instances.extend_from_slice(&scene::ARENA);
         instances.extend(self.sim.render_instances(alpha));
-        let (draws, visible) =
-            scene::build_draws(mesh, &renderer.camera_3d, renderer.aspect(), &instances);
-        let drawn = renderer.budgeted_instance_count(draws.len());
+        let (mut draws, visible) = if self.culling {
+            scene::build_draws(mesh, &renderer.camera_3d, renderer.aspect(), &instances)
+        } else {
+            scene::build_draws_with_culling(
+                mesh,
+                &renderer.camera_3d,
+                renderer.aspect(),
+                &instances,
+                false,
+            )
+        };
+        draws.truncate(self.instance_limit);
         let draw_list_ms = draw_start.elapsed().as_secs_f32() * 1000.0;
 
         let submit_start = Instant::now();
-        let rendered = self
-            .renderer
-            .as_mut()
-            .is_some_and(|renderer| renderer.render_meshes(&draws));
+        let submission = self.renderer.as_mut().and_then(|renderer| {
+            renderer.render_meshes_with_overlay_report(&draws, &Overlay::default())
+        });
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
 
         RenderFrame {
-            rendered,
+            rendered: submission.is_some(),
             draw_list_ms,
             submit_ms,
             visible,
-            drawn,
+            drawn: submission.map_or(0, |s| s.instances),
+            draw_calls: submission.map_or(0, |s| s.draw_calls),
+            record_ms: submission.map_or(0.0, |s| s.cpu_record_time.as_secs_f32() * 1000.0),
         }
     }
 
@@ -242,7 +263,10 @@ impl App {
         if self.orbit_mode {
             self.orbit_angle = (self.orbit_angle + ORBIT_SPEED * dt) % std::f32::consts::TAU;
             if let Some(renderer) = &mut self.renderer {
-                renderer.camera_3d = orbit_camera(self.orbit_angle);
+                let orbit = orbit_camera(self.orbit_angle);
+                renderer.camera_3d.position = orbit.position;
+                renderer.camera_3d.yaw = orbit.yaw;
+                renderer.camera_3d.pitch = orbit.pitch;
             }
             return;
         }
@@ -520,6 +544,10 @@ impl App {
                     self.toggle_replay();
                     return;
                 }
+                KeyCode::F3 => {
+                    self.open_debug(event_loop);
+                    return;
+                }
                 KeyCode::F4 => {
                     self.force_snapshot_check();
                     return;
@@ -551,8 +579,13 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
 
-        let mut renderer = pollster::block_on(Renderer::new(window.clone()))
-            .expect("failed to initialize renderer");
+        let mut renderer = pollster::block_on(Renderer::new_with_options(
+            window.clone(),
+            RendererOptions {
+                gpu_timing: self.debug.is_some(),
+            },
+        ))
+        .expect("failed to initialize renderer");
         renderer.camera_3d = orbit_camera(self.orbit_angle);
 
         let mesh = match renderer.cube_mesh() {
@@ -566,6 +599,9 @@ impl ApplicationHandler for App {
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.mesh = mesh;
+        // Startup/companion creation must not become a simulation backlog.
+        self.open_debug(event_loop);
+        self.time = Time::new(SIMULATION_HZ as f32);
 
         log::info!(
             target: "fate.showcase",
@@ -576,9 +612,16 @@ impl ApplicationHandler for App {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.debug_event(window_id, &event) {
+            return;
+        }
+        if self.window.as_ref().is_none_or(|w| w.id() != window_id) {
+            return;
+        }
+        self.record_debug_event(&event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Focused(focused) => {
@@ -600,6 +643,7 @@ impl ApplicationHandler for App {
             }
             WindowEvent::RedrawRequested => {
                 let _ = self.step_frame();
+                self.debug_smoke_step(event_loop);
             }
             _ => {}
         }
@@ -621,11 +665,14 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        let frame_budget = Duration::from_millis(if self.focused {
-            Time::frame_budget_ms()
-        } else {
-            50
-        });
+        self.request_debug_redraw();
+        let frame_budget = Duration::from_millis(
+            if self.focused || self.debug.as_ref().is_some_and(|d| d.window.is_some()) {
+                Time::frame_budget_ms()
+            } else {
+                50
+            },
+        );
         event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame_budget));
 
         if let Some(window) = &self.window {
@@ -702,13 +749,18 @@ fn update_fps_camera(camera: &mut Camera3d, input: FpsCameraInput) {
     }
 }
 
-pub async fn run() {
+pub async fn run(debug: bool, smoke: bool, inbox: Option<fate_debug::LogInbox>) {
     let event_loop = EventLoop::new().expect("failed to create event loop");
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + Duration::from_millis(Time::frame_budget_ms()),
     ));
 
     let mut app = App::new();
+    if debug {
+        let mut session = debug::DebugSession::new(smoke);
+        session.logs = inbox;
+        app.debug = Some(session);
+    }
     event_loop.run_app(&mut app).expect("event loop error");
 }
 

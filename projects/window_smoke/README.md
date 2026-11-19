@@ -28,7 +28,32 @@ cargo run -p fate_window_smoke
 ```
 
 The process prints the number of submitted and skipped frames when it exits.
-This is a seam check, not a benchmark; it makes no performance claims.
+The default run is a seam check, not a performance benchmark.
+
+### Optional GPU timings
+
+Add `--dbg` to open the reusable native diagnostics companion alongside this
+consumer, including with `--mesh-load` or `--surface-lifecycle`:
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --mesh-load --dbg
+```
+
+The companion attaches directly to the renderer; the smoke app does not build
+project-specific inspection UI. This validates the same integration available
+to other engine projects. `--dbg --gpu-timing` also checks that the existing
+GPU polling API and the diagnostics subscription can coexist.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --gpu-timing
+cargo run --release --locked -p fate_window_smoke -- --mesh-load --gpu-timing
+```
+
+The first command reports separate 3D and overlay pass durations. The second
+reports the 3D pass for the 256-instance load alongside its CPU timings. GPU
+samples exclude surface acquisition, presentation, and time between passes.
+If the adapter does not support timestamp queries, the smoke run still draws
+and prints that GPU timing is unavailable.
 
 ### Surface lifecycle regression
 

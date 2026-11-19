@@ -215,6 +215,10 @@ impl ShowcaseSim {
         self.tracked.len()
     }
 
+    pub fn tracked_entities(&self) -> &[Entity] {
+        &self.tracked
+    }
+
     pub fn world_diagnostics(&self) -> WorldDiagnostics {
         self.core.world.diagnostics()
     }

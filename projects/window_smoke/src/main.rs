@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 
 use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{
-    Draw3d, Mesh3d, MeshVertex, Overlay, Renderer, SceneDraw3d, TextDraw, Texture2d,
-    TextureOptions, TextureRegion, UiClip, UiImage, UiRect, UvMeshVertex, text_width, wrap_text,
+    Draw3d, GpuFrameKind, GpuFrameTiming, Mesh3d, MeshVertex, Overlay, Renderer, RendererOptions,
+    SceneDraw3d, TextDraw, Texture2d, TextureOptions, TextureRegion, UiClip, UiImage, UiRect,
+    UvMeshVertex, text_width, wrap_text,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -158,21 +159,53 @@ struct LoadSample {
 }
 
 fn main() {
-    let mode = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
-        [] => Mode::Showcase,
-        [mode] if mode == "--surface-lifecycle" => Mode::Lifecycle,
-        [mode] if mode == "--mesh-load" => Mode::MeshLoad,
-        _ => {
-            eprintln!("usage: fate_window_smoke [--surface-lifecycle | --mesh-load]");
-            std::process::exit(2);
+    let mut mode = Mode::Showcase;
+    let mut gpu_timing = false;
+    let mut debug = false;
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--gpu-timing" if !gpu_timing => gpu_timing = true,
+            "--dbg" if !debug => debug = true,
+            "--surface-lifecycle" if mode == Mode::Showcase => mode = Mode::Lifecycle,
+            "--mesh-load" if mode == Mode::Showcase => mode = Mode::MeshLoad,
+            _ => {
+                eprintln!(
+                    "usage: fate_window_smoke [--surface-lifecycle | --mesh-load] [--gpu-timing] [--dbg]"
+                );
+                std::process::exit(2);
+            }
         }
-    };
+    }
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let mut app = SmokeApp {
         mode,
+        gpu_timing,
+        debug: debug.then(|| fate_debug::DebugCompanion::new(true)),
         ..Default::default()
     };
     event_loop.run_app(&mut app).expect("event loop failed");
+    app.collect_gpu_timings();
+    if let Some(debug) = &mut app.debug {
+        debug.update();
+        assert!(
+            debug.model().submitted > 0,
+            "generic diagnostics received no render telemetry"
+        );
+        if debug.model().gpu_available {
+            assert!(
+                !debug.model().gpu.is_empty(),
+                "generic diagnostics received no GPU telemetry"
+            );
+        }
+        println!(
+            "generic diagnostics: {} submissions, {} GPU samples",
+            debug.model().submitted,
+            debug.model().gpu.len()
+        );
+    }
+    if gpu_timing {
+        app.report_gpu_timings();
+    }
     if mode == Mode::Lifecycle {
         assert!(
             app.lifecycle.is_some_and(|test| test.is_complete()),
@@ -218,14 +251,77 @@ struct SmokeApp {
     textured_mesh: Option<Mesh3d>,
     texture: Option<Texture2d>,
     mode: Mode,
+    gpu_timing: bool,
+    gpu_timings: Vec<GpuFrameTiming>,
     lifecycle: Option<Lifecycle>,
     load_samples: Vec<LoadSample>,
     redraws: u32,
     submitted: u32,
     skipped: u32,
+    debug: Option<fate_debug::DebugCompanion>,
 }
 
 impl SmokeApp {
+    fn collect_gpu_timings(&mut self) {
+        if self.gpu_timing
+            && let Some(renderer) = &mut self.renderer
+        {
+            self.gpu_timings.extend(renderer.poll_gpu_timings());
+        }
+    }
+
+    fn report_gpu_timings(&self) {
+        let Some(renderer) = &self.renderer else {
+            return;
+        };
+        if !renderer.gpu_timing_available() {
+            println!("GPU timing unavailable on this adapter");
+            return;
+        }
+        fn report(label: &str, samples: impl Iterator<Item = Duration>) -> usize {
+            let mut times: Vec<_> = samples.collect();
+            if times.is_empty() {
+                return 0;
+            }
+            times.sort_unstable();
+            let p50 = times[(times.len() - 1) / 2].as_secs_f64() * 1000.0;
+            let p95 = times[(times.len() * 95).div_ceil(100) - 1].as_secs_f64() * 1000.0;
+            println!(
+                "GPU {label}: {} samples, p50/p95 {p50:.3}/{p95:.3} ms",
+                times.len()
+            );
+            times.len()
+        }
+        let triangles = report(
+            "2D pass",
+            self.gpu_timings
+                .iter()
+                .filter(|sample| sample.kind == GpuFrameKind::Triangles2d)
+                .map(|sample| sample.scene),
+        );
+        let meshes = report(
+            "3D pass",
+            self.gpu_timings
+                .iter()
+                .filter(|sample| sample.kind == GpuFrameKind::Meshes3d)
+                .map(|sample| sample.scene),
+        );
+        let overlay = report(
+            "overlay pass",
+            self.gpu_timings.iter().filter_map(|sample| sample.overlay),
+        );
+        assert!(
+            meshes > 0,
+            "GPU timing requested but no 3D samples completed"
+        );
+        if self.mode == Mode::Lifecycle {
+            assert!(triangles > 0, "no 2D GPU samples during lifecycle smoke");
+        }
+        if self.mode == Mode::Showcase {
+            assert!(overlay > 0, "no overlay GPU samples during showcase");
+        }
+    }
+
     fn render_mesh_load(&mut self) -> bool {
         let (Some(renderer), Some(mesh)) = (self.renderer.as_mut(), self.mesh.as_ref()) else {
             return false;
@@ -454,8 +550,17 @@ impl ApplicationHandler for SmokeApp {
                 .expect("failed to create window"),
         );
 
-        let renderer = pollster::block_on(Renderer::new(window.clone()))
-            .expect("failed to initialize renderer");
+        let mut renderer = pollster::block_on(Renderer::new_with_options(
+            window.clone(),
+            RendererOptions {
+                gpu_timing: self.gpu_timing || self.debug.is_some(),
+            },
+        ))
+        .expect("failed to initialize renderer");
+        if let Some(debug) = &mut self.debug {
+            debug.attach_renderer("Window smoke", &mut renderer);
+            pollster::block_on(debug.open(event_loop)).expect("failed to open diagnostics");
+        }
         let mesh = renderer
             .create_mesh("smoke pyramid", PYRAMID_VERTICES, PYRAMID_INDICES)
             .expect("failed to create mesh");
@@ -483,9 +588,17 @@ impl ApplicationHandler for SmokeApp {
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
+        window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let Some(debug) = &mut self.debug
+            && debug.on_window_event(window_id, &event)
+        {
+            return;
+        }
+        if self.window.as_ref().is_none_or(|w| w.id() != window_id) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
@@ -494,6 +607,7 @@ impl ApplicationHandler for SmokeApp {
                 }
             }
             WindowEvent::RedrawRequested if self.mode != Mode::Lifecycle => {
+                self.collect_gpu_timings();
                 let submitted = if self.mode == Mode::MeshLoad {
                     self.render_mesh_load()
                 } else {
@@ -514,7 +628,17 @@ impl ApplicationHandler for SmokeApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + FRAME_INTERVAL));
+        let mut deadline = Instant::now() + FRAME_INTERVAL;
+        if let Some(debug) = &mut self.debug {
+            debug.update();
+            if let Some(debug_deadline) = debug.next_deadline() {
+                deadline = deadline.min(debug_deadline);
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        if self.mode == Mode::Lifecycle {
+            self.collect_gpu_timings();
+        }
         if let (Some(test), Some(window), Some(renderer), Some(mesh)) = (
             self.lifecycle.as_mut(),
             self.window.as_ref(),

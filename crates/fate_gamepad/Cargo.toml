@@ -1,0 +1,19 @@
+[package]
+name = "fate_gamepad"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+gilrs = "0.11.2"
+log = "0.4.35"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Devices_Enumeration",
+    "Devices_HumanInterfaceDevice",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage",
+    "Storage_Streams",
+] }

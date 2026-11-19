@@ -9,6 +9,7 @@ Run from the repository root:
 
 ```powershell
 cargo run -p fate_demo
+cargo run --release -p fate_demo -- --dbg
 ```
 
 Or run `cargo run` from this directory.
@@ -43,6 +44,7 @@ objectives, scoring, or win/lose rules.
 - **Space** — pause or resume the simulation.
 - **F1** — toggle periodic verbose diagnostics logging.
 - **F2** — toggle replay verification.
+- **F3** — reopen the diagnostics companion when launched with `--dbg`.
 - **F4** — run a snapshot round-trip check immediately.
 - **Escape** — release the cursor; press again (or from orbit mode) to quit.
 
@@ -50,8 +52,7 @@ The free camera has no collision and is not a character controller.
 
 ## Diagnostics
 
-The engine has no built-in profiler, overlay, or text renderer, so presentation
-is owned by the demo:
+Diagnostics presentation is consumer-owned:
 
 - The window title refreshes twice per second with frame timings, draw load,
   budget tier, simulation tick, state hash, and verification status.
@@ -63,6 +64,42 @@ is owned by the demo:
   even when verbose diagnostics are off.
 - Frame-budget tier changes are logged as they happen: warnings for `warning`
   or `critical`, and an info line when the frame returns to `healthy`.
+
+### Native companion (`--dbg`)
+
+Opens a separate dark-green diagnostics window:
+
+- **Overview:** frame cadence, CPU phases, asynchronous GPU duration, draw counts,
+  hoverable history, adjustable budget marker and trace freeze/resume.
+- **Renderer:** device/driver/limits, GPU history, culling toggle and instance cap.
+- **Simulation:** live state/hash, pause, single tick, reset, replay toggle and
+  immediate snapshot round-trip verification.
+- **Camera:** orbit/free mode, reset, position, yaw/pitch, field of view and clip planes.
+- **Entities:** filterable render candidates, frustum visibility, selection and
+  copyable world positions.
+- **Events:** engine logs (respecting `RUST_LOG`), input, lifecycle and tool results.
+- **Capture:** CPU/GPU CSV, inspection/event report, clipboard copy and binary
+  simulation snapshots. Snapshot files go to `diagnostics-captures/`; trace/report
+  exports use the directory entered in the window. Existing files are not overwritten.
+
+Both windows continue updating while unfocused. Closing the companion leaves
+the showcase running; F3 reopens it. Minimized windows skip drawing while
+bounded telemetry continues collecting. Freeze holds CPU/GPU history only;
+inspection and events remain live. Closing the showcase ends the session.
+
+History retains 1,200 samples per stream and 500 events. The UI refreshes at
+20 Hz; entity/event lists render only visible rows. The companion uses its own
+GPU device: its rendering is outside scene pass timings, but its load can still
+affect scene frame cadence. Compare optimized runs with and without `--dbg`.
+
+Run the optional window/GPU regression:
+
+```powershell
+cargo run --release -p fate_demo -- --dbg-smoke
+```
+
+The reusable integration API is documented in
+[`fate_debug`](../../crates/fate_debug/README.md).
 
 The default `env_logger` filter is `fate.showcase=info,warn`. Override it with
 `RUST_LOG` when running, for example:

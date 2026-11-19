@@ -1,6 +1,6 @@
 //! Consumer-owned diagnostics sink and source for the capability showcase.
 //!
-//! The engine deliberately has no profiler, overlay, or exporter. This module
+//! The engine deliberately does not own diagnostics presentation. This module
 //! shows how a consumer can collect the engine's structured values, combine
 //! them with project state, and publish them through `log` without adding
 //! presentation policy to the engine.

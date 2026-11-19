@@ -63,6 +63,13 @@ impl std::error::Error for GpuInitError {}
 
 impl Gpu {
     pub async fn new(window: Arc<Window>) -> Result<Self, GpuInitError> {
+        Self::new_with_timestamps(window, false).await
+    }
+
+    pub(crate) async fn new_with_timestamps(
+        window: Arc<Window>,
+        timestamps: bool,
+    ) -> Result<Self, GpuInitError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 
         // `Arc<Window>` is `'static`, so the surface outlives the window handle.
@@ -83,6 +90,11 @@ impl Gpu {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("engine device"),
+                required_features: if timestamps {
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+                } else {
+                    wgpu::Features::empty()
+                },
                 ..Default::default()
             })
             .await
@@ -145,7 +157,10 @@ impl Gpu {
         }
     }
 
-    pub(crate) fn acquire_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
+    /// Acquire a drawable frame, recovering recoverable surface errors.
+    ///
+    /// Custom consumer renderers must present or drop it before resizing.
+    pub fn acquire_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
         use wgpu::CurrentSurfaceTexture;
 
         if self.suspended || self.window.is_minimized() == Some(true) {

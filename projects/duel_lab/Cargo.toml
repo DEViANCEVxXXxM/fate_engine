@@ -1,0 +1,15 @@
+[package]
+name = "fate_duel_lab"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[features]
+windowed = ["dep:fate_engine", "dep:fate_gamepad", "dep:pollster", "dep:winit"]
+
+[dependencies]
+fate_sim = { path = "../../crates/fate_sim" }
+fate_engine = { path = "../..", optional = true }
+fate_gamepad = { path = "../../crates/fate_gamepad", optional = true }
+pollster = { version = "1.0.1", optional = true }
+winit = { version = "0.30.13", optional = true }

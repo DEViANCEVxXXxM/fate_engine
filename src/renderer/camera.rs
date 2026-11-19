@@ -204,6 +204,28 @@ impl Camera3d {
         self.projection_matrix(aspect).mul(self.view_matrix())
     }
 
+    /// World-space ray `(origin, direction)` through a physical pixel measured
+    /// from the viewport's top-left corner. The direction is normalized.
+    pub fn ray_from_pixel(&self, pixel: Vec2, viewport: (u32, u32)) -> Option<(Vec3, Vec3)> {
+        let (width, height) = (viewport.0 as f32, viewport.1 as f32);
+        if width == 0.0
+            || height == 0.0
+            || !(0.0..=width).contains(&pixel.x)
+            || !(0.0..=height).contains(&pixel.y)
+        {
+            return None;
+        }
+        let (forward, right, up) = self.basis();
+        let half_height = (self.safe_fov_y() * 0.5).tan();
+        let half_width = half_height * Self::safe_aspect(width / height);
+        let x = (pixel.x / width * 2.0 - 1.0) * half_width;
+        let y = (1.0 - pixel.y / height * 2.0) * half_height;
+        Some((
+            self.safe_position(),
+            (forward + right * x + up * y).normalize(),
+        ))
+    }
+
     /// View frustum matching `view_projection(aspect)`.
     ///
     /// Consumers can use this to filter draw candidates; the renderer does not
@@ -217,6 +239,28 @@ impl Camera3d {
 mod tests {
     use super::*;
     use crate::renderer::visibility::Bounds3d;
+
+    #[test]
+    fn screen_rays_match_perspective_and_top_left_coordinates() {
+        let camera = Camera3d {
+            fov_y_radians: std::f32::consts::FRAC_PI_2,
+            ..Default::default()
+        };
+        let (origin, center) = camera
+            .ray_from_pixel(Vec2::new(400.0, 200.0), (800, 400))
+            .unwrap();
+        assert_eq!(origin, camera.position);
+        assert_eq!(center, camera.forward());
+        let (_, corner) = camera.ray_from_pixel(Vec2::ZERO, (800, 400)).unwrap();
+        assert!((corner.x / -corner.z + 2.0).abs() < 1e-5);
+        assert!((corner.y / -corner.z - 1.0).abs() < 1e-5);
+        assert!(camera.ray_from_pixel(Vec2::ZERO, (800, 0)).is_none());
+        assert!(
+            camera
+                .ray_from_pixel(Vec2::new(f32::NAN, 0.0), (800, 400))
+                .is_none()
+        );
+    }
 
     #[test]
     fn center_of_view_maps_to_origin() {

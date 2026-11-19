@@ -2,3 +2,5 @@
 /docs/private/
 run.*
 *.log
+/diagnostics-captures/
+/.impeccable/review/

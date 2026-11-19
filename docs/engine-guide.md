@@ -771,6 +771,19 @@ simulation state, replay data, or snapshots.
 
 ### Frame diagnostics and metric sinks
 
+For a native companion, run `cargo run --release -p fate_demo -- --dbg`.
+The separate `fate_debug` crate owns UI, history and export. Its
+`DebugCompanion` adapter can attach to any `Renderer`, route its own winit
+events, and refresh while unfocused. Applications may add inspectors and
+commands; no application rules are required for basic renderer diagnostics.
+See the [integration guide](../crates/fate_debug/README.md).
+
+`Renderer::subscribe_diagnostics()` exposes a presentation-neutral bounded
+channel of 2D/3D render counts, call/recording durations, skipped frames and
+GPU pass samples (when enabled). A slow reader drops telemetry, never rendering;
+`take_dropped()` reports overflow. GPU sample IDs are independent of CPU frame
+IDs. Existing `poll_gpu_timings()` remains usable with a subscription.
+
 `fate_engine::diagnostics` provides reusable, consumer-owned diagnostics:
 
 - `FrameSample` describes one frame's measured CPU phases: fixed-step
@@ -861,14 +874,20 @@ Keep these measurements distinct; they answer different questions:
   It does not initialize a GPU, so render submission and GPU execution are
   excluded.
 - `FrameSample`/`FrameReport` separate simulation, CPU draw-list preparation,
-  and CPU render submission. GPU execution time is not measured; adding it
-  would require backend timestamp queries.
+  and CPU render submission. They do not include GPU timings.
+- To sample GPU passes separately, construct the renderer with
+  `Renderer::new_with_options` and `RendererOptions { gpu_timing: true }`.
+  Check `gpu_timing_available()` and drain completed samples with
+  `poll_gpu_timings()`. Results can arrive on later frames and exclude surface
+  acquisition, presentation, and time between passes. Rendering still works
+  when timestamps are unavailable or the consumer does not drain the samples.
 
 Run performance commands in release mode against a fixed workload:
 
 ```powershell
 cargo run --release -p fate_sim_bench -- --ticks 10000
 cargo run --release -p fate_engine --example draw_list_bench
+cargo run --release -p fate_window_smoke -- --mesh-load --gpu-timing
 ```
 
 Record the toolchain, platform, workload, and build profile with any result.

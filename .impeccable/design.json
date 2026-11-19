@@ -1,0 +1,163 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-19T00:00:00Z",
+  "title": "Design System: Fate Diagnostics",
+  "extensions": {
+    "platform": {
+      "kind": "native-windows-desktop",
+      "toolkit": ["Rust", "egui", "winit", "wgpu"],
+      "unit": "egui logical point; not CSS print point",
+      "primitiveAuthority": "DESIGN.md YAML frontmatter",
+      "sources": ["crates/fate_debug/src/ui.rs", "crates/fate_debug/src/window.rs"],
+      "ownership": "Consumer-side toolkit; applications supply inspection data and execute returned commands.",
+      "componentRepresentation": "Native descriptions and source symbols; no HTML/CSS previews or raster assets.",
+      "inheritedDefaults": ["egui font metrics", "ordinary widget corner radii", "keyboard focus behavior", "disabled treatment", "transient-widget shadows", "widget animation timing"],
+      "tonalRamps": "No tonal ramps are defined by the implementation; no synthetic colors are normative."
+    },
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Forest-black canvas" },
+      "panel": { "role": "neutral", "displayName": "Inset forest surface" },
+      "rail": { "role": "neutral", "displayName": "Deep green rail" },
+      "line": { "role": "neutral", "displayName": "Fine green boundary" },
+      "text": { "role": "neutral", "displayName": "Pale green text" },
+      "muted": { "role": "neutral", "displayName": "Muted sage" },
+      "lime": { "role": "primary", "displayName": "Selection lime" },
+      "teal": { "role": "secondary", "displayName": "CPU teal" },
+      "amber": { "role": "semantic", "displayName": "Budget and warning amber" },
+      "error": { "role": "semantic", "displayName": "Error coral" }
+    },
+    "typographyMeta": {
+      "heading": { "purpose": "Page headings and proportional summary values." },
+      "section": { "purpose": "Section headings with egui strong emphasis." },
+      "mono": { "purpose": "Inspection values, phase durations, coordinates and event timestamps." },
+      "chart-axis": { "purpose": "Millisecond tick labels." }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": [
+      { "name": "summary-two-columns", "value": "available content width < 720 logical points" },
+      { "name": "overview-lower-stack", "value": "available content width < 650 logical points" },
+      { "name": "inspection-two-columns", "value": "available content width >= 760 logical points and controls exist" }
+    ],
+    "nativeWindow": {
+      "title": "Fate / Diagnostics",
+      "initialClientSize": [1160, 800],
+      "minimumClientSize": [720, 520],
+      "theme": "Dark",
+      "nativeDecorations": true,
+      "captionColor": "{colors.native-caption}",
+      "captionTextColor": "{colors.text}",
+      "borderColor": "{colors.line}",
+      "dwmFallback": "Retain OS defaults if cosmetic attributes are rejected.",
+      "closeBehavior": "Close companion without closing host.",
+      "rendering": "Separate GPU context; use non-sRGB surface format when supported for egui gamma-space blending."
+    },
+    "layout": {
+      "navigationWidth": 185,
+      "navigationResizable": false,
+      "globalMinimumInteractionHeight": 28,
+      "inspectionInteractionHeight": 20,
+      "readOnlyOverviewInteractionHeight": 18,
+      "inspectionGridSpacing": [16, 8],
+      "inspectionMaximumColumnWidth": "max(available_width * 0.57, 140)",
+      "virtualRowHeight": 28,
+      "entityCellWidth": "max((available_width - 40) / 5, 65)",
+      "sourceComboWidth": 145,
+      "entityFilterWidth": 220,
+      "eventFilterWidth": 250,
+      "pageBody": "vertical scroll; header and shell remain outside",
+      "narrowInspectorOrder": ["Tools", "Inspection"]
+    },
+    "strokes": {
+      "panel": { "width": 1, "color": "{colors.line}" },
+      "widgetHoverAndActive": { "width": 1, "color": "{colors.lime}" },
+      "series": { "width": 1.6 },
+      "grid": { "width": 1, "color": "{colors.line}" },
+      "budget": { "width": 1, "color": "{colors.amber}" },
+      "cursor": { "width": 1, "color": "{colors.muted}" }
+    },
+    "charts": {
+      "frameHeight": 175,
+      "gpuHeight": 180,
+      "plotInsets": { "left": 48, "top": 10, "right": 8, "bottom": 20 },
+      "horizontalGridlines": 5,
+      "yAxisUnit": "ms",
+      "yMaximum": "1.15 * max(finite series values, optional budget, 0.01)",
+      "xAxis": "oldest to newest; uniformly spaced sample indices",
+      "seriesColors": { "interval": "{colors.lime}", "cpu": "{colors.teal}", "gpuScene": "{colors.lime}" },
+      "traceOptions": [120, 300, 1200],
+      "defaultTraceCount": 300,
+      "budgetRangeMs": [1, 1000],
+      "budgetDragSpeed": 0.25,
+      "hoverDecimals": 3,
+      "minimumLineSamples": 2,
+      "gpuSemantics": "Completed asynchronous scene-pass durations; excludes acquire, present and gaps; not CPU-frame aligned.",
+      "phaseBar": { "height": 4, "track": "{colors.line}", "fill": "{colors.teal}", "fraction": "clamp(phase / max(cpu_total, 0.001), 0, 1)" }
+    },
+    "states": {
+      "live": { "label": "LIVE", "color": "{colors.lime}", "action": "Freeze trace" },
+      "frozen": { "label": "FROZEN", "color": "{colors.amber}", "action": "Resume trace", "scope": "CPU and GPU streams only; inspection and events stay live." },
+      "emptyChart": "Waiting for samples",
+      "gpuPending": "Waiting for completed GPU readbacks.",
+      "gpuUnavailable": "Timestamp queries are unavailable on the scene device.",
+      "exportSuccess": { "color": "{colors.lime}", "message": "Saved <path>" },
+      "exportFailure": { "color": "{colors.error}", "message": "Export failed: <error>. Check the directory and retry." },
+      "csvEnabled": "Corresponding retained stream is nonempty.",
+      "hostControlEnabled": "Consumer-provided enabled flag.",
+      "streamLimit": 1200,
+      "eventLimit": 500
+    },
+    "reviewEvidence": {
+      "status": "Parent reports finish review shipped after validating all eleven fresh native captures; documentation pass visually sampled desktop and narrow.",
+      "captures": [
+        ".impeccable/review/desktop.png",
+        ".impeccable/review/narrow.png",
+        ".impeccable/review/renderer.png",
+        ".impeccable/review/simulation.png",
+        ".impeccable/review/camera.png",
+        ".impeccable/review/entities.png",
+        ".impeccable/review/events.png",
+        ".impeccable/review/capture.png",
+        ".impeccable/review/capture-export.png",
+        ".impeccable/review/frozen.png",
+        ".impeccable/review/background.png"
+      ]
+    }
+  },
+  "components": [
+    { "name": "Panel", "kind": "card", "refersTo": "panel", "description": "Native panel(ui): tonal fill, fine stroke, rounded corners and shared inset." },
+    { "name": "Button", "kind": "button", "refersTo": "button", "description": "egui button with weak widget fill, shared padding and lime hover/active stroke; focus and disabled behavior inherited." },
+    { "name": "Navigation", "kind": "nav", "refersTo": "navigation", "description": "Persistent left rail; selected variant references navigation-selected. Consumer capabilities determine available pages." },
+    { "name": "Text field", "kind": "input", "refersTo": "input", "description": "Single-line native egui TextEdit for filters and export directory." },
+    { "name": "Session status", "kind": "custom", "refersTo": "session", "description": "Bottom rail with uptime, submitted/skipped counts and companion identity." },
+    { "name": "Trace chart", "kind": "custom", "description": "chart(ui): painter-drawn sampled lines, shared millisecond axis, budget and nearest-index hover." },
+    { "name": "Inspection and tools", "kind": "custom", "description": "inspector(ui) and controls(ui): wrapping facts plus consumer-supplied actions, toggles and bounded numeric controls." },
+    { "name": "Capture", "kind": "custom", "description": "capture(ui): retained trace counts, clipboard/report/CSV actions, editable directory and explicit success/failure feedback." }
+  ],
+  "narrative": {
+    "northStar": "User-pinned dark green dashboard",
+    "overview": "A compact, workhorse inspection companion: forest-black canvas, green-tinted panels, fine borders and lime selection. Proportional labels establish hierarchy; monospace inspection values make precise readings easy to compare. Charts and real controls carry the identity rather than imagery.",
+    "keyCharacteristics": [
+      "Compact persistent navigation and scrollable inspection content.",
+      "Tonal green layering with restrained, semantic color.",
+      "Measured, bounded traces with explicit live and frozen states.",
+      "Native window behavior and code-drawn graphics."
+    ],
+    "rules": [
+      { "name": "The Measurement Rule", "body": "Frame interval, CPU work and GPU pass duration are different measurements; never merge their meanings.", "section": "components" },
+      { "name": "The Trace Rule", "body": "Freeze holds both retained streams; inspection and events remain live.", "section": "components" }
+    ],
+    "dos": [
+      "Do retain the compact green shell, semantic trace colors and native window controls.",
+      "Do distinguish measured streams and label unavailable or waiting data honestly.",
+      "Do keep presentation consumer-owned and execute host tools through returned commands.",
+      "Do preserve available-width stacking and vertical scrolling."
+    ],
+    "donts": [
+      "Don't fabricate telemetry or expose inactive placeholder tools.",
+      "Don't equate freezing a trace with pausing the host.",
+      "Don't replace the native UI with HTML/CSS or generated raster decoration.",
+      "Don't turn incidental egui defaults into explicit project-wide tokens."
+    ]
+  }
+}

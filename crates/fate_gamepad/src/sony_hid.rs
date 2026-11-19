@@ -19,7 +19,7 @@ use windows::Storage::FileAccessMode;
 use windows::Storage::Streams::DataReader;
 use windows::core::{HSTRING, Result};
 
-use crate::gamepad::{PadState, parse_sony_report};
+use crate::{LOG_TARGET, PadState, parse_sony_report};
 
 /// Vendor ID shared by Sony Interactive Entertainment controllers.
 const SONY_VENDOR_ID: u16 = 0x054C;
@@ -124,7 +124,7 @@ impl SonyHid {
         if stale {
             if let Some(pad) = self.pad.take() {
                 log::info!(
-                    target: "fate.combat",
+                    target: LOG_TARGET,
                     "Sony controller stopped reporting: {}",
                     pad.name
                 );
@@ -140,7 +140,7 @@ impl SonyHid {
             let started = Instant::now();
             let opened = self.try_open();
             log::debug!(
-                target: "fate.combat",
+                target: LOG_TARGET,
                 "Sony controller scan took {:?}",
                 started.elapsed()
             );
@@ -193,7 +193,7 @@ impl SonyHid {
                 match open_pad(&id, name) {
                     Ok(pad) => {
                         log::info!(
-                            target: "fate.combat",
+                            target: LOG_TARGET,
                             "controller connected: {} (read through the HID fallback)",
                             pad.name
                         );
@@ -201,7 +201,7 @@ impl SonyHid {
                         return true;
                     }
                     Err(error) => log::debug!(
-                        target: "fate.combat",
+                        target: LOG_TARGET,
                         "could not open Sony controller: {error}"
                     ),
                 }
@@ -243,7 +243,7 @@ fn open_pad(id: &HSTRING, name: String) -> Result<SonyPad> {
                 };
                 if shared.reports == 0 {
                     log::debug!(
-                        target: "fate.combat",
+                        target: LOG_TARGET,
                         "Sony controller report stream started (id {report_id:#04x}, {} bytes, \
                          sticks ({:+.2}, {:+.2}) ({:+.2}, {:+.2}), triggers {:.2}/{:.2})",
                         bytes.len(),
