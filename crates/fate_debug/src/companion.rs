@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use fate_engine::renderer::{
-    GpuFrameKind, MAX_DRAWN_TILES, RenderDiagnosticEvent, RenderDiagnosticReceiver, Renderer,
-    RendererOptions,
+    GpuFrameKind, MAX_DRAWN_TILES, MAX_TILE_LAYERS, RenderDiagnosticEvent,
+    RenderDiagnosticReceiver, Renderer, RendererOptions,
 };
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
@@ -117,7 +117,8 @@ impl DebugCompanion {
                 "Non-tile instance limit",
                 Renderer::max_instance_budget().to_string(),
             ),
-            ("Visible tile limit", MAX_DRAWN_TILES.to_string()),
+            ("Visible tiles / layer", MAX_DRAWN_TILES.to_string()),
+            ("Tile layer limit", MAX_TILE_LAYERS.to_string()),
             (
                 "Max texture dimension",
                 renderer

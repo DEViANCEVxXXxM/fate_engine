@@ -35,7 +35,7 @@ pub use texture::{
     Texture2d, TextureAddress, TextureCreateError, TextureFilter, TextureOptions, TextureRegion,
     TextureUpdateError,
 };
-pub use tilemap::{MAX_DRAWN_TILES, TileLayer2d, TileMap2d, TileMapError};
+pub use tilemap::{MAX_DRAWN_TILES, MAX_TILE_LAYERS, TileLayer2d, TileMap2d, TileMapError};
 pub use timing::{GpuFrameKind, GpuFrameTiming};
 pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiClip, UiImage, UiRect};
 pub use visibility::{Bounds2d, Bounds3d, Frustum3d, OrientedBounds2d};
@@ -496,13 +496,28 @@ impl Renderer {
 
     /// Draw one atlas-backed tile layer through [`Camera2d`], then the HUD.
     ///
-    /// Only cells covered by the camera are visited. Valid visible tiles share
-    /// a draw, bounded by [`MAX_DRAWN_TILES`] in row-major order.
+    /// This is a one-layer convenience wrapper around
+    /// [`Self::render_tile_layers_with_sprites`].
     pub fn render_tiles(&mut self, layer: TileLayer2d<'_>, overlay: &Overlay<'_>) -> bool {
-        self.render_tiles_with_sprites(layer, &[], overlay)
+        self.render_tile_layers(std::slice::from_ref(&layer), overlay)
     }
 
-    /// Draw a tile layer, then world-space sprites, then the screen-space HUD
+    /// Draw ordered atlas-backed tile layers through [`Camera2d`], then the HUD.
+    ///
+    /// Layers composite in slice order, up to [`MAX_TILE_LAYERS`]. Only cells
+    /// covered by the camera are visited, and each layer submits at most
+    /// [`MAX_DRAWN_TILES`] visible tiles in row-major order. A layer's
+    /// [`TileLayer2d::parallax`] scales its camera travel, and its
+    /// [`TileLayer2d::offset`] adds a world-space shift on top.
+    pub fn render_tile_layers(
+        &mut self,
+        layers: &[TileLayer2d<'_>],
+        overlay: &Overlay<'_>,
+    ) -> bool {
+        self.render_tile_layers_with_sprites(layers, &[], overlay)
+    }
+
+    /// Draw tile layers, then world-space sprites, then the screen-space HUD
     /// in one submission. Tile and sprite limits apply independently.
     pub fn render_tiles_with_sprites(
         &mut self,
@@ -510,9 +525,22 @@ impl Renderer {
         sprites: &[Sprite2d<'_>],
         overlay: &Overlay<'_>,
     ) -> bool {
+        self.render_tile_layers_with_sprites(std::slice::from_ref(&layer), sprites, overlay)
+    }
+
+    /// Draw ordered tile layers, then world-space sprites, then the HUD.
+    ///
+    /// Sprites draw above every tile layer. Each layer has its own visible-tile
+    /// budget, and sprites use the ordinary [`MAX_DRAWN_INSTANCES`] budget.
+    pub fn render_tile_layers_with_sprites(
+        &mut self,
+        layers: &[TileLayer2d<'_>],
+        sprites: &[Sprite2d<'_>],
+        overlay: &Overlay<'_>,
+    ) -> bool {
         self.render_2d(
             Scene2d::Tiles {
-                layer,
+                layers,
                 sprites,
                 view: self.camera.visible_bounds(self.aspect()),
             },
@@ -524,9 +552,16 @@ impl Renderer {
         let (kind, requested) = match scene {
             Scene2d::Triangles(items) => (GpuFrameKind::Triangles2d, items.len()),
             Scene2d::Sprites(items) => (GpuFrameKind::Sprites2d, items.len()),
-            Scene2d::Tiles { layer, sprites, .. } => (
+            Scene2d::Tiles {
+                layers, sprites, ..
+            } => (
                 GpuFrameKind::TileMap2d,
-                layer.map.cell_count().saturating_add(sprites.len()),
+                layers
+                    .iter()
+                    .take(MAX_TILE_LAYERS)
+                    .fold(sprites.len(), |total, layer| {
+                        total.saturating_add(layer.map.cell_count())
+                    }),
             ),
         };
         let probe = self.diagnostic_start();

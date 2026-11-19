@@ -504,8 +504,8 @@ impl ImageRenderer {
         Self::with_pipeline(
             device,
             self.pipeline.clone(),
-            super::MAX_DRAWN_TILES,
-            "2D tiles",
+            super::MAX_DRAWN_TILES * super::MAX_TILE_LAYERS,
+            "2D tile layers",
         )
     }
 
@@ -578,12 +578,12 @@ impl ImageRenderer {
         )
     }
 
-    pub(super) fn write_tiles(
+    pub(super) fn write_tile_layers(
         &mut self,
         queue: &wgpu::Queue,
         surface: (u32, u32),
         projection: crate::math::Mat4,
-        layer: super::TileLayer2d<'_>,
+        layers: &[super::TileLayer2d<'_>],
         view: super::Bounds2d,
     ) -> usize {
         let scissor = Scissor {
@@ -595,38 +595,79 @@ impl ImageRenderer {
         let m = projection.to_cols_array();
         let project_x = |x| m[0] * x + m[12];
         let project_y = |y| m[5] * y + m[13];
-        self.write_quads(
-            queue,
-            layer.map.visible_cells(view).filter_map(|(cell, id)| {
-                let region = *layer.regions.get(usize::from(id))?;
-                if !region.is_finite() {
-                    return None;
-                }
-                let [left, top, right, bottom] = layer.map.world_edges(cell);
-                let (left, right, top, bottom) = (
-                    project_x(left),
-                    project_x(right),
-                    project_y(top),
-                    project_y(bottom),
-                );
-                if ![left, right, top, bottom].into_iter().all(f32::is_finite)
-                    || left >= right
-                    || bottom >= top
-                {
-                    return None;
-                }
-                Some(TexturedQuad {
-                    source: 0,
-                    texture: layer.texture,
-                    scissor,
-                    vertices: textured_vertices(
-                        [[left, top], [right, top], [right, bottom], [left, bottom]],
-                        region,
-                        [1.0; 4],
-                    ),
-                })
-            }),
-        )
+        self.begin_batch();
+        let mut previous_texture = None;
+        let mut total = 0;
+        let mut clipped = false;
+        for (source, layer) in layers.iter().take(super::MAX_TILE_LAYERS).enumerate() {
+            let Some(placement) = layer.placement(view.center) else {
+                continue;
+            };
+            let layer_view = layer.map_view(view, placement);
+            let quads = layer
+                .map
+                .visible_cells(layer_view)
+                .filter_map(|(cell, id)| {
+                    let region = *layer.regions.get(usize::from(id))?;
+                    if !region.is_finite() {
+                        return None;
+                    }
+                    let [left, top, right, bottom] = layer.map.world_edges(cell);
+                    let (left, right) = (
+                        project_x(left + placement.x),
+                        project_x(right + placement.x),
+                    );
+                    let (top, bottom) = (
+                        project_y(top + placement.y),
+                        project_y(bottom + placement.y),
+                    );
+                    if ![left, right, top, bottom].into_iter().all(f32::is_finite)
+                        || left >= right
+                        || bottom >= top
+                    {
+                        return None;
+                    }
+                    Some(TexturedQuad {
+                        source,
+                        texture: layer.texture,
+                        scissor,
+                        vertices: textured_vertices(
+                            [[left, top], [right, top], [right, bottom], [left, bottom]],
+                            region,
+                            [1.0; 4],
+                        ),
+                    })
+                });
+            let remaining = self.limit.saturating_sub(total);
+            let (count, layer_clipped) = self.append_quads(
+                quads,
+                &mut previous_texture,
+                super::MAX_DRAWN_TILES.min(remaining),
+            );
+            total += count;
+            clipped |= layer_clipped;
+        }
+        if clipped && !self.last_clipped {
+            log::warn!(
+                "{} budget exceeded: {} visible tiles per layer; dropping the rest",
+                self.label,
+                super::MAX_DRAWN_TILES
+            );
+        }
+        self.last_clipped = clipped;
+        self.upload(queue);
+        total
+    }
+
+    fn begin_batch(&mut self) {
+        self.scratch.clear();
+        self.runs.clear();
+    }
+
+    fn upload(&self, queue: &wgpu::Queue) {
+        if !self.scratch.is_empty() {
+            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
+        }
     }
 
     fn write_quads<'a>(
@@ -634,36 +675,9 @@ impl ImageRenderer {
         queue: &wgpu::Queue,
         quads: impl Iterator<Item = TexturedQuad<'a>>,
     ) -> usize {
-        self.scratch.clear();
-        self.runs.clear();
-        let mut count = 0;
-        let mut clipped = false;
+        self.begin_batch();
         let mut previous_texture = None;
-        for quad in quads {
-            if count == self.limit {
-                clipped = true;
-                break;
-            }
-            let start = self.scratch.len() as u32;
-            self.scratch.extend_from_slice(&quad.vertices);
-            let end = self.scratch.len() as u32;
-            // Only merge with the last accepted run: regrouping translucent
-            // images across intervening draws would change compositing order.
-            if let Some(run) = self.runs.last_mut()
-                && run.scissor == quad.scissor
-                && previous_texture.is_some_and(|texture| std::ptr::eq(texture, quad.texture))
-            {
-                run.vertices.end = end;
-            } else {
-                self.runs.push(ImageRun {
-                    texture_source: quad.source,
-                    scissor: quad.scissor,
-                    vertices: start..end,
-                });
-            }
-            previous_texture = Some(quad.texture);
-            count += 1;
-        }
+        let (count, clipped) = self.append_quads(quads, &mut previous_texture, self.limit);
 
         if clipped && !self.last_clipped {
             log::warn!(
@@ -674,10 +688,43 @@ impl ImageRenderer {
         }
         self.last_clipped = clipped;
 
-        if !self.scratch.is_empty() {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
-        }
+        self.upload(queue);
         count
+    }
+
+    fn append_quads<'a>(
+        &mut self,
+        quads: impl Iterator<Item = TexturedQuad<'a>>,
+        previous_texture: &mut Option<usize>,
+        limit: usize,
+    ) -> (usize, bool) {
+        let mut count = 0;
+        for quad in quads {
+            if count == limit {
+                return (count, true);
+            }
+            let start = self.scratch.len() as u32;
+            self.scratch.extend_from_slice(&quad.vertices);
+            let end = self.scratch.len() as u32;
+            // Only merge with the last accepted run: regrouping translucent
+            // images across intervening draws would change compositing order.
+            let texture = quad.texture as *const Texture2d as usize;
+            if let Some(run) = self.runs.last_mut()
+                && run.scissor == quad.scissor
+                && *previous_texture == Some(texture)
+            {
+                run.vertices.end = end;
+            } else {
+                self.runs.push(ImageRun {
+                    texture_source: quad.source,
+                    scissor: quad.scissor,
+                    vertices: start..end,
+                });
+            }
+            *previous_texture = Some(texture);
+            count += 1;
+        }
+        (count, false)
     }
 
     /// Record the prepared runs with the same input used for `write`.
@@ -694,8 +741,12 @@ impl ImageRenderer {
         self.draw_quads(pass, |index| sprites[index].texture)
     }
 
-    pub(super) fn draw_tiles(&self, pass: &mut wgpu::RenderPass<'_>, texture: &Texture2d) -> usize {
-        self.draw_quads(pass, |_| texture)
+    pub(super) fn draw_tiles(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        layers: &[super::TileLayer2d<'_>],
+    ) -> usize {
+        self.draw_quads(pass, |index| layers[index].texture)
     }
 
     fn draw_quads<'a>(

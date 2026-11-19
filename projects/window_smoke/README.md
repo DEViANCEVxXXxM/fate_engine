@@ -51,10 +51,11 @@ the pointer over the sprites to highlight the last drawn quad under it.
 cargo run --release --locked -p fate_window_smoke -- --sprites --gpu-timing --dbg
 ```
 
-Use `--tiles` to pan and zoom across a 128×96 atlas-backed map with empty
-cells, live cell edits, and a moving sprite drawn above the tiles.
-Diagnostics report the map and sprite input count, visible tiles
-submitted, draw count, and separate tilemap/HUD pass timings.
+Use `--tiles` to pan and zoom across three atlas-backed layers: a
+screen-fixed backdrop, a 128×96 world-fixed ground with empty cells and live
+edits, and a sparse detail layer. A moving sprite draws above every layer.
+Diagnostics report the combined input count, visible tiles submitted, draw
+count, and separate tilemap/HUD pass timings.
 
 ```powershell
 cargo run --release --locked -p fate_window_smoke -- --tiles --gpu-timing --dbg

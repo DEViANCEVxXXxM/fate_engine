@@ -286,6 +286,18 @@ limit. Sprites can draw above the map in the same scene pass.
 12,288-cell grid. Offscreen tests check atlas selection, edits, camera culling,
 and the batch limit.
 
+## Step 17 — Compose ordered tile layers
+
+**Status: done.** `render_tile_layers` and
+`render_tile_layers_with_sprites` draw up to eight layers back-to-front, with
+camera-culled traversal for every layer. Each layer has an independent
+4,096-tile budget
+and accepts a world-space offset plus a per-axis parallax multiplier (`1`
+world-fixed, `0` screen-fixed). Layers sharing a texture batch together without
+reordering. `window_smoke --tiles` shows a screen-fixed backdrop, a world-fixed
+ground, a detail layer, and a sprite above all three. Offscreen tests check
+layer order, parallax placement, the layer cap, and per-layer budgets.
+
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.

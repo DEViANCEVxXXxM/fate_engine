@@ -2,8 +2,11 @@ use super::{Bounds2d, Texture2d, TextureRegion};
 use crate::math::Vec2;
 use std::ops::Range;
 
-/// Maximum number of visible tiles uploaded in one tilemap frame.
+/// Maximum number of visible tiles uploaded per tile layer in one frame.
 pub const MAX_DRAWN_TILES: usize = 4096;
+
+/// Maximum number of ordered layers accepted in one tile scene.
+pub const MAX_TILE_LAYERS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileMapError {
@@ -185,12 +188,20 @@ impl TileMap2d {
 
 /// Draw one orthogonal tile grid using a single atlas. Non-finite regions
 /// and tile IDs outside the palette are skipped.
+///
+/// Layers draw in slice order, so later layers composite above earlier ones.
 #[derive(Clone, Copy)]
 pub struct TileLayer2d<'a> {
     pub map: &'a TileMap2d,
     pub texture: &'a Texture2d,
     /// Region table indexed by tile ID; regions may reuse or flip atlas tiles.
     pub regions: &'a [TextureRegion],
+    /// Extra world-space shift applied to every tile in this layer.
+    pub offset: Vec2,
+    /// Multiplier for camera travel. `1` keeps the layer fixed in world space;
+    /// `0` keeps it fixed on screen; `0.5` scrolls at half speed. Each axis is
+    /// independent, and non-finite values skip the layer.
+    pub parallax: Vec2,
 }
 
 impl<'a> TileLayer2d<'a> {
@@ -203,8 +214,55 @@ impl<'a> TileLayer2d<'a> {
             map,
             texture,
             regions,
+            offset: Vec2::ZERO,
+            parallax: Vec2::ONE,
         }
     }
+
+    /// Add a world-space shift on top of the layer's parallax.
+    pub const fn with_offset(mut self, offset: Vec2) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Scale how far the layer travels with the camera.
+    pub const fn with_parallax(mut self, parallax: Vec2) -> Self {
+        self.parallax = parallax;
+        self
+    }
+
+    /// World-space translation for this layer at the current camera center.
+    ///
+    /// A world-fixed layer (`parallax = 1`) has no extra shift. A screen-fixed
+    /// layer (`parallax = 0`) shifts by the camera center so it stays put.
+    /// Returns `None` for non-finite placement values.
+    pub(super) fn placement(&self, camera_center: Vec2) -> Option<Vec2> {
+        layer_placement(self.offset, self.parallax, camera_center)
+    }
+
+    /// Translate the camera view into this layer's map coordinates.
+    pub(super) fn map_view(&self, view: Bounds2d, placement: Vec2) -> Bounds2d {
+        Bounds2d::new(view.center - placement, view.half_extent)
+    }
+
+    /// Resolve a world-space point to a cell on this layer.
+    ///
+    /// This accounts for the layer's `offset` and `parallax`; pass the current
+    /// camera center. Returns `None` when the point is outside the map or the
+    /// layer transform is not finite.
+    pub fn cell_at_world(&self, world: Vec2, camera_center: Vec2) -> Option<(u32, u32)> {
+        self.map
+            .cell_at_world(world - self.placement(camera_center)?)
+    }
+}
+
+fn layer_placement(offset: Vec2, parallax: Vec2, camera_center: Vec2) -> Option<Vec2> {
+    let finite = |value: Vec2| value.x.is_finite() && value.y.is_finite();
+    if !finite(offset) || !finite(parallax) || !finite(camera_center) {
+        return None;
+    }
+    let placement = offset + (Vec2::ONE - parallax) * camera_center;
+    finite(placement).then_some(placement)
 }
 
 #[cfg(test)]
@@ -253,6 +311,38 @@ mod tests {
         );
         assert_eq!(map.visible_cells(view(17.0, 19.0, 2.0, 2.0)).count(), 0);
         assert_eq!(map.visible_cells(view(12.0, 17.0, 0.0, 4.0)).count(), 0);
+    }
+
+    #[test]
+    fn layer_placement_mixes_world_offset_and_camera_parallax() {
+        let fixed = layer_placement(Vec2::ZERO, Vec2::ONE, Vec2::new(10.0, -20.0));
+        assert_eq!(fixed, Some(Vec2::ZERO));
+        let screen = layer_placement(Vec2::ZERO, Vec2::ZERO, Vec2::new(10.0, -20.0));
+        assert_eq!(screen, Some(Vec2::new(10.0, -20.0)));
+        let half = layer_placement(
+            Vec2::new(2.0, 4.0),
+            Vec2::new(0.5, 0.5),
+            Vec2::new(10.0, -20.0),
+        );
+        assert_eq!(half, Some(Vec2::new(7.0, -6.0)));
+        let mixed = layer_placement(
+            Vec2::new(1.0, 2.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(3.0, 4.0),
+        );
+        assert_eq!(mixed, Some(Vec2::new(-2.0, 6.0)));
+        assert_eq!(
+            layer_placement(Vec2::ZERO, Vec2::new(f32::NAN, 1.0), Vec2::ZERO),
+            None
+        );
+        assert_eq!(
+            layer_placement(Vec2::new(f32::INFINITY, 0.0), Vec2::ONE, Vec2::ZERO),
+            None
+        );
+        assert_eq!(
+            layer_placement(Vec2::ZERO, Vec2::ONE, Vec2::new(f32::NAN, 0.0)),
+            None
+        );
     }
 
     #[test]

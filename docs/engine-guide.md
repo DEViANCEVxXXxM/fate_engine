@@ -558,17 +558,23 @@ cargo run --release --locked -p fate_engine --example offscreen_capture -- captu
   For conservative culling, intersect `bounds.axis_aligned()` with the
   camera's `visible_bounds(renderer.aspect())` before submitting. The
   renderer does not apply that culling automatically.
-- `render_tiles(TileLayer2d, &Overlay)` renders a retained orthogonal
-  `TileMap2d` with one atlas. The map is row-major with a world-space top-left
-  origin: columns go right and rows go down. Each cell is `None` (empty) or a
-  `u16` index into the layer's `TextureRegion` palette. Edit cells with `set`
-  and pick coordinates with `cell_at_world`. The renderer visits only rows
-  and columns intersecting the camera, skips invalid palette entries, and
-  submits up to `MAX_DRAWN_TILES` (4,096) visible tiles in one draw. This is a
-  single tile layer, not a map file loader or level editor. Use
-  `render_tiles_with_sprites` to draw sprites above the layer in the same
-  scene pass; the tile and sprite budgets are independent. For windowless
-  capture use `OffscreenScene::Tiles { layer, sprites }`.
+- `render_tile_layers(&[TileLayer2d], &Overlay)` draws ordered atlas-backed
+  tile layers, up to `MAX_TILE_LAYERS` (8). Each layer uses one atlas; the map
+  is row-major with a world-space top-left origin: columns go right and rows go
+  down. Each cell is `None` (empty) or a `u16` index into that layer's
+  `TextureRegion` palette. Edit cells with `set` and pick coordinates with
+  `TileLayer2d::cell_at_world(world, camera_center)`, which applies the layer's
+  offset and parallax. Later layers composite above earlier ones. The layer's
+  `parallax` scales camera travel (`1` is world-fixed, `0` is screen-fixed),
+  and `offset` adds a world-space shift on top; builders set both. The renderer
+  visits only rows and columns intersecting each layer's translated view,
+  skips invalid palette entries, and submits up to `MAX_DRAWN_TILES` (4,096)
+  visible tiles per layer. This is a tile renderer, not a map file loader or
+  level editor. `render_tiles` is the one-layer convenience. Use
+  `render_tile_layers_with_sprites` to draw sprites above every layer in the
+  same scene pass; the tile and sprite budgets are independent.
+  `render_tiles_with_sprites` is the one-layer convenience. For windowless
+  capture use `OffscreenScene::Tiles { layers, sprites }`.
 - `render_meshes(&[Draw3d])` draws indexed `Mesh3d` geometry with perspective
   projection and a depth buffer. `MeshVertex` contains position and vertex
   color; each `Draw3d` adds a model matrix and RGB tint.

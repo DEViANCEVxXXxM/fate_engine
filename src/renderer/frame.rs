@@ -19,7 +19,7 @@ pub(super) enum Scene2d<'a> {
     Triangles(&'a [Instance2d]),
     Sprites(&'a [Sprite2d<'a>]),
     Tiles {
-        layer: TileLayer2d<'a>,
+        layers: &'a [TileLayer2d<'a>],
         view: Bounds2d,
         sprites: &'a [Sprite2d<'a>],
     },
@@ -82,18 +82,18 @@ impl ScenePipelines {
             }
             Scene2d::Sprites(sprites) => self.prepare_sprites(&target, sprites),
             Scene2d::Tiles {
-                layer,
+                layers,
                 view,
                 sprites,
             } => {
                 let tile_count = self
                     .tiles
                     .get_or_insert_with(|| self.overlay.tile_batch(target.device))
-                    .write_tiles(
+                    .write_tile_layers(
                         target.queue,
                         target.size,
                         target.view_projection,
-                        layer,
+                        layers,
                         view,
                     );
                 tile_count + self.prepare_sprites(&target, sprites)
@@ -102,12 +102,14 @@ impl ScenePipelines {
         self.record(target, count, overlay, timer, |this, pass| match scene {
             Scene2d::Triangles(_) => this.triangle.draw(pass),
             Scene2d::Sprites(sprites) => this.draw_sprites(pass, sprites),
-            Scene2d::Tiles { layer, sprites, .. } => {
+            Scene2d::Tiles {
+                layers, sprites, ..
+            } => {
                 let tiles = this
                     .tiles
                     .as_ref()
                     .expect("tile batch prepared")
-                    .draw_tiles(pass, layer.texture);
+                    .draw_tiles(pass, layers);
                 tiles + this.draw_sprites(pass, sprites)
             }
         })

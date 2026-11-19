@@ -32,6 +32,8 @@ const SPIN_RATE: f32 = 0.05;
 const GRID_SIDE: usize = 16;
 const GRID_DRAWS: usize = GRID_SIDE * GRID_SIDE;
 const TILE_MAP: (u32, u32) = (128, 96);
+const TILE_DETAIL: (u32, u32) = (64, 48);
+const TILE_BACKDROP: (u32, u32) = (32, 18);
 const LOAD_WARMUP: u32 = 30;
 
 const HUD_MARGIN: f32 = 24.0;
@@ -257,7 +259,9 @@ fn main() {
             );
         }
         if mode == Mode::Tiles {
-            let cells = (TILE_MAP.0 * TILE_MAP.1) as usize;
+            let cells = (TILE_MAP.0 * TILE_MAP.1
+                + TILE_DETAIL.0 * TILE_DETAIL.1
+                + TILE_BACKDROP.0 * TILE_BACKDROP.1) as usize;
             let largest = debug
                 .model()
                 .frames
@@ -269,10 +273,10 @@ fn main() {
             let visible_tiles = largest.instances - 1;
             assert!(
                 visible_tiles > Renderer::max_instance_budget()
-                    && visible_tiles <= fate_engine::renderer::MAX_DRAWN_TILES
+                    && visible_tiles <= fate_engine::renderer::MAX_DRAWN_TILES * 3
             );
             println!(
-                "tilemap: {visible_tiles} visible tiles in one draw from {cells} cells, plus one sprite draw"
+                "tilemap: {visible_tiles} visible tiles across 3 layers from {cells} cells, plus one sprite draw"
             );
         }
         println!(
@@ -347,6 +351,8 @@ struct SmokeApp {
     cursor_pixel: Option<Vec2>,
     sprite_culled: u32,
     tile_map: Option<TileMap2d>,
+    tile_detail: Option<TileMap2d>,
+    tile_backdrop: Option<TileMap2d>,
 }
 
 impl SmokeApp {
@@ -630,14 +636,17 @@ impl SmokeApp {
             text: &text_draws,
         };
         if self.mode == Mode::Tiles {
-            let map = self.tile_map.as_mut().expect("tilemap initialized");
             let phase = self.redraws as f32 * 0.025;
             renderer.camera.center =
                 Vec2::new(32.0 + 17.0 * phase.sin(), -24.0 + 10.0 * phase.cos());
             renderer.camera.zoom = 1.0 + 0.25 * phase.cos();
             if self.redraws.is_multiple_of(12)
-                && let Some(cell) = map.cell_at_world(renderer.camera.center)
+                && let Some(cell) = self
+                    .tile_map
+                    .as_ref()
+                    .and_then(|map| map.cell_at_world(renderer.camera.center))
             {
+                let map = self.tile_map.as_mut().expect("tilemap initialized");
                 let tile = map.get(cell).flatten().map_or(0, |id| 1 - id);
                 map.set(cell, Some(tile));
             }
@@ -653,11 +662,18 @@ impl SmokeApp {
             .with_region(regions[1])
             .with_rotation(phase)
             .with_tint([1.0, 0.85, 0.45, 1.0]);
-            return renderer.render_tiles_with_sprites(
-                TileLayer2d::new(map, texture, &regions),
-                &[marker],
-                &overlay,
-            );
+            let ground = self.tile_map.as_ref().expect("tilemap initialized");
+            let detail = self.tile_detail.as_ref().expect("tile detail initialized");
+            let backdrop = self
+                .tile_backdrop
+                .as_ref()
+                .expect("tile backdrop initialized");
+            let layers = [
+                TileLayer2d::new(backdrop, texture, &regions).with_parallax(Vec2::ZERO),
+                TileLayer2d::new(ground, texture, &regions),
+                TileLayer2d::new(detail, texture, &regions),
+            ];
+            return renderer.render_tile_layers_with_sprites(&layers, &[marker], &overlay);
         }
         if self.mode == Mode::Sprites {
             if self.redraws.is_multiple_of(6) {
@@ -838,7 +854,7 @@ impl ApplicationHandler for SmokeApp {
         self.renderer = Some(renderer);
         self.texture = Some(texture);
         if self.mode == Mode::Tiles {
-            let cells = (0..TILE_MAP.1)
+            let ground = (0..TILE_MAP.1)
                 .flat_map(|row| {
                     (0..TILE_MAP.0).map(move |column| {
                         let grid = (column / 5 + row / 5) % 2;
@@ -847,8 +863,33 @@ impl ApplicationHandler for SmokeApp {
                 })
                 .collect();
             self.tile_map = Some(
-                TileMap2d::new(TILE_MAP, Vec2::ZERO, Vec2::new(0.5, 0.5), cells)
+                TileMap2d::new(TILE_MAP, Vec2::ZERO, Vec2::new(0.5, 0.5), ground)
                     .expect("create smoke tilemap"),
+            );
+            let detail = (0..TILE_DETAIL.1)
+                .flat_map(|row| {
+                    (0..TILE_DETAIL.0).map(move |column| {
+                        (column.is_multiple_of(6) && row.is_multiple_of(5)).then_some(1)
+                    })
+                })
+                .collect();
+            self.tile_detail = Some(
+                TileMap2d::new(TILE_DETAIL, Vec2::ZERO, Vec2::ONE, detail)
+                    .expect("create smoke tile detail"),
+            );
+            let backdrop = (0..TILE_BACKDROP.1)
+                .flat_map(|row| {
+                    (0..TILE_BACKDROP.0).map(move |column| ((column + row) % 3 == 0).then_some(0))
+                })
+                .collect();
+            self.tile_backdrop = Some(
+                TileMap2d::new(
+                    TILE_BACKDROP,
+                    Vec2::new(-64.0, 36.0),
+                    Vec2::new(4.0, 4.0),
+                    backdrop,
+                )
+                .expect("create smoke tile backdrop"),
             );
         }
         if self.mode == Mode::Lifecycle {

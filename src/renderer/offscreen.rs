@@ -18,7 +18,7 @@ pub enum OffscreenScene<'a> {
     Triangles(&'a [Instance2d]),
     Sprites(&'a [Sprite2d<'a>]),
     Tiles {
-        layer: TileLayer2d<'a>,
+        layers: &'a [TileLayer2d<'a>],
         sprites: &'a [Sprite2d<'a>],
     },
     Meshes(&'a [SceneDraw3d<'a>]),
@@ -300,10 +300,10 @@ impl OffscreenRenderer {
                 self.pipelines
                     .record_2d(target, Scene2d::Sprites(sprites), overlay, None)
             }
-            OffscreenScene::Tiles { layer, sprites } => self.pipelines.record_2d(
+            OffscreenScene::Tiles { layers, sprites } => self.pipelines.record_2d(
                 target,
                 Scene2d::Tiles {
-                    layer,
+                    layers,
                     sprites,
                     view: self.camera.visible_bounds(aspect),
                 },
@@ -442,10 +442,11 @@ mod tests {
         )
         .unwrap();
         let capture = |renderer: &mut OffscreenRenderer, map: &TileMap2d| {
+            let layers = [TileLayer2d::new(map, &atlas, &regions)];
             renderer
                 .capture(
                     OffscreenScene::Tiles {
-                        layer: TileLayer2d::new(map, &atlas, &regions),
+                        layers: &layers,
                         sprites: &[],
                     },
                     &Overlay::default(),
@@ -473,7 +474,7 @@ mod tests {
         renderer
             .capture(
                 OffscreenScene::Tiles {
-                    layer: TileLayer2d::new(&map, &atlas, &regions),
+                    layers: &[TileLayer2d::new(&map, &atlas, &regions)],
                     sprites: &[marker],
                 },
                 &Overlay::default(),
@@ -509,6 +510,121 @@ mod tests {
         .unwrap();
         let frame = capture(&mut renderer, &dense);
         assert_eq!((frame.instances, frame.draw_calls), (MAX_DRAWN_TILES, 1));
+    }
+
+    #[test]
+    fn tile_layers_composite_scroll_and_enforce_limits() {
+        use crate::renderer::{MAX_DRAWN_TILES, MAX_TILE_LAYERS, TileMap2d};
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (64, 64)).unwrap();
+        let red = renderer
+            .create_texture_with_options(
+                "red tile",
+                1,
+                1,
+                &[255, 0, 0, 255],
+                TextureOptions::NEAREST,
+            )
+            .unwrap();
+        let blue = renderer
+            .create_texture_with_options(
+                "blue tile",
+                1,
+                1,
+                &[0, 0, 255, 255],
+                TextureOptions::NEAREST,
+            )
+            .unwrap();
+        let red_regions = [red.region(0, 0, 1, 1)];
+        let blue_regions = [blue.region(0, 0, 1, 1)];
+        let map = TileMap2d::new(
+            (1, 1),
+            Vec2::new(0.0, 10.0),
+            Vec2::new(10.0, 10.0),
+            vec![Some(0)],
+        )
+        .unwrap();
+        let pixel = |frame: &CapturedFrame, x: usize, y: usize| {
+            frame.rgba8.as_chunks::<4>().0[y * frame.width as usize + x]
+        };
+        let capture =
+            |renderer: &mut OffscreenRenderer, layers: &[TileLayer2d<'_>], center: Vec2| {
+                renderer.camera.center = center;
+                renderer
+                    .capture(
+                        OffscreenScene::Tiles {
+                            layers,
+                            sprites: &[],
+                        },
+                        &Overlay::default(),
+                    )
+                    .unwrap();
+                renderer
+                    .wait_capture(Duration::from_secs(5))
+                    .unwrap()
+                    .expect("tile layer capture")
+            };
+        let clear = pixel(&capture(&mut renderer, &[], Vec2::ZERO), 48, 16);
+
+        // Later layers composite over earlier ones, and different atlases split
+        // the tile batch into separate draws.
+        let red_layer = TileLayer2d::new(&map, &red, &red_regions);
+        let blue_layer = TileLayer2d::new(&map, &blue, &blue_regions);
+        let frame = capture(&mut renderer, &[red_layer, blue_layer], Vec2::ZERO);
+        assert_eq!((frame.instances, frame.draw_calls), (2, 2));
+        assert_eq!(pixel(&frame, 48, 16), [0, 0, 255, 255]);
+        let frame = capture(&mut renderer, &[blue_layer, red_layer], Vec2::ZERO);
+        assert_eq!((frame.instances, frame.draw_calls), (2, 2));
+        assert_eq!(pixel(&frame, 48, 16), [255, 0, 0, 255]);
+
+        // A world-fixed layer scrolls with the camera; a screen-fixed layer
+        // shifts by the camera center so it stays in place.
+        let world_layer = TileLayer2d::new(&map, &red, &red_regions);
+        let screen_layer = world_layer.with_parallax(Vec2::ZERO);
+        let frame = capture(&mut renderer, &[world_layer], Vec2::new(10.0, 0.0));
+        assert_eq!(pixel(&frame, 16, 16), [255, 0, 0, 255]);
+        assert_eq!(pixel(&frame, 48, 16), clear);
+        let frame = capture(&mut renderer, &[screen_layer], Vec2::new(10.0, 0.0));
+        assert_eq!(pixel(&frame, 16, 16), clear);
+        assert_eq!(pixel(&frame, 48, 16), [255, 0, 0, 255]);
+        assert_eq!(
+            screen_layer.cell_at_world(Vec2::new(15.0, 5.0), Vec2::new(10.0, 0.0)),
+            Some((0, 0))
+        );
+        assert_eq!(
+            screen_layer.cell_at_world(Vec2::new(5.0, 5.0), Vec2::new(10.0, 0.0)),
+            None
+        );
+
+        // Extra layers beyond the public cap are ignored, while identical
+        // adjacent layers still batch into one draw.
+        let capped: Vec<_> = (0..=MAX_TILE_LAYERS)
+            .map(|_| TileLayer2d::new(&map, &red, &red_regions))
+            .collect();
+        let frame = capture(&mut renderer, &capped, Vec2::ZERO);
+        assert_eq!((frame.instances, frame.draw_calls), (MAX_TILE_LAYERS, 1));
+        assert_eq!(pixel(&frame, 48, 16), [255, 0, 0, 255]);
+
+        // Each layer gets its own visible-tile budget.
+        let dense = TileMap2d::new(
+            (65, 65),
+            Vec2::new(-9.0, 9.0),
+            Vec2::new(0.25, 0.25),
+            vec![Some(0); 65 * 65],
+        )
+        .unwrap();
+        let dense_layers = [
+            TileLayer2d::new(&dense, &red, &red_regions),
+            TileLayer2d::new(&dense, &red, &red_regions),
+        ];
+        let frame = capture(&mut renderer, &dense_layers, Vec2::ZERO);
+        assert_eq!(
+            (frame.instances, frame.draw_calls),
+            (MAX_DRAWN_TILES * 2, 1)
+        );
     }
 
     #[test]
