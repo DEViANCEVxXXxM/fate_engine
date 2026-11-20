@@ -4,9 +4,11 @@ mod camera;
 mod diagnostics;
 mod frame;
 mod gpu;
+mod image_batch;
 mod mesh;
 mod offscreen;
 mod overlay;
+mod picking;
 mod pipeline;
 mod sprite;
 #[cfg(test)]
@@ -27,8 +29,15 @@ use winit::window::Window;
 pub use camera::{Camera2d, Camera3d};
 pub use diagnostics::{RenderDiagnosticEvent, RenderDiagnosticReceiver, RenderFrameDiagnostics};
 pub use gpu::{Gpu, GpuInitError};
-pub use mesh::{Draw3d, Mesh3d, MeshCreateError, MeshVertex, SceneDraw3d, UvMeshVertex};
+pub use mesh::{
+    DepthFog3d, Draw3d, FlatLight3d, Mesh3d, MeshCreateError, MeshVertex, NormalMeshVertex,
+    SceneDraw3d, UvMeshVertex,
+};
 pub use offscreen::{CapturedFrame, OffscreenError, OffscreenRenderer, OffscreenScene};
+pub use picking::{
+    MeshHit3d, PickInstance3d, PickMesh3d, PickQueryStats, PickRay3d, PickScene3d, PickSceneHit3d,
+    PickSceneStats,
+};
 pub use sprite::Sprite2d;
 pub use text::{TextDraw, text_width, wrap_text};
 pub use texture::{
@@ -92,6 +101,10 @@ pub struct Renderer {
     pub camera: Camera2d,
     #[allow(dead_code)]
     pub camera_3d: Camera3d,
+    /// Optional directional light for opaque 3D meshes. Defaults to unlit.
+    pub mesh_light: Option<FlatLight3d>,
+    /// Optional depth fog and background color for 3D scenes. Defaults to off.
+    pub mesh_fog: Option<DepthFog3d>,
     pipelines: ScenePipelines,
     gpu_timer: Option<GpuTimer>,
     diagnostic_sender: Option<diagnostics::RenderDiagnosticSender>,
@@ -121,6 +134,8 @@ impl Renderer {
             gpu,
             camera: Camera2d::default(),
             camera_3d: Camera3d::default(),
+            mesh_light: None,
+            mesh_fog: None,
             pipelines,
             gpu_timer,
             diagnostic_sender: None,
@@ -286,6 +301,17 @@ impl Renderer {
         Mesh3d::new_with_uvs(&self.gpu.device, label, vertices, indices)
     }
 
+    /// Upload indexed triangles with UVs and smooth-shading normals.
+    /// Zero and non-finite normals are rejected.
+    pub fn create_mesh_with_normals(
+        &self,
+        label: &str,
+        vertices: &[NormalMeshVertex],
+        indices: &[u32],
+    ) -> Result<Mesh3d, MeshCreateError> {
+        Mesh3d::new_with_normals(&self.gpu.device, label, vertices, indices)
+    }
+
     /// Upload the built-in unit cube through the renderer's device.
     pub fn cube_mesh(&self) -> Result<Mesh3d, MeshCreateError> {
         cube_mesh(&self.gpu.device)
@@ -439,6 +465,8 @@ impl Renderer {
                 depth: Some(&self.depth_view),
                 view_projection: self.camera_3d.view_projection(self.gpu.aspect()),
             },
+            self.mesh_light,
+            self.mesh_fog,
             draws,
             overlay,
             timing.map(|(timer, _)| timer),

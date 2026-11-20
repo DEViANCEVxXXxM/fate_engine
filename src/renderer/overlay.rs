@@ -1,10 +1,11 @@
+use super::image_batch::ImageBatch;
 use super::text::TextRenderer;
-use super::ui::{ImageRenderer, Overlay, UiRenderer};
+use super::ui::{Overlay, UiRenderer, draw_images, write_images};
 
 /// Shared depth-free overlay path for both scene pipelines.
 pub(super) struct OverlayRenderer {
     rects: UiRenderer,
-    images: ImageRenderer,
+    images: ImageBatch,
     text: TextRenderer,
 }
 
@@ -17,16 +18,16 @@ impl OverlayRenderer {
     ) -> Self {
         Self {
             rects: UiRenderer::new(device, format),
-            images: ImageRenderer::new(device, format, texture_layout),
+            images: ImageBatch::new(device, format, texture_layout),
             text: TextRenderer::new(device, queue, format),
         }
     }
 
-    pub(super) fn sprite_batch(&self, device: &wgpu::Device) -> ImageRenderer {
+    pub(super) fn sprite_batch(&self, device: &wgpu::Device) -> ImageBatch {
         self.images.for_sprites(device)
     }
 
-    pub(super) fn tile_batch(&self, device: &wgpu::Device) -> ImageRenderer {
+    pub(super) fn tile_batch(&self, device: &wgpu::Device) -> ImageBatch {
         self.images.for_tiles(device)
     }
 
@@ -44,7 +45,7 @@ impl OverlayRenderer {
         let rects =
             !overlay.rects.is_empty() && self.rects.write(queue, width, height, overlay.rects) > 0;
         let images = !overlay.images.is_empty()
-            && self.images.write(queue, width, height, overlay.images) > 0;
+            && write_images(&mut self.images, queue, width, height, overlay.images) > 0;
         let text = !overlay.text.is_empty() && self.text.write(queue, width, height, overlay.text);
         if !(rects || images || text) {
             return false;
@@ -68,7 +69,7 @@ impl OverlayRenderer {
             self.rects.draw(&mut pass);
         }
         if images {
-            self.images.draw(&mut pass, overlay.images);
+            draw_images(&self.images, &mut pass, overlay.images);
         }
         if text {
             self.text.draw(&mut pass);

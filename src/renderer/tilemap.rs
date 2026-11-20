@@ -1,5 +1,7 @@
+use super::image_batch::{ImageBatch, Quad, textured_vertices};
+use super::ui::Scissor;
 use super::{Bounds2d, Texture2d, TextureRegion};
-use crate::math::Vec2;
+use crate::math::{Mat4, Vec2};
 use std::ops::Range;
 
 /// Maximum number of visible tiles uploaded per tile layer in one frame.
@@ -263,6 +265,86 @@ fn layer_placement(offset: Vec2, parallax: Vec2, camera_center: Vec2) -> Option<
     }
     let placement = offset + (Vec2::ONE - parallax) * camera_center;
     finite(placement).then_some(placement)
+}
+
+/// Build and upload the ordered tile-layer batch.
+pub(super) fn write_tile_layers(
+    batch: &mut ImageBatch,
+    queue: &wgpu::Queue,
+    surface: (u32, u32),
+    projection: Mat4,
+    layers: &[TileLayer2d<'_>],
+    view: Bounds2d,
+) -> usize {
+    let scissor = Scissor {
+        x: 0,
+        y: 0,
+        width: surface.0,
+        height: surface.1,
+    };
+    let m = projection.to_cols_array();
+    let project_x = |x| m[0] * x + m[12];
+    let project_y = |y| m[5] * y + m[13];
+    batch.begin();
+    let mut previous_texture = None;
+    let mut total = 0;
+    let mut clipped = false;
+    for (source, layer) in layers.iter().take(MAX_TILE_LAYERS).enumerate() {
+        let Some(placement) = layer.placement(view.center) else {
+            continue;
+        };
+        let layer_view = layer.map_view(view, placement);
+        let quads = layer
+            .map
+            .visible_cells(layer_view)
+            .filter_map(|(cell, id)| {
+                let region = *layer.regions.get(usize::from(id))?;
+                if !region.is_finite() {
+                    return None;
+                }
+                let [left, top, right, bottom] = layer.map.world_edges(cell);
+                let (left, right) = (
+                    project_x(left + placement.x),
+                    project_x(right + placement.x),
+                );
+                let (top, bottom) = (
+                    project_y(top + placement.y),
+                    project_y(bottom + placement.y),
+                );
+                if ![left, right, top, bottom].into_iter().all(f32::is_finite)
+                    || left >= right
+                    || bottom >= top
+                {
+                    return None;
+                }
+                Some(Quad {
+                    source,
+                    texture: layer.texture,
+                    scissor,
+                    vertices: textured_vertices(
+                        [[left, top], [right, top], [right, bottom], [left, bottom]],
+                        region,
+                        [1.0; 4],
+                    ),
+                })
+            });
+        let remaining = batch.limit().saturating_sub(total);
+        let (count, layer_clipped) =
+            batch.append(quads, &mut previous_texture, MAX_DRAWN_TILES.min(remaining));
+        total += count;
+        clipped |= layer_clipped;
+    }
+    batch.end(queue, clipped, MAX_DRAWN_TILES, "visible tiles per layer");
+    total
+}
+
+/// Record the prepared tile batch. Returns the number of draws recorded.
+pub(super) fn draw_tiles(
+    batch: &ImageBatch,
+    pass: &mut wgpu::RenderPass<'_>,
+    layers: &[TileLayer2d<'_>],
+) -> usize {
+    batch.draw_with(pass, |index| layers[index].texture)
 }
 
 #[cfg(test)]

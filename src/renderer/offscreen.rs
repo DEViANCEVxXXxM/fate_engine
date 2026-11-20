@@ -6,8 +6,9 @@ use std::time::Duration;
 use super::frame::{FrameTarget, Scene2d, ScenePipelines, depth_target};
 use super::texture::TextureUpload;
 use super::{
-    Camera2d, Camera3d, Instance2d, Mesh3d, MeshCreateError, MeshVertex, Overlay, SceneDraw3d,
-    Sprite2d, Texture2d, TextureCreateError, TextureOptions, TileLayer2d, UvMeshVertex,
+    Camera2d, Camera3d, DepthFog3d, FlatLight3d, Instance2d, Mesh3d, MeshCreateError, MeshVertex,
+    NormalMeshVertex, Overlay, SceneDraw3d, Sprite2d, Texture2d, TextureCreateError,
+    TextureOptions, TileLayer2d, UvMeshVertex,
 };
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -135,6 +136,10 @@ struct PendingCapture {
 pub struct OffscreenRenderer {
     pub camera: Camera2d,
     pub camera_3d: Camera3d,
+    /// Optional directional light for opaque 3D meshes. Defaults to unlit.
+    pub mesh_light: Option<FlatLight3d>,
+    /// Optional depth fog and background color for 3D scenes. Defaults to off.
+    pub mesh_fog: Option<DepthFog3d>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipelines: ScenePipelines,
@@ -192,6 +197,8 @@ impl OffscreenRenderer {
         Ok(Self {
             camera: Camera2d::default(),
             camera_3d: Camera3d::default(),
+            mesh_light: None,
+            mesh_fog: None,
             device,
             queue,
             pipelines,
@@ -229,6 +236,17 @@ impl OffscreenRenderer {
         indices: &[u32],
     ) -> Result<Mesh3d, MeshCreateError> {
         Mesh3d::new_with_uvs(&self.device, label, vertices, indices)
+    }
+
+    /// Upload indexed triangles with UVs and smooth-shading normals.
+    /// Zero and non-finite normals are rejected.
+    pub fn create_mesh_with_normals(
+        &self,
+        label: &str,
+        vertices: &[NormalMeshVertex],
+        indices: &[u32],
+    ) -> Result<Mesh3d, MeshCreateError> {
+        Mesh3d::new_with_normals(&self.device, label, vertices, indices)
     }
 
     pub fn cube_mesh(&self) -> Result<Mesh3d, MeshCreateError> {
@@ -292,10 +310,14 @@ impl OffscreenRenderer {
             },
         };
         let mut frame = match scene {
-            OffscreenScene::Meshes(draws) => {
-                self.pipelines
-                    .record_3d(target, draws.iter().copied(), overlay, None)
-            }
+            OffscreenScene::Meshes(draws) => self.pipelines.record_3d(
+                target,
+                self.mesh_light,
+                self.mesh_fog,
+                draws.iter().copied(),
+                overlay,
+                None,
+            ),
             OffscreenScene::Sprites(sprites) => {
                 self.pipelines
                     .record_2d(target, Scene2d::Sprites(sprites), overlay, None)
@@ -752,5 +774,280 @@ mod tests {
         assert_eq!(pixel(&second, 33, 24), [255, 0, 0, 255]);
         assert_ne!(pixel(&first, 2, 2), pixel(&second, 2, 2));
         assert!(renderer.poll_capture().unwrap().is_none());
+    }
+
+    #[test]
+    fn flat_light_shades_textured_and_color_meshes_and_can_be_disabled() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::Draw3d;
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (64, 64)).unwrap();
+        renderer.camera_3d.position = Vec3::ZERO;
+        let mesh = renderer
+            .create_mesh(
+                "flat light triangle",
+                &[[-0.65, -0.65, 0.0], [0.65, -0.65, 0.0], [0.0, 0.65, 0.0]].map(|position| {
+                    MeshVertex {
+                        position,
+                        color: [1.0; 3],
+                    }
+                }),
+                &[0, 1, 2],
+            )
+            .unwrap();
+        let texture = renderer
+            .create_texture_with_options(
+                "blue albedo",
+                1,
+                1,
+                &[0, 0, 255, 255],
+                TextureOptions::NEAREST,
+            )
+            .unwrap();
+        let draws = [
+            Draw3d {
+                mesh: &mesh,
+                model: Mat4::translation(Vec3::new(-0.8, 0.0, -3.0)),
+                tint: [1.0, 0.0, 0.0],
+            }
+            .into(),
+            Draw3d {
+                mesh: &mesh,
+                // Mirror the winding without changing the visible-side normal.
+                model: Mat4::translation(Vec3::new(0.8, 0.0, -3.0))
+                    .mul(Mat4::scale(Vec3::new(-1.0, 1.0, 1.0))),
+                tint: [1.0; 3],
+            }
+            .with_texture(&texture),
+        ];
+        let capture = |renderer: &mut OffscreenRenderer, light| {
+            renderer.mesh_light = light;
+            renderer
+                .capture(OffscreenScene::Meshes(&draws), &Overlay::default())
+                .unwrap();
+            let frame = renderer
+                .wait_capture(Duration::from_secs(5))
+                .unwrap()
+                .unwrap();
+            assert_eq!((frame.instances, frame.draw_calls), (2, 2));
+            let pixels = frame.rgba8.as_chunks::<4>().0;
+            [pixels[32 * 64 + 17], pixels[32 * 64 + 47]]
+        };
+        let unlit = [[255, 0, 0, 255], [0, 0, 255, 255]];
+        assert_eq!(capture(&mut renderer, None), unlit);
+        let toward = FlatLight3d::new(Vec3::new(0.0, 0.0, 1.0), 0.25);
+        assert_eq!(capture(&mut renderer, toward), unlit);
+        let away = FlatLight3d::new(Vec3::new(0.0, 0.0, -1.0), 0.25);
+        let [red, blue] = capture(&mut renderer, away);
+        // A linear brightness of 0.25 encodes to approximately 137 in sRGB.
+        assert!((136..=138).contains(&red[0]), "{red:?}");
+        assert_eq!(red, [red[0], 0, 0, 255]);
+        assert_eq!(blue, [0, 0, red[0], 255]);
+        let oblique = FlatLight3d::new(Vec3::new(3.0_f32.sqrt(), 0.0, 1.0), 0.25);
+        let [red, blue] = capture(&mut renderer, oblique);
+        // A cosine of 0.5 gives 0.625 linear brightness, about 207 in sRGB.
+        assert!((206..=208).contains(&red[0]), "{red:?}");
+        assert_eq!(blue, [0, 0, red[0], 255]);
+        assert_eq!(capture(&mut renderer, None), unlit);
+    }
+
+    #[test]
+    fn smooth_mesh_lighting_interpolates_and_transforms_normals() {
+        use crate::math::{Mat4, Vec3};
+        use crate::renderer::Draw3d;
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (64, 64)).unwrap();
+        renderer.camera_3d.position = Vec3::ZERO;
+        let positions = [[-1.2, -0.8, 0.0], [1.2, -0.8, 0.0], [0.0, 1.2, 0.0]];
+        let vertices = |normals: [[f32; 3]; 3]| {
+            std::array::from_fn::<_, 3, _>(|i| NormalMeshVertex {
+                position: positions[i],
+                color: [1.0; 3],
+                uv: [0.0; 2],
+                normal: normals[i],
+            })
+        };
+        let gradient = renderer
+            .create_mesh_with_normals(
+                "gradient normals",
+                &vertices([[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]),
+                &[0, 1, 2],
+            )
+            .unwrap();
+        let slanted = renderer
+            .create_mesh_with_normals(
+                "slanted normals",
+                &vertices([[1.0, 0.0, 1.0]; 3]),
+                &[0, 1, 2],
+            )
+            .unwrap();
+        let white = renderer
+            .create_texture_with_options("white albedo", 1, 1, &[255; 4], TextureOptions::NEAREST)
+            .unwrap();
+        let capture =
+            |renderer: &mut OffscreenRenderer, mesh: &Mesh3d, texture, scale, direction| {
+                renderer.mesh_light = FlatLight3d::new(direction, 0.2);
+                let draws = [SceneDraw3d {
+                    draw: Draw3d {
+                        mesh,
+                        model: Mat4::translation(Vec3::new(0.0, 0.0, -3.0)).mul(Mat4::scale(scale)),
+                        tint: [1.0; 3],
+                    },
+                    texture,
+                }];
+                renderer
+                    .capture(OffscreenScene::Meshes(&draws), &Overlay::default())
+                    .unwrap();
+                let frame = renderer
+                    .wait_capture(Duration::from_secs(5))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!((frame.instances, frame.draw_calls), (1, 1));
+                let pixels = frame.rgba8.as_chunks::<4>().0;
+                [23, 32, 41].map(|x| pixels[39 * 64 + x][0])
+            };
+        let toward = Vec3::new(0.0, 0.0, 1.0);
+        let [left, middle, right] = capture(
+            &mut renderer,
+            &gradient,
+            Some(&white),
+            Vec3::new(1.0, 1.0, 1.0),
+            toward,
+        );
+        assert!(
+            left > middle && middle > right && right > 130,
+            "{left}, {middle}, {right}"
+        );
+
+        // The inverse transpose of the mirrored, stretched X scale sends
+        // (1, 0, 1) toward (-0.5, 0, 1); the -X light sees cosine 1/sqrt(5).
+        let transformed = capture(
+            &mut renderer,
+            &slanted,
+            None,
+            Vec3::new(-2.0, 1.0, 1.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+        );
+        assert!(
+            transformed.into_iter().all(|p| (195..=199).contains(&p)),
+            "{transformed:?}"
+        );
+        // Flattening Z makes the normal transform singular, but leaves the
+        // XY geometry intact so the geometric fallback still works.
+        assert_eq!(
+            capture(
+                &mut renderer,
+                &slanted,
+                None,
+                Vec3::new(1.0, 1.0, 0.0),
+                toward
+            ),
+            [255; 3]
+        );
+    }
+
+    #[test]
+    fn depth_fog_blends_by_view_depth_and_leaves_the_hud_unfogged() {
+        use crate::math::{Mat4, Vec2, Vec3};
+        use crate::renderer::{Draw3d, UiRect};
+
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (64, 64)).unwrap();
+        renderer.camera_3d.position = Vec3::ZERO;
+        let mesh = renderer
+            .create_mesh(
+                "fog test quad",
+                &[
+                    [-0.18, -0.18, 0.0],
+                    [0.18, -0.18, 0.0],
+                    [0.18, 0.18, 0.0],
+                    [-0.18, 0.18, 0.0],
+                ]
+                .map(|position| MeshVertex {
+                    position,
+                    color: [1.0; 3],
+                }),
+                &[0, 1, 2, 0, 2, 3],
+            )
+            .unwrap();
+        let red = renderer
+            .create_texture_with_options(
+                "red albedo",
+                1,
+                1,
+                &[255, 0, 0, 255],
+                TextureOptions::NEAREST,
+            )
+            .unwrap();
+        let draws = std::array::from_fn::<_, 3, _>(|i| {
+            let depth = [2.0, 6.0, 10.0][i];
+            let textured = i == 1;
+            SceneDraw3d {
+                draw: Draw3d {
+                    mesh: &mesh,
+                    model: Mat4::translation(Vec3::new(
+                        (i as f32 - 1.0) * 0.38 * depth,
+                        0.0,
+                        -depth,
+                    ))
+                    .mul(Mat4::scale(Vec3::new(depth, depth, 1.0))),
+                    tint: if textured { [1.0; 3] } else { [1.0, 0.0, 0.0] },
+                },
+                texture: textured.then_some(&red),
+            }
+        });
+        let hud = Overlay {
+            rects: &[UiRect::new(
+                Vec2::ZERO,
+                Vec2::new(8.0, 8.0),
+                [0.0, 1.0, 0.0, 1.0],
+            )],
+            ..Overlay::default()
+        };
+        let capture = |renderer: &mut OffscreenRenderer, scene| {
+            renderer.capture(scene, &hud).unwrap();
+            renderer
+                .wait_capture(Duration::from_secs(5))
+                .unwrap()
+                .unwrap()
+        };
+        let pixel =
+            |frame: &CapturedFrame, x: usize, y: usize| frame.rgba8.as_chunks::<4>().0[y * 64 + x];
+        let scene = || OffscreenScene::Meshes(&draws);
+        let unlit = capture(&mut renderer, scene());
+        renderer.mesh_fog = DepthFog3d::new([0.0, 0.0, 1.0], 4.0, 8.0);
+        // Fog uses forward view depth, not the perspective depth buffer value.
+        renderer.camera_3d.far = 40.0;
+        let fogged = capture(&mut renderer, scene());
+        assert_eq!((unlit.instances, unlit.draw_calls), (3, 3));
+        assert_eq!((fogged.instances, fogged.draw_calls), (3, 3));
+        for x in [16, 32, 48] {
+            assert_eq!(pixel(&unlit, x, 32), [255, 0, 0, 255]);
+        }
+        assert_eq!(pixel(&fogged, 16, 32), [255, 0, 0, 255]);
+        let mid: [u8; 4] = pixel(&fogged, 32, 32);
+        assert!((187..=189).contains(&mid[0]) && mid[0] == mid[2], "{mid:?}");
+        assert_eq!([mid[1], mid[3]], [0, 255]);
+        let blue = [0, 0, 255, 255];
+        assert_eq!(pixel(&fogged, 48, 32), blue);
+        assert_eq!(pixel(&fogged, 63, 63), blue);
+        assert_eq!(pixel(&fogged, 4, 4), [0, 255, 0, 255]);
+        let plane = capture(&mut renderer, OffscreenScene::Triangles(&[]));
+        assert_eq!(pixel(&plane, 63, 63), pixel(&unlit, 63, 63));
+        let empty = capture(&mut renderer, OffscreenScene::Meshes(&[]));
+        assert_eq!(pixel(&empty, 63, 63), blue);
+        renderer.mesh_fog = None;
+        assert_eq!(capture(&mut renderer, scene()).rgba8, unlit.rgba8);
     }
 }

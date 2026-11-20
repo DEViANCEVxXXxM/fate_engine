@@ -291,12 +291,61 @@ and the batch limit.
 **Status: done.** `render_tile_layers` and
 `render_tile_layers_with_sprites` draw up to eight layers back-to-front, with
 camera-culled traversal for every layer. Each layer has an independent
-4,096-tile budget
-and accepts a world-space offset plus a per-axis parallax multiplier (`1`
-world-fixed, `0` screen-fixed). Layers sharing a texture batch together without
+4,096-tile budget and accepts a world-space offset plus a per-axis parallax
+multiplier (`1` world-fixed, `0` screen-fixed). Layers sharing a texture batch together without
 reordering. `window_smoke --tiles` shows a screen-fixed backdrop, a world-fixed
 ground, a detail layer, and a sprite above all three. Offscreen tests check
-layer order, parallax placement, the layer cap, and per-layer budgets.
+ layer order, parallax placement, the layer cap, and per-layer budgets.
+
+## Step 18 — Shade opaque meshes with one directional light
+
+**Status: done.** Windowed and offscreen renderers can opt into flat
+directional lighting with an ambient floor. The visible triangle supplies
+the normal, so existing colored and textured geometry needs no vertex-data
+changes. `window_smoke --flat-lighting` lights the rotating pyramids.
+Offscreen tests verify lit and unlit pixels without changing the draw count.
+
+## Step 19 — Smooth shading from vertex normals
+
+**Status: done.** Windowed and offscreen renderers accept indexed meshes with
+validated object-space normals. The same directional light now supports
+smooth shading, including under nonuniform or mirrored scales, while meshes
+without normals retain flat shading. `window_smoke --smooth-lighting` compares
+flat and smooth shading on the same geometry, with a textured variant.
+
+## Step 20 — Add depth fog to opaque 3D scenes
+
+**Status: done.** Windowed and offscreen renderers can fade opaque meshes
+into a matching background using forward camera depth. Fog blends after
+lighting without a new pass. `window_smoke --depth-fog` alternates between
+fogged and clear views of the same instanced scene. Offscreen tests check
+partial and full fog, including textured meshes, and verify that the HUD
+and 2D path remain unaffected.
+
+## Step 21 — Pick 3D meshes without GPU readback
+
+**Status: done.** Consumers can keep an optional `PickMesh3d` beside a
+render mesh and reuse it across instances. A local bounds check filters
+misses before the triangle query. `Camera3d::pick_ray` limits pointer
+rays to the camera clip planes; a hit reports the triangle, world distance,
+position, and barycentric weights. `window_smoke --mesh-picking` checks
+selection with overlapping objects and highlights the closest hit.
+
+## Step 22 — Accelerate picking on dense meshes
+
+**Status: done.** `PickMesh3d` builds a balanced hierarchy of triangle
+bounds once and reuses it across instances. CPU tests compare accelerated
+hits to a direct scan and preserve source-triangle tie breaking.
+`window_smoke --dense-picking` exercises four instances of one dense mesh
+and displays exact triangle-test counts.
+
+## Step 23 — Accelerate picking across many instances
+
+**Status: done.** `PickScene3d` indexes world-space instance bounds and reuses
+shared mesh triangle trees. Its CPU query returns the nearest instance and
+triangle and reports how many instance and triangle queries it needed.
+`window_smoke --scene-picking` exercises two overlapping instanced grids;
+CPU tests compare against a direct instance scan.
 
 ## Deferred until a consumer needs them
 

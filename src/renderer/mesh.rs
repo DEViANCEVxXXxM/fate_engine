@@ -1,7 +1,7 @@
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
-use crate::math::Mat4;
+use crate::math::{Mat4, Vec3};
 
 use super::Texture2d;
 
@@ -22,9 +22,30 @@ pub struct UvMeshVertex {
     pub uv: [f32; 2],
 }
 
-impl UvMeshVertex {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
+/// A textured mesh vertex with a nonzero, finite object-space normal.
+///
+/// Normals are normalized on upload. Duplicate vertices along hard edges
+/// when neighboring faces should not share a normal.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct NormalMeshVertex {
+    pub position: [f32; 3],
+    pub color: [f32; 3],
+    pub uv: [f32; 2],
+    pub normal: [f32; 3],
+}
+
+impl NormalMeshVertex {
+    fn from_uv(vertex: UvMeshVertex) -> Self {
+        Self {
+            position: vertex.position,
+            color: vertex.color,
+            uv: vertex.uv,
+            normal: [0.0; 3],
+        }
+    }
+    const ATTRIBUTES: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 8 => Float32x3];
 
     const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
@@ -40,9 +61,15 @@ pub enum MeshCreateError {
     EmptyVertices,
     EmptyIndices,
     InvalidTriangleIndexCount(usize),
-    IndexOutOfBounds { index: u32, vertex_count: usize },
+    IndexOutOfBounds {
+        index: u32,
+        vertex_count: usize,
+    },
     TooManyIndices(usize),
     NonFiniteUv(usize),
+    InvalidNormal(usize),
+    /// A non-finite position in CPU picking geometry.
+    NonFinitePosition(usize),
 }
 
 impl std::fmt::Display for MeshCreateError {
@@ -65,13 +92,22 @@ impl std::fmt::Display for MeshCreateError {
                 write!(f, "mesh index count {count} exceeds the supported range")
             }
             Self::NonFiniteUv(index) => write!(f, "mesh vertex {index} has non-finite UVs"),
+            Self::NonFinitePosition(index) => {
+                write!(f, "mesh vertex {index} has a non-finite position")
+            }
+            Self::InvalidNormal(index) => {
+                write!(f, "mesh vertex {index} has a zero or non-finite normal")
+            }
         }
     }
 }
 
 impl std::error::Error for MeshCreateError {}
 
-fn validate_indices(vertex_count: usize, indices: &[u32]) -> Result<u32, MeshCreateError> {
+pub(super) fn validate_indices(
+    vertex_count: usize,
+    indices: &[u32],
+) -> Result<u32, MeshCreateError> {
     if vertex_count == 0 {
         return Err(MeshCreateError::EmptyVertices);
     }
@@ -96,14 +132,58 @@ fn validate_indices(vertex_count: usize, indices: &[u32]) -> Result<u32, MeshCre
 }
 
 fn validate_uv_mesh(vertices: &[UvMeshVertex], indices: &[u32]) -> Result<u32, MeshCreateError> {
-    let count = validate_indices(vertices.len(), indices)?;
-    if let Some(index) = vertices
-        .iter()
-        .position(|vertex| !vertex.uv.iter().all(|uv| uv.is_finite()))
-    {
+    validate_mesh_uvs(
+        vertices.len(),
+        indices,
+        vertices.iter().map(|vertex| vertex.uv),
+    )
+}
+
+fn validate_mesh_uvs(
+    vertex_count: usize,
+    indices: &[u32],
+    mut uvs: impl Iterator<Item = [f32; 2]>,
+) -> Result<u32, MeshCreateError> {
+    let count = validate_indices(vertex_count, indices)?;
+    if let Some(index) = uvs.position(|uv| !uv.into_iter().all(f32::is_finite)) {
         return Err(MeshCreateError::NonFiniteUv(index));
     }
     Ok(count)
+}
+
+fn prepare_normals(
+    vertices: &[NormalMeshVertex],
+    indices: &[u32],
+) -> Result<(Vec<NormalMeshVertex>, u32), MeshCreateError> {
+    let count = validate_mesh_uvs(
+        vertices.len(),
+        indices,
+        vertices.iter().map(|vertex| vertex.uv),
+    )?;
+    let vertices = vertices
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, mut vertex)| {
+            vertex.normal =
+                unit_direction(vertex.normal).ok_or(MeshCreateError::InvalidNormal(index))?;
+            Ok(vertex)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((vertices, count))
+}
+
+fn unit_direction([x, y, z]: [f32; 3]) -> Option<[f32; 3]> {
+    if ![x, y, z].into_iter().all(f32::is_finite) {
+        return None;
+    }
+    let largest = x.abs().max(y.abs()).max(z.abs());
+    if largest == 0.0 {
+        return None;
+    }
+    let [x, y, z] = [x / largest, y / largest, z / largest];
+    let length = (x * x + y * y + z * z).sqrt();
+    Some([x / length, y / length, z / length])
 }
 
 pub struct Mesh3d {
@@ -122,10 +202,11 @@ impl Mesh3d {
         let index_count = validate_indices(vertices.len(), indices)?;
         let vertices: Vec<_> = vertices
             .iter()
-            .map(|vertex| UvMeshVertex {
+            .map(|vertex| NormalMeshVertex {
                 position: vertex.position,
                 color: vertex.color,
                 uv: [0.0; 2],
+                normal: [0.0; 3],
             })
             .collect();
         Ok(Self::upload(device, label, &vertices, indices, index_count))
@@ -138,13 +219,28 @@ impl Mesh3d {
         indices: &[u32],
     ) -> Result<Self, MeshCreateError> {
         let index_count = validate_uv_mesh(vertices, indices)?;
-        Ok(Self::upload(device, label, vertices, indices, index_count))
+        let vertices: Vec<_> = vertices
+            .iter()
+            .copied()
+            .map(NormalMeshVertex::from_uv)
+            .collect();
+        Ok(Self::upload(device, label, &vertices, indices, index_count))
+    }
+
+    pub(super) fn new_with_normals(
+        device: &wgpu::Device,
+        label: &str,
+        vertices: &[NormalMeshVertex],
+        indices: &[u32],
+    ) -> Result<Self, MeshCreateError> {
+        let (vertices, index_count) = prepare_normals(vertices, indices)?;
+        Ok(Self::upload(device, label, &vertices, indices, index_count))
     }
 
     fn upload(
         device: &wgpu::Device,
         label: &str,
-        vertices: &[UvMeshVertex],
+        vertices: &[NormalMeshVertex],
         indices: &[u32],
         index_count: u32,
     ) -> Self {
@@ -198,6 +294,79 @@ impl<'a> From<Draw3d<'a>> for SceneDraw3d<'a> {
             draw,
             texture: None,
         }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct MeshUniforms {
+    view_projection: [[f32; 4]; 4],
+    light: [f32; 4],
+    fog_rgb_start: [f32; 4],
+    fog_end: f32,
+    _padding: [f32; 3],
+}
+
+/// Linear fog for opaque 3D meshes, measured forward from the camera in
+/// world units. The fog color also clears the 3D background.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DepthFog3d {
+    color: [f32; 3],
+    start: f32,
+    end: f32,
+}
+
+impl DepthFog3d {
+    /// `color` is linear RGB in `0..=1`. Fog starts at `start` and is fully
+    /// opaque at `end`. Returns `None` unless `0 <= start < end` and all
+    /// inputs are finite. The range is independent of the camera clip planes.
+    pub fn new(color: [f32; 3], start: f32, end: f32) -> Option<Self> {
+        (color.into_iter().all(|c| (0.0..=1.0).contains(&c))
+            && start.is_finite()
+            && end.is_finite()
+            && start >= 0.0
+            && end > start)
+            .then_some(Self { color, start, end })
+    }
+
+    pub(super) fn clear_color(self) -> wgpu::Color {
+        let [r, g, b] = self.color.map(f64::from);
+        wgpu::Color { r, g, b, a: 1.0 }
+    }
+
+    fn uniform(self) -> [f32; 4] {
+        let [r, g, b] = self.color;
+        [r, g, b, self.start]
+    }
+}
+
+/// One white directional light for opaque meshes, with a constant ambient floor.
+///
+/// Uses the visible side of each triangle by default. Meshes uploaded with
+/// vertex normals use their interpolated normals instead. No shadows are cast.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FlatLight3d {
+    toward_light: Vec3,
+    ambient: f32,
+}
+
+impl FlatLight3d {
+    /// `toward_light` points from the surface toward the light in world space.
+    /// Returns `None` for a zero/non-finite direction or ambient outside `0..=1`.
+    pub fn new(toward_light: Vec3, ambient: f32) -> Option<Self> {
+        if !(0.0..=1.0).contains(&ambient) {
+            return None;
+        }
+        let [x, y, z] = unit_direction([toward_light.x, toward_light.y, toward_light.z])?;
+        Some(Self {
+            toward_light: Vec3::new(x, y, z),
+            ambient,
+        })
+    }
+
+    fn uniform(self) -> [f32; 4] {
+        let d = self.toward_light;
+        [d.x, d.y, d.z, self.ambient]
     }
 }
 
@@ -276,13 +445,13 @@ impl MeshPipeline {
         texture_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("mesh.wgsl"));
-        let uniform_size = std::mem::size_of::<[[f32; 4]; 4]>() as u64;
+        let uniform_size = std::mem::size_of::<MeshUniforms>() as u64;
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mesh bind group layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -292,7 +461,7 @@ impl MeshPipeline {
             }],
         });
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh view projection"),
+            label: Some("mesh frame uniforms"),
             size: uniform_size,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
@@ -334,7 +503,10 @@ impl MeshPipeline {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &[Some(UvMeshVertex::layout()), Some(MeshInstance::layout())],
+                    buffers: &[
+                        Some(NormalMeshVertex::layout()),
+                        Some(MeshInstance::layout()),
+                    ],
                 },
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -382,6 +554,8 @@ impl MeshPipeline {
         &mut self,
         queue: &wgpu::Queue,
         view_projection: Mat4,
+        light: Option<FlatLight3d>,
+        fog: Option<DepthFog3d>,
         draws: impl Iterator<Item = SceneDraw3d<'a>>,
     ) {
         self.instances.clear();
@@ -396,7 +570,13 @@ impl MeshPipeline {
         queue.write_buffer(
             &self.uniform_buffer,
             0,
-            bytemuck::bytes_of(&to_columns(view_projection)),
+            bytemuck::bytes_of(&MeshUniforms {
+                view_projection: to_columns(view_projection),
+                light: light.map_or([0.0, 0.0, 0.0, 1.0], FlatLight3d::uniform),
+                fog_rgb_start: fog.map_or([0.0; 4], DepthFog3d::uniform),
+                fog_end: fog.map_or(0.0, |fog| fog.end),
+                _padding: [0.0; 3],
+            }),
         );
         queue.write_buffer(
             &self.instance_buffer,
@@ -436,9 +616,72 @@ impl MeshPipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::math::Vec3;
     use crate::renderer::Camera3d;
     use crate::renderer::test_support::{skip_without_adapter, test_device};
+
+    #[test]
+    fn depth_fog_rejects_invalid_ranges_and_colors() {
+        let color = [0.0, 0.25, 1.0];
+        let fog = DepthFog3d::new(color, 0.0, 10.0).unwrap();
+        assert_eq!(fog.uniform(), [0.0, 0.25, 1.0, 0.0]);
+        assert_eq!(fog.end, 10.0);
+        for (start, end) in [
+            (-1.0, 1.0),
+            (2.0, 2.0),
+            (3.0, 2.0),
+            (f32::NAN, 5.0),
+            (0.0, f32::INFINITY),
+        ] {
+            assert!(DepthFog3d::new(color, start, end).is_none());
+        }
+        for value in [-0.1, 1.1, f32::NAN, f32::INFINITY] {
+            assert!(DepthFog3d::new([value, 0.0, 0.0], 0.0, 10.0).is_none());
+        }
+    }
+
+    #[test]
+    fn mesh_normals_are_normalized_and_invalid_inputs_report_vertex_index() {
+        let vertex = NormalMeshVertex {
+            position: [0.0; 3],
+            color: [1.0; 3],
+            uv: [2.0, -1.0],
+            normal: [0.0, f32::MAX, 0.0],
+        };
+        let mut vertices = [vertex; 3];
+        let indices = [0, 1, 2];
+        let (prepared, count) = prepare_normals(&vertices, &indices).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(prepared[1].normal, [0.0, 1.0, 0.0]);
+        assert_eq!(prepared[1].uv, vertex.uv);
+        for normal in [[0.0; 3], [f32::NAN, 1.0, 0.0], [0.0, 0.0, f32::INFINITY]] {
+            vertices[1].normal = normal;
+            assert_eq!(
+                prepare_normals(&vertices, &indices).unwrap_err(),
+                MeshCreateError::InvalidNormal(1)
+            );
+        }
+        vertices[0].uv[0] = f32::INFINITY;
+        assert_eq!(
+            prepare_normals(&vertices, &indices).unwrap_err(),
+            MeshCreateError::NonFiniteUv(0)
+        );
+    }
+
+    #[test]
+    fn flat_light_normalizes_large_and_small_directions_and_rejects_invalid_input() {
+        for size in [f32::MIN_POSITIVE, f32::MAX] {
+            let light = FlatLight3d::new(Vec3::new(size, 0.0, size), 0.25).unwrap();
+            let [x, y, z, ambient] = light.uniform();
+            assert!((x - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-6);
+            assert_eq!([y, z, ambient], [0.0, x, 0.25]);
+        }
+        for direction in [Vec3::ZERO, Vec3::new(1.0, 0.0, f32::INFINITY)] {
+            assert!(FlatLight3d::new(direction, 0.25).is_none());
+        }
+        for ambient in [-0.1, 1.1, f32::NAN] {
+            assert!(FlatLight3d::new(Vec3::new(0.0, 0.0, 1.0), ambient).is_none());
+        }
+    }
 
     #[test]
     fn mesh_creation_rejects_empty_and_out_of_bounds_data() {
@@ -619,7 +862,7 @@ mod tests {
                 .collect();
             assert_eq!(ranges, [0..1, 1..2, 2..3]);
         }
-        pipeline.write_draws(&queue, view_projection, draws.into_iter());
+        pipeline.write_draws(&queue, view_projection, None, None, draws.into_iter());
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mesh test encoder"),

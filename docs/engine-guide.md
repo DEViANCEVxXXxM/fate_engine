@@ -589,6 +589,76 @@ cargo run --release --locked -p fate_engine --example offscreen_capture -- captu
   and untextured meshes with the same depth buffer and draw budget, then draws
   the overlay in the same submission.
 
+Set `renderer.mesh_light` on either `Renderer` or `OffscreenRenderer` to
+opt into flat 3D lighting. `FlatLight3d::new(direction, ambient)` takes a
+world-space direction from the surface toward the light and an ambient floor
+from `0.0` to `1.0`. It normalizes the direction and returns `None` on invalid
+input. Set `mesh_light` back to `None` for the default unlit output. By default,
+the light shades the visible side of each triangle without changing draw batches.
+
+For smooth shading, upload `NormalMeshVertex` data with
+`create_mesh_with_normals`. This works with textured and untextured draws.
+Supply object-space normals; upload normalizes them and rejects zero or
+non-finite values. Duplicate vertices where a hard edge needs different normals
+on each side. The renderer applies the inverse transpose of the model's linear
+transform for nonuniform and mirrored scales. If that transform is singular,
+it falls back to a geometric face normal. Lighting affects opaque meshes only
+and does not cast shadows.
+
+Set `renderer.mesh_fog` to `DepthFog3d::new(linear_rgb, start, end)` to fade
+opaque 3D meshes into a matching background. The distances are measured
+forward along the camera axis in world units, not radially or in depth-buffer
+coordinates. Pixels before `start` are unchanged; from `end` onward they match
+the fog color. The blend happens after lighting, in linear RGB. Fog does not
+change clipping, depth tests, batching, 2D scenes, or the HUD. `None` restores
+the default clear color and turns fog off.
+
+For CPU-side 3D picking, build a `PickMesh3d` from the object-space positions
+and indices used for mesh upload. Ordinary mesh uploads do not retain this
+data. Use `Camera3d::pick_ray(pixel, (width, height))` for a physical pointer
+position, or construct a `PickRay3d` with an explicit distance interval.
+
+```rust,ignore
+if let Some(ray) = renderer.camera_3d.pick_ray(pointer, renderer.surface_size()) {
+    if let Some(hit) = pick_mesh.intersect(ray, draw.model) {
+        // Use hit.triangle, hit.distance, hit.position, or hit.barycentric.
+    }
+}
+```
+
+The query tests both sides of each triangle and skips singular or non-affine
+models. For multiple objects, query the submitted draw candidates and compare
+world distances. The consumer owns selection policy and any filtering by
+material, visibility, or HUD occlusion. This is a geometric query, not a
+sample of the frame's depth buffer.
+
+`PickMesh3d::new` builds a local bounding-volume hierarchy once per mesh;
+instances reuse it even when their model transforms change. Queries test
+nearer bounds first and skip groups that cannot beat the current hit,
+without allocating. `intersect_with_stats` returns the same hit plus bounds
+and exact triangle test counts. These are CPU work counts, not timings.
+Meshes whose triangle bounds overlap heavily can still require many tests.
+Rebuild the pick mesh when its positions or indices change.
+
+For many instances, build a `PickScene3d` from `PickInstance3d` records in
+consumer draw order. Each record pairs an `Arc<PickMesh3d>` with a model
+matrix, so instances can share mesh geometry and its triangle tree. The
+scene index skips groups of instances before querying their meshes. The
+nearest hit reports the original input index and a `MeshHit3d`; exact
+distance ties favor the earlier input. Invalid transforms are skipped
+without renumbering. Rebuild the scene index when transforms, ordering,
+or membership change. The renderer does not build or maintain this index.
+
+Measure picking separately from render timings with the headless example:
+
+```powershell
+cargo run --release --locked -p fate_engine --example picking_bench
+```
+
+It reports scene build and per-ray p50/p95 for grid hits, misses, edge
+grazes, and heavily overlapping instances. The linear reference uses the
+same mesh picker, so the comparison isolates the scene index.
+
 Adjacent overlay images using the same `Texture2d` and effective scissor
 share a draw, even when their atlas regions, transforms, or tints differ.
 Images are never reordered. Invalid quads and clips that resolve to an empty

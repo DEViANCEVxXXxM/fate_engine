@@ -32,6 +32,57 @@ The default run is a seam check, not a performance benchmark.
 
 ### Optional GPU timings
 
+Use `--flat-lighting` to shade the rotating colored and textured pyramids
+with a world-space directional light. Omit the flag for the unlit comparison.
+The flag also works with `--mesh-load` for an instanced comparison.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --flat-lighting --gpu-timing --dbg
+```
+
+Use `--smooth-lighting` to compare three rotating spheres with matching
+geometry: flat on the left, smooth with an atlas texture in the center, and
+smooth without a texture on the right.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --smooth-lighting --gpu-timing --dbg
+```
+
+Use `--depth-fog` to see seven rows of lit cubes fade into the background.
+The scene briefly switches fog off for comparison. With `--dbg`, it checks
+that both states submit the same 14 instances in one indexed draw.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --depth-fog --gpu-timing --dbg
+```
+
+Use `--mesh-picking` to highlight the closest pyramid under the pointer.
+The HUD shows the triangle number and world distance. When the pointer is
+outside the window the probe uses screen center, where two pyramids overlap.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --mesh-picking --gpu-timing --dbg
+```
+
+Use `--dense-picking` for the same pointer probe on four instances of a
+16,128-triangle sphere. The HUD reports exact triangle tests across the
+instances. Startup checks the overlapping center hit and prints its work
+counts; `--dbg` verifies all four instances still draw in one indexed call.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --dense-picking --gpu-timing --dbg
+```
+
+Use `--scene-picking` to probe two overlapping grids of 182 total pyramids.
+The HUD shows the nearest instance and triangle, then lists CPU scene bounds
+and instance counts separately from CPU mesh bounds and triangle counts. These
+are work counts, not GPU timings. The center probe checks that the front grid
+wins; `--dbg` verifies that rendering still uses one indexed draw.
+
+```powershell
+cargo run --release --locked -p fate_window_smoke -- --scene-picking --gpu-timing --dbg
+```
+
 Use `--2d` to run the same HUD showcase over instanced 2D triangles instead
 of meshes. With GPU timing enabled, the smoke checks both 2D frames with an
 overlay pass and frames without one:

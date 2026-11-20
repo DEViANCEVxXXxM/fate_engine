@@ -1,9 +1,9 @@
 //! Surface-independent scene and overlay command recording.
 
 use super::{
-    Bounds2d, Instance2d, Overlay, Renderer, SceneDraw3d, Sprite2d, TileLayer2d,
-    mesh::MeshPipeline, overlay::OverlayRenderer, pipeline::TrianglePipeline, timing::GpuTimer,
-    ui::ImageRenderer,
+    Bounds2d, DepthFog3d, FlatLight3d, Instance2d, Overlay, Renderer, SceneDraw3d, Sprite2d,
+    TileLayer2d, image_batch::ImageBatch, mesh::MeshPipeline, overlay::OverlayRenderer,
+    pipeline::TrianglePipeline, sprite, tilemap, timing::GpuTimer,
 };
 use crate::math::Mat4;
 
@@ -43,8 +43,8 @@ pub(super) struct RecordedFrame {
 
 pub(super) struct ScenePipelines {
     triangle: TrianglePipeline,
-    sprites: Option<ImageRenderer>,
-    tiles: Option<ImageRenderer>,
+    sprites: Option<ImageBatch>,
+    tiles: Option<ImageBatch>,
     meshes: MeshPipeline,
     overlay: OverlayRenderer,
     pub texture_layout: wgpu::BindGroupLayout,
@@ -86,57 +86,71 @@ impl ScenePipelines {
                 view,
                 sprites,
             } => {
-                let tile_count = self
-                    .tiles
-                    .get_or_insert_with(|| self.overlay.tile_batch(target.device))
-                    .write_tile_layers(
-                        target.queue,
-                        target.size,
-                        target.view_projection,
-                        layers,
-                        view,
-                    );
+                let tile_count = tilemap::write_tile_layers(
+                    self.tiles
+                        .get_or_insert_with(|| self.overlay.tile_batch(target.device)),
+                    target.queue,
+                    target.size,
+                    target.view_projection,
+                    layers,
+                    view,
+                );
                 tile_count + self.prepare_sprites(&target, sprites)
             }
         };
-        self.record(target, count, overlay, timer, |this, pass| match scene {
-            Scene2d::Triangles(_) => this.triangle.draw(pass),
-            Scene2d::Sprites(sprites) => this.draw_sprites(pass, sprites),
-            Scene2d::Tiles {
-                layers, sprites, ..
-            } => {
-                let tiles = this
-                    .tiles
-                    .as_ref()
-                    .expect("tile batch prepared")
-                    .draw_tiles(pass, layers);
-                tiles + this.draw_sprites(pass, sprites)
-            }
-        })
+        self.record(
+            target,
+            count,
+            CLEAR_COLOR,
+            overlay,
+            timer,
+            |this, pass| match scene {
+                Scene2d::Triangles(_) => this.triangle.draw(pass),
+                Scene2d::Sprites(sprites) => this.draw_sprites(pass, sprites),
+                Scene2d::Tiles {
+                    layers, sprites, ..
+                } => {
+                    let tiles = tilemap::draw_tiles(
+                        this.tiles.as_ref().expect("tile batch prepared"),
+                        pass,
+                        layers,
+                    );
+                    tiles + this.draw_sprites(pass, sprites)
+                }
+            },
+        )
     }
 
     fn prepare_sprites(&mut self, target: &FrameTarget<'_>, sprites: &[Sprite2d<'_>]) -> usize {
         if sprites.is_empty() {
             return 0;
         }
-        self.sprites
-            .get_or_insert_with(|| self.overlay.sprite_batch(target.device))
-            .write_sprites(target.queue, target.size, target.view_projection, sprites)
+        sprite::write_sprites(
+            self.sprites
+                .get_or_insert_with(|| self.overlay.sprite_batch(target.device)),
+            target.queue,
+            target.size,
+            target.view_projection,
+            sprites,
+        )
     }
 
     fn draw_sprites(&self, pass: &mut wgpu::RenderPass<'_>, sprites: &[Sprite2d<'_>]) -> usize {
         if sprites.is_empty() {
             return 0;
         }
-        self.sprites
-            .as_ref()
-            .expect("sprite batch prepared")
-            .draw_sprites(pass, sprites)
+        sprite::draw_sprites(
+            self.sprites.as_ref().expect("sprite batch prepared"),
+            pass,
+            sprites,
+        )
     }
 
     pub fn record_3d<'a>(
         &mut self,
         target: FrameTarget<'_>,
+        light: Option<FlatLight3d>,
+        fog: Option<DepthFog3d>,
         draws: impl ExactSizeIterator<Item = SceneDraw3d<'a>> + Clone,
         overlay: &Overlay<'_>,
         timer: Option<&GpuTimer>,
@@ -145,9 +159,12 @@ impl ScenePipelines {
         self.meshes.write_draws(
             target.queue,
             target.view_projection,
+            light,
+            fog,
             draws.clone().take(count),
         );
-        self.record(target, count, overlay, timer, |this, pass| {
+        let clear = fog.map_or(CLEAR_COLOR, DepthFog3d::clear_color);
+        self.record(target, count, clear, overlay, timer, |this, pass| {
             this.meshes.draw(pass, draws.take(count))
         })
     }
@@ -156,6 +173,7 @@ impl ScenePipelines {
         &mut self,
         target: FrameTarget<'_>,
         instances: usize,
+        clear: wgpu::Color,
         overlay: &Overlay<'_>,
         timer: Option<&GpuTimer>,
         draw: impl FnOnce(&Self, &mut wgpu::RenderPass<'_>) -> usize,
@@ -173,7 +191,7 @@ impl ScenePipelines {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Clear(clear),
                         store: wgpu::StoreOp::Store,
                     },
                 })],

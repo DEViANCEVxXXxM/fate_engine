@@ -1,4 +1,5 @@
 use crate::math::{Mat4, Vec2, Vec3};
+use crate::renderer::PickRay3d;
 use crate::renderer::visibility::{Bounds2d, Frustum3d};
 
 const MIN_VIEW_SIZE: f32 = 1.0;
@@ -267,6 +268,19 @@ impl Camera3d {
             self.safe_position(),
             (forward + right * x + up * y).normalize(),
         ))
+    }
+
+    /// Build a mesh-picking ray through a physical pixel, limited by the
+    /// camera's near and far clip planes. Pixels outside the viewport return
+    /// `None`.
+    pub fn pick_ray(&self, pixel: Vec2, viewport: (u32, u32)) -> Option<PickRay3d> {
+        let (origin, direction) = self.ray_from_pixel(pixel, viewport)?;
+        let (near, far) = self.safe_clip_planes();
+        PickRay3d::new(origin, direction, 0.0..=f64::INFINITY)?.with_view_depth(
+            self.forward(),
+            near,
+            far,
+        )
     }
 
     /// View frustum matching `view_projection(aspect)`.
