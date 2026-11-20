@@ -532,6 +532,15 @@ To try an export without a window:
 cargo run --release --locked -p fate_engine --example offscreen_capture -- capture.ppm
 ```
 
+Use `OffscreenRenderer::render` to submit without pixel readback. It returns
+scene instance and draw counts immediately and does not allocate the capture
+buffer until a capture is requested. An already queued capture retains its
+pixels. Opt into timestamps with `new_with_options`; `poll_gpu_timings`
+returns completed scene and overlay samples on supported adapters.
+Native tools can call `wait_idle(timeout)` outside their CPU submission
+measurement. See [Polygon's render benchmark](../projects/fate_polygon/)
+for a windowless consumer.
+
 ### Available windowed paths
 
 `fate_engine::renderer::Renderer` provides these draw entry points:

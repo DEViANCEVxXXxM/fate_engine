@@ -347,6 +347,14 @@ triangle and reports how many instance and triangle queries it needed.
 `window_smoke --scene-picking` exercises two overlapping instanced grids;
 CPU tests compare against a direct instance scan.
 
+## Step 24 — Measure rendering without a window or pixel readback
+
+**Status: done.** `OffscreenRenderer` can submit a scene without allocating
+a capture buffer. Optional timestamps report GPU pass durations.
+`fate_polygon --offscreen` varies grid tessellation, candidate count, or
+batching and reports CPU preparation, CPU submission, and GPU scene timings
+separately.
+
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.

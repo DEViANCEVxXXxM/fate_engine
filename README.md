@@ -40,6 +40,8 @@ expanding content.
 - [`fate_debug`](crates/fate_debug/) provides an opt-in native diagnostics
   companion with live charts, inspectors, event filtering and capture/export.
   Render telemetry attaches to existing 2D/3D renderers without changing draw calls.
+- [`fate_polygon`](projects/fate_polygon/) is a live stress lab with independent
+  render, lab physics and lab AI workloads, presets, and native controls.
 
 ## Build and test
 
@@ -49,6 +51,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p fate_demo
 cargo run --release -p fate_demo -- --dbg
+cargo run --release -p fate_polygon -- --dbg
 cargo run -p fate_combat_slice
 ```
 

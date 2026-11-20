@@ -33,7 +33,9 @@ pub use mesh::{
     DepthFog3d, Draw3d, FlatLight3d, Mesh3d, MeshCreateError, MeshVertex, NormalMeshVertex,
     SceneDraw3d, UvMeshVertex,
 };
-pub use offscreen::{CapturedFrame, OffscreenError, OffscreenRenderer, OffscreenScene};
+pub use offscreen::{
+    CapturedFrame, OffscreenError, OffscreenRenderer, OffscreenScene, OffscreenSubmission,
+};
 pub use picking::{
     MeshHit3d, PickInstance3d, PickMesh3d, PickQueryStats, PickRay3d, PickScene3d, PickSceneHit3d,
     PickSceneStats,

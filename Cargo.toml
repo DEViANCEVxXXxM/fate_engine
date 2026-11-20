@@ -14,6 +14,7 @@ members = [
     "projects/consumer_smoke",
     "projects/demo",
     "projects/duel_lab",
+    "projects/fate_polygon",
     "projects/window_smoke",
 ]
 default-members = ["projects/demo"]

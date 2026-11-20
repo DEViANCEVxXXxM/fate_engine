@@ -860,6 +860,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fate_polygon"
+version = "0.1.0"
+dependencies = [
+ "fate_debug",
+ "fate_engine",
+ "fate_sim",
+ "pollster",
+ "winit",
+]
+
+[[package]]
 name = "fate_sim"
 version = "0.1.0"
 

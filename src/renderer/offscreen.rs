@@ -3,12 +3,13 @@
 use std::sync::mpsc::{Receiver, TryRecvError, sync_channel};
 use std::time::Duration;
 
-use super::frame::{FrameTarget, Scene2d, ScenePipelines, depth_target};
+use super::frame::{FrameTarget, RecordedFrame, Scene2d, ScenePipelines, depth_target};
 use super::texture::TextureUpload;
+use super::timing::GpuTimer;
 use super::{
-    Camera2d, Camera3d, DepthFog3d, FlatLight3d, Instance2d, Mesh3d, MeshCreateError, MeshVertex,
-    NormalMeshVertex, Overlay, SceneDraw3d, Sprite2d, Texture2d, TextureCreateError,
-    TextureOptions, TileLayer2d, UvMeshVertex,
+    Camera2d, Camera3d, DepthFog3d, FlatLight3d, GpuFrameKind, GpuFrameTiming, Instance2d, Mesh3d,
+    MeshCreateError, MeshVertex, NormalMeshVertex, Overlay, RendererOptions, SceneDraw3d, Sprite2d,
+    Texture2d, TextureCreateError, TextureOptions, TileLayer2d, UvMeshVertex,
 };
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -48,7 +49,7 @@ impl std::fmt::Display for OffscreenError {
                 f,
                 "a capture is already pending; retrieve it before submitting another"
             ),
-            Self::Poll(err) => write!(f, "could not wait for capture: {err}"),
+            Self::Poll(err) => write!(f, "could not poll the offscreen device: {err}"),
             Self::Readback => write!(f, "could not read back the captured frame"),
         }
     }
@@ -75,6 +76,13 @@ pub struct CapturedFrame {
     /// Submitted scene instances; excludes HUD records.
     pub instances: usize,
     /// Scene draw calls; excludes the overlay pass.
+    pub draw_calls: usize,
+}
+
+/// Scene counts for a submitted offscreen frame, excluding the HUD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OffscreenSubmission {
+    pub instances: usize,
     pub draw_calls: usize,
 }
 
@@ -147,13 +155,24 @@ pub struct OffscreenRenderer {
     color: wgpu::Texture,
     view: wgpu::TextureView,
     depth: wgpu::TextureView,
-    buffer: wgpu::Buffer,
+    buffer: Option<wgpu::Buffer>,
     layout: ReadbackLayout,
     pending: Option<PendingCapture>,
+    gpu_timer: Option<GpuTimer>,
+    adapter_info: Option<wgpu::AdapterInfo>,
 }
 
 impl OffscreenRenderer {
-    pub async fn new((width, height): (u32, u32)) -> Result<Self, OffscreenError> {
+    pub async fn new(size: (u32, u32)) -> Result<Self, OffscreenError> {
+        Self::new_with_options(size, RendererOptions::default()).await
+    }
+
+    /// Create a windowless target, optionally requesting GPU pass timestamps.
+    /// Unsupported timestamps do not prevent rendering.
+    pub async fn new_with_options(
+        (width, height): (u32, u32),
+        options: RendererOptions,
+    ) -> Result<Self, OffscreenError> {
         if width == 0 || height == 0 {
             return Err(OffscreenError::InvalidSize { width, height });
         }
@@ -163,10 +182,22 @@ impl OffscreenRenderer {
             .await
             .map_err(OffscreenError::Adapter)?;
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: if options.gpu_timing {
+                    adapter.features() & wgpu::Features::TIMESTAMP_QUERY
+                } else {
+                    wgpu::Features::empty()
+                },
+                ..Default::default()
+            })
             .await
             .map_err(OffscreenError::Device)?;
-        Self::with_device(device, queue, (width, height))
+        let mut renderer = Self::with_device(device, queue, (width, height))?;
+        renderer.adapter_info = Some(adapter.get_info());
+        if options.gpu_timing {
+            renderer.gpu_timer = GpuTimer::new(&renderer.device, &renderer.queue);
+        }
+        Ok(renderer)
     }
 
     fn with_device(
@@ -187,12 +218,6 @@ impl OffscreenRenderer {
         });
         let view = color.create_view(&Default::default());
         let depth = depth_target(&device, size);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("offscreen scene readback"),
-            size: layout.len,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
         let pipelines = ScenePipelines::new(&device, &queue, FORMAT);
         Ok(Self {
             camera: Camera2d::default(),
@@ -206,9 +231,11 @@ impl OffscreenRenderer {
             color,
             view,
             depth,
-            buffer,
+            buffer: None,
             layout,
             pending: None,
+            gpu_timer: None,
+            adapter_info: None,
         })
     }
 
@@ -218,6 +245,35 @@ impl OffscreenRenderer {
 
     pub fn aspect(&self) -> f32 {
         self.size.0 as f32 / self.size.1 as f32
+    }
+
+    /// The adapter selected for this target.
+    pub fn adapter_info(&self) -> Option<&wgpu::AdapterInfo> {
+        self.adapter_info.as_ref()
+    }
+
+    pub fn gpu_timing_available(&self) -> bool {
+        self.gpu_timer.is_some()
+    }
+
+    /// Drain completed scene/overlay samples without blocking. Poll regularly
+    /// to free the bounded timestamp pool; frames may be unsampled if it fills.
+    pub fn poll_gpu_timings(&mut self) -> Vec<GpuFrameTiming> {
+        self.gpu_timer
+            .as_mut()
+            .map_or_else(Vec::new, |timer| timer.poll(&self.device))
+    }
+
+    /// Block until submitted GPU work finishes, or return a polling error.
+    /// This does not fetch images or GPU timing samples.
+    pub fn wait_idle(&self, timeout: Duration) -> Result<(), OffscreenError> {
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(timeout),
+            })
+            .map_err(OffscreenError::Poll)?;
+        Ok(())
     }
 
     pub fn create_mesh(
@@ -285,17 +341,39 @@ impl OffscreenRenderer {
         )
     }
 
-    /// Submit a frame and start asynchronous readback. If the previous capture
-    /// has not been retrieved yet, returns `Busy` without submitting anything.
-    pub fn capture(
+    /// Submit a frame without copying pixels or waiting for GPU completion.
+    /// A pending capture is not disturbed: its copy runs first on the same queue.
+    pub fn render(
         &mut self,
         scene: OffscreenScene<'_>,
         overlay: &Overlay<'_>,
-    ) -> Result<(), OffscreenError> {
-        if self.pending.is_some() {
-            return Err(OffscreenError::Busy);
-        }
-        let is_3d = matches!(scene, OffscreenScene::Meshes(_));
+    ) -> OffscreenSubmission {
+        let (frame, timing) = self.record(scene, overlay);
+        let counts = OffscreenSubmission {
+            instances: frame.instances,
+            draw_calls: frame.draw_calls,
+        };
+        self.submit(frame, timing);
+        counts
+    }
+
+    fn record(
+        &mut self,
+        scene: OffscreenScene<'_>,
+        overlay: &Overlay<'_>,
+    ) -> (RecordedFrame, Option<(usize, GpuFrameKind)>) {
+        let kind = match scene {
+            OffscreenScene::Meshes(_) => GpuFrameKind::Meshes3d,
+            OffscreenScene::Sprites(_) => GpuFrameKind::Sprites2d,
+            OffscreenScene::Tiles { .. } => GpuFrameKind::TileMap2d,
+            OffscreenScene::Triangles(_) => GpuFrameKind::Triangles2d,
+        };
+        let timer = self
+            .gpu_timer
+            .as_ref()
+            .and_then(|timer| Some((timer, timer.free_slot()?)));
+        let writes = timer.map(|(timer, _)| timer);
+        let is_3d = kind == GpuFrameKind::Meshes3d;
         let aspect = self.aspect();
         let target = FrameTarget {
             device: &self.device,
@@ -316,11 +394,11 @@ impl OffscreenRenderer {
                 self.mesh_fog,
                 draws.iter().copied(),
                 overlay,
-                None,
+                writes,
             ),
             OffscreenScene::Sprites(sprites) => {
                 self.pipelines
-                    .record_2d(target, Scene2d::Sprites(sprites), overlay, None)
+                    .record_2d(target, Scene2d::Sprites(sprites), overlay, writes)
             }
             OffscreenScene::Tiles { layers, sprites } => self.pipelines.record_2d(
                 target,
@@ -330,13 +408,55 @@ impl OffscreenRenderer {
                     view: self.camera.visible_bounds(aspect),
                 },
                 overlay,
-                None,
+                writes,
             ),
             OffscreenScene::Triangles(triangles) => {
                 self.pipelines
-                    .record_2d(target, Scene2d::Triangles(triangles), overlay, None)
+                    .record_2d(target, Scene2d::Triangles(triangles), overlay, writes)
             }
         };
+        let timing = timer.map(|(timer, slot)| {
+            timer.resolve(&mut frame.encoder, slot, frame.has_overlay);
+            (slot, kind)
+        });
+        (frame, timing)
+    }
+
+    fn submit(
+        &mut self,
+        frame: RecordedFrame,
+        timing: Option<(usize, GpuFrameKind)>,
+    ) -> wgpu::SubmissionIndex {
+        let submission = self.queue.submit(Some(frame.encoder.finish()));
+        if let Some((slot, kind)) = timing {
+            self.gpu_timer.as_mut().expect("timer recorded").submitted(
+                slot,
+                kind,
+                frame.has_overlay,
+            );
+        }
+        submission
+    }
+
+    /// Submit a frame and start asynchronous readback. If the previous capture
+    /// has not been retrieved yet, returns `Busy` without submitting anything.
+    pub fn capture(
+        &mut self,
+        scene: OffscreenScene<'_>,
+        overlay: &Overlay<'_>,
+    ) -> Result<(), OffscreenError> {
+        if self.pending.is_some() {
+            return Err(OffscreenError::Busy);
+        }
+        let (mut frame, timing) = self.record(scene, overlay);
+        let buffer = self.buffer.get_or_insert_with(|| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("offscreen scene readback"),
+                size: self.layout.len,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        });
         frame.encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color,
@@ -345,7 +465,7 @@ impl OffscreenRenderer {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyBufferInfo {
-                buffer: &self.buffer,
+                buffer,
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(self.layout.padded_row),
@@ -354,9 +474,12 @@ impl OffscreenRenderer {
             },
             extent(self.size),
         );
-        let submission = self.queue.submit(Some(frame.encoder.finish()));
+        let (instances, draw_calls) = (frame.instances, frame.draw_calls);
+        let submission = self.submit(frame, timing);
         let (sender, state) = sync_channel(1);
         self.buffer
+            .as_ref()
+            .expect("capture buffer allocated")
             .slice(..)
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.try_send(result);
@@ -364,8 +487,8 @@ impl OffscreenRenderer {
         self.pending = Some(PendingCapture {
             submission,
             state,
-            instances: frame.instances,
-            draw_calls: frame.draw_calls,
+            instances,
+            draw_calls,
         });
         Ok(())
     }
@@ -405,12 +528,12 @@ impl OffscreenRenderer {
             }
         }
         let pending = self.pending.take().expect("finished capture");
-        let rgba8 = self
-            .buffer
+        let buffer = self.buffer.as_ref().expect("pending capture buffer");
+        let rgba8 = buffer
             .slice(..)
             .get_mapped_range()
             .map(|bytes| self.layout.unpack(bytes.as_ref()));
-        self.buffer.unmap();
+        buffer.unmap();
         Ok(Some(CapturedFrame {
             width: self.size.0,
             height: self.size.1,
@@ -437,6 +560,77 @@ mod tests {
         Draw3d, UiImage, UiRect,
         test_support::{skip_without_adapter, test_device},
     };
+
+    #[test]
+    fn render_only_does_not_allocate_readback_or_replace_pending_capture() {
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (32, 32)).unwrap();
+        let timeout = Duration::from_secs(5);
+        let empty = Overlay::default();
+        assert_eq!(
+            renderer.render(OffscreenScene::Triangles(&[]), &empty),
+            OffscreenSubmission {
+                instances: 0,
+                draw_calls: 0
+            },
+        );
+        assert!(renderer.buffer.is_none());
+        assert!(renderer.poll_gpu_timings().is_empty());
+        assert!(renderer.poll_capture().unwrap().is_none());
+        let overlay = Overlay {
+            rects: &[UiRect::new(
+                Vec2::ZERO,
+                Vec2::new(32.0, 32.0),
+                [1.0, 0.0, 0.0, 1.0],
+            )],
+            ..empty
+        };
+        renderer
+            .capture(OffscreenScene::Triangles(&[]), &overlay)
+            .unwrap();
+        renderer.render(OffscreenScene::Triangles(&[]), &empty);
+        renderer.wait_idle(timeout).unwrap();
+        let captured = renderer.wait_capture(timeout).unwrap().unwrap();
+        assert_eq!(&captured.rgba8[..4], &[255, 0, 0, 255]);
+        assert!(renderer.poll_capture().unwrap().is_none());
+    }
+
+    #[test]
+    fn windowless_timestamp_samples_distinguish_scene_and_overlay() {
+        use crate::renderer::test_support::test_device_with_features;
+        let Some((device, queue)) = test_device_with_features(wgpu::Features::TIMESTAMP_QUERY)
+        else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (32, 32)).unwrap();
+        renderer.gpu_timer = GpuTimer::new(&renderer.device, &renderer.queue);
+        if !renderer.gpu_timing_available() {
+            return;
+        }
+        let timeout = Duration::from_secs(5);
+        renderer.render(OffscreenScene::Meshes(&[]), &Overlay::default());
+        renderer.render(
+            OffscreenScene::Triangles(&[]),
+            &Overlay {
+                rects: &[UiRect::new(Vec2::ZERO, Vec2::ONE, [1.0; 4])],
+                ..Overlay::default()
+            },
+        );
+        renderer.wait_idle(timeout).unwrap();
+        let timings = renderer.poll_gpu_timings();
+        assert_eq!(timings.len(), 2);
+        assert_eq!(
+            (timings[0].kind, timings[0].overlay),
+            (GpuFrameKind::Meshes3d, None)
+        );
+        assert_eq!(timings[1].kind, GpuFrameKind::Triangles2d);
+        assert!(timings[1].overlay.is_some());
+        assert!(renderer.buffer.is_none());
+    }
 
     #[test]
     fn tile_capture_samples_atlas_and_bounds_the_visible_batch() {
