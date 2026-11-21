@@ -1,7 +1,73 @@
 # Engine improvement roadmap
 
-> **Status:** Working plan, reviewed 2026-11-11. This is a sequence of small
-> engineering steps, not a release schedule or a stable API promise.
+> **Status:** Working plan, reviewed 2026-11-21. This is not a release schedule
+> or a stable API promise.
+
+## Progress review and priorities
+
+The foundational work through Step 26 is in place. The next milestone is to
+make the current engine easy to validate on both development platforms, then
+use that baseline to choose the next engine change.
+
+| Area | What is established | What remains open |
+|---|---|---|
+| Rendering | Windowed and offscreen 2D/3D, ordered instanced quads, and CPU picking for moving scenes. The tile and picking benchmarks compare concrete workloads. | Native Linux graphics and window lifecycle; GPU timings are machine-specific. |
+| Deterministic simulation | `fate_sim` provides fixed-point state, generational entities, and canonical snapshots. Polygon exercises ECS churn and checks that snapshot cadence does not change final state. | Identify whether update, encode, decode, or verification dominates at the upper ECS workload. |
+| Stress and diagnostics | Polygon has live, headless, and offscreen modes and CSV comparison. The native companion and windowed smoke paths have been exercised on Windows. | Repeatable cross-platform evidence for headless work counts and the separate diagnostics window. |
+| Scope | The demo is a showcase. Polygon owns workload policy, including its physics and AI; the engine owns reusable primitives. | No evidence yet for promoting lab-specific rules into the engine or resuming the paused gameplay consumers. |
+
+### Step 27 — Establish a cross-platform validation baseline
+
+**Status: in progress.** The six reference cases are now part of the headless
+test gate on Ubuntu and Windows. Windows is the local reference. Native Linux
+results are pending; cross-compilation does not count as a runtime result.
+
+1. Run the same locked CPU cases on Windows and native Linux: the headless
+   consumer smoke and fixed Polygon physics, navigation, and ECS cases.
+   Record toolchain, run settings, work counts, and final checksums. Compare
+   counts and checksums across hosts, not elapsed times.
+2. On a Linux desktop, follow the [manual smoke checklist](engine-guide.md#automated-quality-gate)
+   for resize/minimize/restore and the unfocused `--dbg` companion. Record the
+   display backend and GPU adapter; name any backend left untested.
+
+**Done when:** The same seeded CPU cases agree on both hosts, the Linux
+desktop smoke has a recorded result, and the required gate needs no
+graphics or audio device.
+
+**Windows reference:** Polygon `--headless --set seed=71 --warmup 16 --ticks 64`
+with the presets and options below. Both variants in each sweep produced the
+same final checksum on `x86_64-pc-windows-gnu` (Rust 1.99.1). The headless
+consumer, 2D/3D surface lifecycle smoke, and 120-frame Polygon smoke also
+passed on Windows. Use these settings for the matching Linux runs.
+
+| Preset | Additional options | Final checksum |
+|---|---|---|
+| `physics` | `--sweep broad_phase=0,1` | `1b4565dcb1275112` |
+| `navigation` | `--set nav_goal_ticks=16 --sweep nav_mode=1,2` | `349b9e704332dc5b` |
+| `ecs` | `--sweep snapshot_every=0,16` | `90faf31cc4d5c1f3` |
+
+### Step 28 — Use Polygon to pick the next engine bottleneck
+
+**Status: done.** Polygon reports encode, decode, and byte verification
+separately. Decode was the largest snapshot phase. `fate_sim` now checks
+component payload bounds once per entity and appends decoded components in
+slot order without first initializing occupied slots as empty. The wire
+format and validation rules are unchanged.
+
+Reproduce the workload with `fate_polygon --headless --preset ecs --set
+entities=8192 --sweep snapshot_every=0,4 --warmup 120 --ticks 600` in a release
+build; repeat at `entities=2048`. Across seven alternating before/after runs
+on the same Windows host, the medians of the reported run statistics were:
+
+| Entities | Decode p50 (ms/snapshot) | Tick p95, snapshot every 4 ticks (ms/tick) |
+|---|---|---|
+| 2,048 | ~0.11 → ~0.09 | ~0.22 → ~0.20 |
+| 8,192 | ~0.46 → ~0.41 | ~0.89 → ~0.83 |
+
+The runs matched work counts and final checksums, including with snapshots
+off. The lab checked canonical snapshot bytes on every restore. Regression
+tests cover all component masks and reject every truncated prefix of a
+sparse snapshot. Step 27 still needs native Linux validation.
 
 ## Current baseline
 
@@ -27,7 +93,8 @@
   Consumers own the mapping from events to sounds; there are no audio assets,
   spatialization, or mixer buses.
 - Headless and windowed smoke consumers exercise the public APIs independently
-  of the demo. CPU benchmarks exist, but do not establish GPU performance.
+  of the demo. CPU benchmarks and optional GPU timestamp runs measure
+  separate phases, not windowed FPS.
 - `fate_engine::diagnostics` provides rolling frame reports, budget
   classification, and metric sink/source seams. `fate_sim` and `fate_net`
   expose read-only inspection snapshots. Presentation and export remain
@@ -364,10 +431,21 @@ The windowless `tile_batch_bench` exercises up to 32,768 visible tiles
 without readback. Pixel tests cover atlas sampling, blend order, clipping,
 and drawing a separate atlas at the end of a full tile batch.
 
+## Step 26 — Update scene picking for moving instances
+
+**Status: done.** `PickScene3d::refit_transforms` updates world bounds in place
+and keeps original instance IDs, shared mesh trees, and exact hit ordering.
+`window_smoke --scene-picking` draws and picks from the same animated
+transforms. The headless picking benchmark compares refits and rebuilds for
+coherent and shuffled motion; rebuild when motion substantially reduces
+the tree's ability to reject groups of instances.
+
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.
 - General assets, materials, lighting, scene graphs, and renderer backends.
+- Lazy tile-buffer growth until profiling or a concrete memory budget
+  justifies it.
 - Network transport, peer identity, encryption, clock synchronization, and
   multiplayer prediction/reconciliation. Define a threat model before adding
   production networking.

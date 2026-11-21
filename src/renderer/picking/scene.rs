@@ -1,4 +1,4 @@
-//! Broad-phase picking over a snapshot of consumer-owned instances.
+//! Broad-phase picking over consumer-owned instances and transforms.
 
 use std::sync::Arc;
 
@@ -37,49 +37,63 @@ pub struct PickSceneStats {
 
 /// A CPU-only snapshot of pickable instances, with a world-space bounds tree.
 ///
-/// Rebuild it if transforms, ordering, or membership change. Mesh trees
-/// are shared and are not rebuilt or copied. Queries do not allocate.
+/// Update transforms with [`Self::refit_transforms`]. Build a new index if
+/// instance ordering, membership, or meshes change. Mesh trees are shared
+/// and are not rebuilt or copied. Queries do not allocate.
 pub struct PickScene3d {
     instances: Box<[IndexedInstance]>,
     hierarchy: Hierarchy,
 }
 
 struct IndexedInstance {
-    source_index: usize,
     mesh: Arc<PickMesh3d>,
-    transform: LocalTransform,
+    transform: Option<LocalTransform>,
 }
 
 impl PickScene3d {
-    /// Index the supplied instances. Invalid transforms are skipped without
-    /// renumbering later inputs. An empty scene is valid.
+    /// Index the supplied instances. Invalid transforms are not pickable,
+    /// but retain their input slots for subsequent transform updates.
+    /// An empty scene is valid.
     pub fn new(instances: impl IntoIterator<Item = PickInstance3d>) -> Self {
-        let mut valid = Vec::new();
+        let mut indexed = Vec::new();
         let mut items = Vec::new();
         for (source_index, PickInstance3d { mesh, model }) in instances.into_iter().enumerate() {
-            let Some((columns, transform)) = affine_parts(model) else {
-                continue;
-            };
-            let bounds = world_bounds(
-                mesh.hierarchy.nodes[0].bounds,
-                columns,
-                transform.translation,
-            );
+            let (transform, bounds) = place(&mesh, model);
             items.push(BuildItem {
-                index: valid.len(),
+                index: source_index,
                 bounds,
-                centroid: std::array::from_fn(|i| (bounds.min[i] + bounds.max[i]) * 0.5),
+                centroid: if transform.is_some() {
+                    std::array::from_fn(|i| (bounds.min[i] + bounds.max[i]) * 0.5)
+                } else {
+                    [0.0; 3]
+                },
             });
-            valid.push(IndexedInstance {
-                source_index,
-                mesh,
-                transform,
-            });
+            indexed.push(IndexedInstance { mesh, transform });
         }
         Self {
-            instances: valid.into_boxed_slice(),
+            instances: indexed.into_boxed_slice(),
             hierarchy: Hierarchy::build(items, 1),
         }
+    }
+
+    /// Replace every model matrix in original input order, without allocating
+    /// or rebuilding the tree. Returns `false` without changing the scene if
+    /// the slice length differs from the original instance count.
+    ///
+    /// Singular, non-affine, and non-finite models make their slots unpickable
+    /// until a valid model is supplied. Large rearrangements can make the
+    /// original tree less selective; rebuild to regroup instances if needed.
+    pub fn refit_transforms(&mut self, models: &[Mat4]) -> bool {
+        if models.len() != self.instances.len() {
+            return false;
+        }
+        self.hierarchy.refit(|index| {
+            let instance = &mut self.instances[index];
+            let (transform, bounds) = place(&instance.mesh, models[index]);
+            instance.transform = transform;
+            bounds
+        });
+        true
     }
 
     /// Returns the nearest hit. Exact distance ties favor the earlier instance.
@@ -98,6 +112,18 @@ impl PickScene3d {
         self.hierarchy.traverse(&mut query);
         (query.hit, query.stats)
     }
+}
+
+fn place(mesh: &PickMesh3d, model: Mat4) -> (Option<LocalTransform>, Bounds) {
+    let Some((columns, transform)) = affine_parts(model) else {
+        return (None, Bounds::EMPTY);
+    };
+    let bounds = world_bounds(
+        mesh.hierarchy.nodes[0].bounds,
+        columns,
+        transform.translation,
+    );
+    (Some(transform), bounds)
 }
 
 fn world_bounds(local: Bounds, columns: [Point; 3], translation: Point) -> Bounds {
@@ -131,6 +157,9 @@ struct SceneTraversal<'a> {
 
 impl Traversal for SceneTraversal<'_> {
     fn entry(&mut self, bounds: Bounds) -> Option<f64> {
+        if bounds.min[0] > bounds.max[0] {
+            return None; // Inactive subtree.
+        }
         self.stats.bounds_tests += 1;
         bounds_entry(
             self.ray.origin,
@@ -147,23 +176,25 @@ impl Traversal for SceneTraversal<'_> {
 
     fn visit_item(&mut self, index: usize) {
         let instance = &self.scene.instances[index];
+        let Some(transform) = &instance.transform else {
+            return;
+        };
         let ray = PickRay3d {
             far: self.limit(),
             ..self.ray
         };
         self.stats.instances_tested += 1;
-        let (hit, stats) = instance.mesh.intersect_local(ray, &instance.transform);
+        let (hit, stats) = instance.mesh.intersect_local(ray, transform);
         self.stats.mesh.bounds_tests += stats.bounds_tests;
         self.stats.mesh.triangle_tests += stats.triangle_tests;
         if let Some(mesh_hit) = hit
             && self.hit.is_none_or(|best| {
                 mesh_hit.distance < best.mesh_hit.distance
-                    || (mesh_hit.distance == best.mesh_hit.distance
-                        && instance.source_index < best.instance)
+                    || (mesh_hit.distance == best.mesh_hit.distance && index < best.instance)
             })
         {
             self.hit = Some(PickSceneHit3d {
-                instance: instance.source_index,
+                instance: index,
                 mesh_hit,
             });
         }
@@ -267,5 +298,44 @@ mod tests {
             empty.intersect_with_stats(ray),
             (None, PickSceneStats::default())
         );
+    }
+
+    #[test]
+    fn refit_updates_bounds_and_preserves_slots_across_invalid_models() {
+        let mesh = triangle();
+        let at = |x, z| Mat4::translation(Vec3::new(x, 0.0, z));
+        let singular = Mat4::scale(Vec3::new(1.0, 1.0, 0.0));
+        let mut invalid = Mat4::IDENTITY;
+        invalid.m[0] = f32::NAN;
+        let initial = [singular, at(0.0, -4.0), at(8.0, -4.0), at(0.0, -8.0)];
+        let make = |models: [Mat4; 4]| {
+            models.map(|model| PickInstance3d {
+                mesh: mesh.clone(),
+                model,
+            })
+        };
+        let mut scene = PickScene3d::new(make(initial));
+        let ray = |x| PickRay3d::new(Vec3::new(x, 0.0, 0.0), -Vec3::Z, 0.0..=30.0).unwrap();
+        assert_eq!(scene.intersect(ray(0.0)).unwrap().instance, 1);
+        assert!(!scene.refit_transforms(&[singular]));
+        assert_eq!(scene.intersect(ray(0.0)).unwrap().instance, 1);
+
+        let moved = [at(0.0, -3.0), invalid, at(-12.0, -6.0), at(0.0, -3.0)];
+        assert!(scene.refit_transforms(&moved));
+        let rebuilt = PickScene3d::new(make(moved));
+        for x in [-12.0, 0.0, 8.0] {
+            assert_eq!(scene.intersect(ray(x)), rebuilt.intersect(ray(x)));
+        }
+        assert_eq!(scene.intersect(ray(0.0)).unwrap().instance, 0);
+        assert_eq!(scene.intersect(ray(-12.0)).unwrap().instance, 2);
+        assert!(scene.intersect(ray(8.0)).is_none());
+        assert!(scene.refit_transforms(&[invalid; 4]));
+        assert_eq!(
+            scene.intersect_with_stats(ray(0.0)),
+            (None, PickSceneStats::default())
+        );
+        assert!(scene.refit_transforms(&initial));
+        assert_eq!(scene.intersect(ray(0.0)).unwrap().instance, 1);
+        assert!(PickScene3d::new([]).refit_transforms(&[]));
     }
 }

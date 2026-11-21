@@ -142,6 +142,7 @@ fn pick_models() -> [Mat4; PICK_DRAWS] {
 
 struct PickGrid {
     scene: PickScene3d,
+    rest: [Mat4; PICK_GRID_DRAWS],
     models: [Mat4; PICK_GRID_DRAWS],
 }
 
@@ -193,7 +194,22 @@ impl PickGrid {
             mesh: mesh.clone(),
             model,
         }));
-        Self { scene, models }
+        Self {
+            scene,
+            rest: models,
+            models,
+        }
+    }
+
+    fn animate(&mut self, frame: u32) {
+        let phase = (frame % 360) as f32 * (std::f32::consts::TAU / 360.0);
+        for (i, (model, &rest)) in self.models.iter_mut().zip(&self.rest).enumerate() {
+            let row = (i % PICK_GRID_LAYER) / PICK_GRID_COLS;
+            let amplitude = if i < PICK_GRID_LAYER { -0.17 } else { 0.37 };
+            *model = rest;
+            model.m[12] += amplitude * (phase + row as f32 * 0.5).sin();
+        }
+        assert!(self.scene.refit_transforms(&self.models));
     }
 }
 
@@ -748,11 +764,10 @@ impl SmokeApp {
                 .unwrap_or_default();
             (models, hit, stats)
         });
-        let grid_query = self
-            .pick_grid
-            .as_ref()
-            .zip(pick_ray)
-            .map(|(grid, ray)| grid.scene.intersect_with_stats(ray));
+        let grid_query = self.pick_grid.as_mut().and_then(|grid| {
+            grid.animate(self.redraws);
+            pick_ray.map(|ray| grid.scene.intersect_with_stats(ray))
+        });
         let pick_label = pick_frame.as_ref().map(|(_, hit, stats)| {
             let probe = if self.cursor_pixel.is_some() {
                 "POINTER"
@@ -1233,7 +1248,7 @@ impl ApplicationHandler for SmokeApp {
             let positions: Vec<_> = PYRAMID_VERTICES.iter().map(|v| v.position).collect();
             let mesh =
                 Arc::new(PickMesh3d::new(&positions, PYRAMID_INDICES).expect("grid pick mesh"));
-            let grid = PickGrid::new(mesh);
+            let mut grid = PickGrid::new(mesh);
             let center = renderer
                 .camera_3d
                 .pick_ray(Vec2::new(480.0, 270.0), (960, 540))
@@ -1246,8 +1261,20 @@ impl ApplicationHandler for SmokeApp {
             // Traversal can reach either of the two overlapping center bounds;
             // it must find the front hit and skip the rest of the grid.
             assert!((1..=2).contains(&stats.instances_tested), "{stats:?}");
+            let front_center = PICK_GRID_LAYER + PICK_GRID_LAYER / 2;
+            grid.models[front_center].m[14] -= 20.0;
+            assert!(grid.scene.refit_transforms(&grid.models));
+            assert_eq!(
+                grid.scene
+                    .intersect(center)
+                    .expect("rear grid hit")
+                    .instance,
+                PICK_GRID_LAYER / 2
+            );
+            grid.models = grid.rest;
+            assert!(grid.scene.refit_transforms(&grid.models));
             println!(
-                "scene picking: queried {} of {PICK_GRID_DRAWS} instances ({} scene bounds tests)",
+                "scene picking and refit verified: queried {} of {PICK_GRID_DRAWS} instances ({} scene bounds tests)",
                 stats.instances_tested, stats.bounds_tests
             );
             self.pick_grid = Some(grid);

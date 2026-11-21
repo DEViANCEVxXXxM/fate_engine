@@ -19,6 +19,9 @@ pub struct EcsWork {
     pub bytes: u64,
     pub update_time: Duration,
     pub snapshot_time: Duration,
+    pub encode_time: Duration,
+    pub decode_time: Duration,
+    pub verify_time: Duration,
 }
 
 pub struct EcsLab {
@@ -78,17 +81,23 @@ impl EcsLab {
             let start = Instant::now();
             self.encoded.clear();
             self.state.write_state(&mut self.encoded);
+            let encoded_at = Instant::now();
             let restored = SimulationState::from_state_bytes(&self.encoded)
                 .expect("engine must decode its own ECS snapshot");
+            let decoded_at = Instant::now();
             self.round_trip.clear();
             restored.write_state(&mut self.round_trip);
             assert!(
                 self.round_trip == self.encoded,
                 "ECS snapshot round trip changed state"
             );
+            let verified_at = Instant::now();
             self.state = restored;
             work.snapshots += 1;
             work.bytes += self.encoded.len() as u64;
+            work.encode_time += encoded_at - start;
+            work.decode_time += decoded_at - encoded_at;
+            work.verify_time += verified_at - decoded_at;
             work.snapshot_time += start.elapsed();
         }
     }

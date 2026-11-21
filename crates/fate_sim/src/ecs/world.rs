@@ -111,6 +111,20 @@ impl<T: Copy> Column<T> {
         });
     }
 
+    /// Snapshot records arrive in strictly increasing slot order. Fill only
+    /// actual gaps, not the occupied slot that we are about to append.
+    fn append_decoded(&mut self, entity: Entity, value: T) {
+        let index = entity.id as usize;
+        debug_assert!(self.data.len() <= index);
+        if self.data.len() < index {
+            self.data.resize(index, None);
+        }
+        self.data.push(Some(ComponentEntry {
+            generation: entity.generation,
+            value,
+        }));
+    }
+
     pub fn remove(&mut self, entity: Entity) -> Option<T> {
         let slot = self.data.get_mut(entity.id as usize)?;
         if slot
@@ -539,8 +553,8 @@ impl World {
         let mut live_count = 0_usize;
 
         for id in 0..next_id {
-            let generation = Self::read_u32(input, offset)?;
-            let alive_byte = Self::read_u8(input, offset)?;
+            let [a, b, c, d, alive_byte] = Self::read_record(input, offset)?;
+            let generation = u32::from_le_bytes([a, b, c, d]);
             if alive_byte > 1 {
                 return Err("invalid alive flag");
             }
@@ -556,27 +570,32 @@ impl World {
                     return Err("invalid component mask");
                 }
 
+                // Position/velocity each have two words, rotation/spin one.
+                // Validate the entire record before reading individual words.
+                let words =
+                    2 * (component_mask & 0b0011).count_ones() + (component_mask >> 2).count_ones();
+                let end = offset
+                    .checked_add(words as usize * 8)
+                    .ok_or("truncated world state")?;
+                let payload = input.get(*offset..end).ok_or("truncated world state")?;
+                *offset = end;
+                let mut words = payload.as_chunks::<8>().0.iter();
+                let mut read = || {
+                    Fixed::from_raw(i64::from_le_bytes(
+                        *words.next().expect("validated component payload"),
+                    ))
+                };
                 if component_mask & (1 << 0) != 0 {
-                    let x = Fixed::from_raw(Self::read_i64(input, offset)?);
-                    let y = Fixed::from_raw(Self::read_i64(input, offset)?);
-                    positions.insert(entity, Position(FixedVec2::new(x, y)));
+                    positions.append_decoded(entity, Position(FixedVec2::new(read(), read())));
                 }
                 if component_mask & (1 << 1) != 0 {
-                    let x = Fixed::from_raw(Self::read_i64(input, offset)?);
-                    let y = Fixed::from_raw(Self::read_i64(input, offset)?);
-                    velocities.insert(entity, Velocity(FixedVec2::new(x, y)));
+                    velocities.append_decoded(entity, Velocity(FixedVec2::new(read(), read())));
                 }
                 if component_mask & (1 << 2) != 0 {
-                    rotations.insert(
-                        entity,
-                        Rotation(Fixed::from_raw(Self::read_i64(input, offset)?)),
-                    );
+                    rotations.append_decoded(entity, Rotation(read()));
                 }
                 if component_mask & (1 << 3) != 0 {
-                    spins.insert(
-                        entity,
-                        Spin(Fixed::from_raw(Self::read_i64(input, offset)?)),
-                    );
+                    spins.append_decoded(entity, Spin(read()));
                 }
             }
         }
@@ -587,14 +606,16 @@ impl World {
         // The entity table has now been read, so the payload is large enough to
         // justify a bitmap proportional to `next_id`. Reject duplicates so the
         // free list covers every dead slot exactly once.
-        let mut seen_free = vec![false; next_id as usize];
-        for &free_id in &free_list {
-            let index = free_id as usize;
-            if alive[index] {
-                return Err("entity in free list is marked alive");
-            }
-            if std::mem::replace(&mut seen_free[index], true) {
-                return Err("duplicate entity in free list");
+        if !free_list.is_empty() {
+            let mut seen_free = vec![false; next_id as usize];
+            for &free_id in &free_list {
+                let index = free_id as usize;
+                if alive[index] {
+                    return Err("entity in free list is marked alive");
+                }
+                if std::mem::replace(&mut seen_free[index], true) {
+                    return Err("duplicate entity in free list");
+                }
             }
         }
 
@@ -617,21 +638,19 @@ impl World {
     }
 
     fn read_u32(input: &[u8], offset: &mut usize) -> Result<u32, &'static str> {
-        let end = offset.checked_add(4).ok_or("truncated world state")?;
-        let bytes = input.get(*offset..end).ok_or("truncated world state")?;
-        *offset = end;
-        Ok(u32::from_le_bytes(
-            bytes.try_into().expect("fixed-size slice"),
-        ))
+        Ok(u32::from_le_bytes(Self::read_record(input, offset)?))
     }
 
-    fn read_i64(input: &[u8], offset: &mut usize) -> Result<i64, &'static str> {
-        let end = offset.checked_add(8).ok_or("truncated world state")?;
-        let bytes = input.get(*offset..end).ok_or("truncated world state")?;
-        *offset = end;
-        Ok(i64::from_le_bytes(
-            bytes.try_into().expect("fixed-size slice"),
-        ))
+    fn read_record<const N: usize>(
+        input: &[u8],
+        offset: &mut usize,
+    ) -> Result<[u8; N], &'static str> {
+        let bytes = input
+            .get(*offset..)
+            .and_then(|rest| rest.first_chunk())
+            .ok_or("truncated world state")?;
+        *offset += N;
+        Ok(*bytes)
     }
 
     pub fn with_position(mut self, entity: Entity, value: Position) -> Self {
@@ -866,6 +885,47 @@ mod tests {
 
         let mut offset = 0;
         assert!(World::decode_state(&bytes, &mut offset).is_err());
+    }
+
+    #[test]
+    fn snapshot_preserves_sparse_component_masks_and_rejects_every_truncated_prefix() {
+        let mut world = World::new();
+        let gap = world.spawn();
+        for mask in 0u8..16 {
+            let entity = world.spawn();
+            let value = |n| Fixed::from_raw(i64::from(mask) * 100 + n);
+            if mask & 1 != 0 {
+                world
+                    .set_position(entity, Position(FixedVec2::new(value(1), value(2))))
+                    .unwrap();
+            }
+            if mask & 2 != 0 {
+                world
+                    .set_velocity(entity, Velocity(FixedVec2::new(value(3), value(4))))
+                    .unwrap();
+            }
+            if mask & 4 != 0 {
+                world.set_rotation(entity, Rotation(value(5))).unwrap();
+            }
+            if mask & 8 != 0 {
+                world.set_spin(entity, Spin(value(6))).unwrap();
+            }
+        }
+        assert!(world.despawn(gap));
+        let mut bytes = Vec::new();
+        world.encode_state(&mut bytes);
+        for end in 0..bytes.len() {
+            assert!(
+                World::decode_state(&bytes[..end], &mut 0).is_err(),
+                "prefix {end}"
+            );
+        }
+        let mut offset = 0;
+        let restored = World::decode_state(&bytes, &mut offset).unwrap();
+        let mut round_trip = Vec::new();
+        restored.encode_state(&mut round_trip);
+        assert_eq!(offset, bytes.len());
+        assert_eq!(round_trip, bytes);
     }
 
     #[test]

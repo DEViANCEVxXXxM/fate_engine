@@ -665,9 +665,16 @@ consumer draw order. Each record pairs an `Arc<PickMesh3d>` with a model
 matrix, so instances can share mesh geometry and its triangle tree. The
 scene index skips groups of instances before querying their meshes. The
 nearest hit reports the original input index and a `MeshHit3d`; exact
-distance ties favor the earlier input. Invalid transforms are skipped
-without renumbering. Rebuild the scene index when transforms, ordering,
-or membership change. The renderer does not build or maintain this index.
+distance ties favor the earlier input. For moving instances, call
+`scene.refit_transforms(&models)` with one matrix per original input, in the
+same order as the draw list. This updates bounds in place without allocating.
+A length mismatch returns `false` and leaves the scene unchanged. Invalid
+transforms make their slots unpickable until a valid transform is supplied.
+
+Rebuild the index if instance order, membership, or mesh references change,
+or if large movements make the existing tree less selective. The renderer
+does not maintain the index automatically. `fate_window_smoke --scene-picking`
+uses the same moving transforms for both rendering and picking.
 
 Measure picking separately from render timings with the headless example:
 
@@ -676,8 +683,9 @@ cargo run --release --locked -p fate_engine --example picking_bench
 ```
 
 It reports scene build and per-ray p50/p95 for grid hits, misses, edge
-grazes, and heavily overlapping instances. The linear reference uses the
-same mesh picker, so the comparison isolates the scene index.
+grazes, and heavily overlapping instances. It also compares refit and rebuild
+times and bounds-test counts for both coherent motion and shuffled positions,
+checking that both return identical hits.
 
 Adjacent overlay images using the same `Texture2d` and effective scissor
 share a draw, even when their atlas regions, transforms, or tints differ.
@@ -1004,7 +1012,7 @@ uses the current stable Rust toolchain with `rustfmt` and `clippy` on
 (`x86_64-pc-windows-gnu`); edition 2024 requires Rust 1.85 or newer. CI installs
 the latest stable release, so a newer toolchain may report additional lints.
 
-The workflow runs, in order:
+The Ubuntu job runs, in order:
 
 ```powershell
 cargo fmt --all -- --check
@@ -1023,17 +1031,41 @@ The consumer smoke run is a headless integration check: it exercises input,
 simulation, movement, snapshots, and restoration through the public APIs. It
 does not initialize a window or GPU.
 
+The Windows job runs the Polygon tests and the headless consumer smoke.
+The `portable_cpu_baseline` test runs on both platforms and checks fixed work
+counts and final state checksums for physics, navigation, and ECS. It does not
+assert timings or initialize a window, GPU adapter, or audio device.
+To run just that baseline locally:
+
+```sh
+cargo test -p fate_polygon --locked headless::tests::portable_cpu_baseline -- --exact
+```
+
+On Linux, set `CARGO_TARGET_DIR="$PWD/target"` and export it before running
+Cargo to override the checkout's Windows-specific build output path.
+
 Renderer tests request a test adapter when one is available and skip the GPU
 cases when none exists, so the headless test job still passes on machines
 without graphics hardware. A skipped renderer test is not evidence that
 rendering works.
 
-Windowed and GPU checks are intentionally separate from the required CI job.
-Run `cargo run -p fate_window_smoke`, `cargo run -p fate_demo`, and
-`cargo run -p fate_combat_slice` manually on a machine with a window and
-graphics adapter when renderer changes need visual verification, and record what
-was exercised. They are not headless checks and are not part of the automated
-gate.
+Windowed and GPU checks are intentionally separate from the required CI jobs.
+Run the relevant consumers manually on a desktop with a graphics adapter.
+For a platform baseline:
+
+```sh
+cargo run --release --locked -p fate_window_smoke -- --surface-lifecycle --dbg
+cargo run --release --locked -p fate_polygon -- --dbg --smoke
+cargo run --release --locked -p fate_polygon -- --dbg
+```
+
+Check that the lifecycle smoke restores both 2D and 3D submission and that
+Polygon's smoke exercises all six presets. In the interactive run, resize and
+minimize/restore the viewport, then put focus on another window while leaving
+the companion visible. Verify that its counters advance, that closing it keeps
+the viewport alive, and that **F3** reopens it. Record the Rust toolchain,
+OS and display backend (e.g. Wayland or X11), GPU backend and adapter,
+and checks that passed, failed, or were not exercised.
 
 ### Performance measurement
 

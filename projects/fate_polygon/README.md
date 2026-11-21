@@ -112,9 +112,10 @@ cargo run --release --locked -p fate_polygon -- --headless --preset ecs --sweep 
 `entities` sets population; `churn` replaces up to that many live entities
 per tick, and `snapshot_every=0` turns restore off. ECS update timing excludes
 snapshot time. Snapshot p50/p95 covers encode, decode, byte verification, and
-restore per snapshot, not per tick. Disabling restore should leave the final
-state checksum unchanged. ECS-enabled CSVs include additional settings and
-metrics; runs with ECS off keep the existing CPU CSV format.
+restore per snapshot, not per tick. The console also reports encode, decode,
+and verification separately; verification includes re-encoding and comparing
+bytes. The CSV retains the combined snapshot metric. Disabling restore should
+leave the final state checksum unchanged.
 
 ## Windowless render runs
 

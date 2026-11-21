@@ -201,6 +201,26 @@ impl Hierarchy {
         }
     }
 
+    fn refit(&mut self, mut item_bounds: impl FnMut(usize) -> Bounds) {
+        // The build stores parents before their children. Walking backwards
+        // updates every subtree before its parent, without a scratch buffer.
+        for i in (0..self.nodes.len()).rev() {
+            let mut bounds = Bounds::EMPTY;
+            match self.nodes[i].kind {
+                NodeKind::Leaf { start, len } => {
+                    for &index in &self.order[start..start + len] {
+                        bounds.include(item_bounds(index));
+                    }
+                }
+                NodeKind::Branch { left, right } => {
+                    bounds = self.nodes[left].bounds;
+                    bounds.include(self.nodes[right].bounds);
+                }
+            }
+            self.nodes[i].bounds = bounds;
+        }
+    }
+
     fn traverse(&self, query: &mut impl Traversal) {
         if let Some(root) = self.nodes.first()
             && query.entry(root.bounds).is_some()

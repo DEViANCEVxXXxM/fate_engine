@@ -35,6 +35,7 @@ struct ResultRow {
     ai: Option<Percentiles>,
     ecs: Option<Percentiles>,
     snapshot: Option<Percentiles>,
+    snapshot_phases: Option<[Percentiles; 3]>,
     work: Totals,
     digest: u64,
 }
@@ -50,6 +51,7 @@ fn measure(s: Settings, warmup: usize, ticks: usize) -> ResultRow {
     let mut ai = Vec::with_capacity(if s.ai { ticks } else { 0 });
     let mut ecs = Vec::with_capacity(if s.ecs { ticks } else { 0 });
     let mut snapshots = Vec::new();
+    let mut phases = [Vec::new(), Vec::new(), Vec::new()];
     let mut totals = Totals::default();
     for _ in 0..ticks {
         let mut work = Work::default();
@@ -66,6 +68,13 @@ fn measure(s: Settings, warmup: usize, ticks: usize) -> ResultRow {
             ecs.push(work.ecs.update_time);
             if work.ecs.snapshots != 0 {
                 snapshots.push(work.ecs.snapshot_time);
+                for (samples, time) in phases.iter_mut().zip([
+                    work.ecs.encode_time,
+                    work.ecs.decode_time,
+                    work.ecs.verify_time,
+                ]) {
+                    samples.push(time);
+                }
             }
         }
         totals.pairs += work.pairs;
@@ -81,12 +90,16 @@ fn measure(s: Settings, warmup: usize, ticks: usize) -> ResultRow {
         totals.ecs.snapshots += work.ecs.snapshots;
         totals.ecs.bytes += work.ecs.bytes;
     }
+    let snapshot_phases = (!snapshots.is_empty()).then(|| {
+        phases.map(|samples| Percentiles::from_samples(samples).expect("sampled every phase"))
+    });
     ResultRow {
         tick: Percentiles::from_samples(all).expect("nonempty measurement"),
         physics: Percentiles::from_samples(physics),
         ai: Percentiles::from_samples(ai),
         ecs: Percentiles::from_samples(ecs),
         snapshot: Percentiles::from_samples(snapshots),
+        snapshot_phases,
         work: totals,
         digest: lab.state_hash(),
     }
@@ -201,6 +214,12 @@ fn print_row(out: &mut impl Write, index: usize, case: &Case, row: &ResultRow) -
                 "  restore {:>9.4} / {:<9.4}   {} snapshots, {} encoded bytes (ms per snapshot)",
                 p.p50, p.p95, work.snapshots, work.bytes
             )?;
+            for (name, phase) in ["encode", "decode", "verify"]
+                .into_iter()
+                .zip(row.snapshot_phases.expect("snapshot phase samples"))
+            {
+                writeln!(out, "    {name:<7} {:>9.4} / {:<9.4}", phase.p50, phase.p95)?;
+            }
         } else {
             writeln!(out, "  restore no snapshots in the measured interval")?;
         }
@@ -279,6 +298,80 @@ mod tests {
     use crate::settings::Preset;
 
     #[test]
+    fn portable_cpu_baseline() {
+        // Keep in sync with the reference runs in docs/roadmap.md.
+        // Timing fields are intentionally not part of this contract.
+        let run = |settings: Settings| {
+            measure(
+                Settings {
+                    seed: 71,
+                    ..settings
+                },
+                16,
+                64,
+            )
+        };
+        let physics = Settings::preset(Preset::Physics);
+        for (broad_phase, pairs) in [(0, 4_177_920), (1, 208_700)] {
+            let row = run(Settings {
+                broad_phase,
+                ..physics
+            });
+            assert_eq!(
+                row.digest, 0x1b45_65dc_b127_5112,
+                "broad_phase={broad_phase}"
+            );
+            assert_eq!(
+                (row.work.pairs, row.work.contacts),
+                (pairs, 243),
+                "broad_phase={broad_phase}"
+            );
+        }
+
+        let navigation = Settings::preset(Preset::Navigation);
+        for (nav_mode, searches, visits) in [(1, 1_354, 401_256), (2, 4, 2_368)] {
+            let row = run(Settings {
+                nav_mode,
+                nav_goal_ticks: 16,
+                ..navigation
+            });
+            assert_eq!(row.digest, 0x349b_9e70_4332_dc5b, "nav_mode={nav_mode}");
+            assert_eq!(
+                row.work.route,
+                RouteWork {
+                    searches,
+                    visits,
+                    moves: 1_354
+                },
+                "nav_mode={nav_mode}",
+            );
+        }
+
+        let ecs = Settings::preset(Preset::Ecs);
+        for (snapshot_every, snapshots, bytes) in [(0, 0, 0), (16, 4, 442_488)] {
+            let row = run(Settings {
+                snapshot_every,
+                ..ecs
+            });
+            assert_eq!(
+                row.digest, 0x90fa_f31c_c4d5_c1f3,
+                "snapshot_every={snapshot_every}"
+            );
+            assert_eq!(
+                row.work.ecs,
+                EcsTotals {
+                    spawned: 8_192,
+                    despawned: 8_192,
+                    updates: 131_072,
+                    snapshots,
+                    bytes
+                },
+                "snapshot_every={snapshot_every}",
+            );
+        }
+    }
+
+    #[test]
     fn deterministic_runs_exclude_warmup_from_work_but_not_state() {
         let s = Settings {
             bodies: 10,
@@ -324,6 +417,7 @@ mod tests {
             (36, 36, 288, 2)
         );
         assert!(row.ecs.is_some() && row.snapshot.is_some());
+        assert!(row.snapshot_phases.is_some());
         let no_restore = measure(
             Settings {
                 snapshot_every: 0,
@@ -333,6 +427,7 @@ mod tests {
             9,
         );
         assert!(no_restore.snapshot.is_none());
+        assert!(no_restore.snapshot_phases.is_none());
         assert_eq!(no_restore.digest, row.digest);
         assert!(!Kind::Cpu.columns().contains(&"entities"));
         assert!(Kind::Ecs.columns().contains(&"snapshot_bytes"));

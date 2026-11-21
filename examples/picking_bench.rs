@@ -193,6 +193,68 @@ fn query_bench(scene: &PickScene3d, instances: &[PickInstance3d], workload: Work
     print_percentiles("linear instance scan", &mut scan_samples, 1e6, "us/ray");
 }
 
+fn move_grid(instances: &mut [PickInstance3d], frame: usize, shuffle: bool) {
+    for (i, instance) in instances.iter_mut().enumerate() {
+        let cell = if shuffle {
+            ((i.reverse_bits() >> (usize::BITS - INSTANCES.ilog2())) + frame) % INSTANCES
+        } else {
+            i
+        };
+        let (col, row) = ((cell % SIDE) as f32, (cell / SIDE) as f32);
+        let wave = (frame as f32 * 0.2 + row * 0.3).sin() * 0.35;
+        instance.model = Mat4::translation(Vec3::new(col * 2.0 + wave, row * 2.0, -8.0))
+            .mul(Mat4::rotation_y(wave));
+    }
+}
+
+fn refit_bench(mesh: &Arc<PickMesh3d>, shuffle: bool) {
+    let mut draws = instances(mesh, false);
+    let mut scene = PickScene3d::new(draws.iter().cloned());
+    let mut models = Vec::with_capacity(draws.len());
+    let rays = Workload::GridHits.rays();
+    let mut refits = [Duration::ZERO; BUILD_SAMPLES];
+    let mut rebuilds = [Duration::ZERO; BUILD_SAMPLES];
+    let (mut refit_bounds, mut rebuild_bounds) = (0, 0);
+    for frame in 0..WARMUP + BUILD_SAMPLES {
+        move_grid(&mut draws, frame, shuffle);
+        models.clear();
+        models.extend(draws.iter().map(|draw| draw.model));
+        let mut refit = || sample(|| assert!(scene.refit_transforms(black_box(&models))));
+        let rebuild = || {
+            let start = Instant::now();
+            let rebuilt = PickScene3d::new(black_box(&draws).iter().cloned());
+            (rebuilt, start.elapsed())
+        };
+        let (refit_time, (rebuilt, rebuild_time)) = if frame.is_multiple_of(2) {
+            (refit(), rebuild())
+        } else {
+            let result = rebuild();
+            (refit(), result)
+        };
+        if frame >= WARMUP {
+            refits[frame - WARMUP] = refit_time;
+            rebuilds[frame - WARMUP] = rebuild_time;
+            for ray in rays {
+                let (hit, stats) = scene.intersect_with_stats(ray);
+                let (expected, fresh_stats) = rebuilt.intersect_with_stats(ray);
+                assert_eq!(hit, expected);
+                refit_bounds += stats.bounds_tests;
+                rebuild_bounds += fresh_stats.bounds_tests;
+            }
+        }
+    }
+    let samples = (BUILD_SAMPLES * RAYS) as f64;
+    let motion = if shuffle { "shuffled" } else { "coherent" };
+    println!("\n{motion} grid motion ({BUILD_SAMPLES} updates, matching hits):");
+    print_percentiles("refit", &mut refits, 1e3, "ms/update");
+    print_percentiles("rebuild", &mut rebuilds, 1e3, "ms/update");
+    println!(
+        "mean scene bounds tests/ray: {:.1} refit / {:.1} rebuild",
+        refit_bounds as f64 / samples,
+        rebuild_bounds as f64 / samples
+    );
+}
+
 fn main() {
     println!("CPU picking only: no window or GPU, {INSTANCES} instances per scene");
     println!(
@@ -210,6 +272,8 @@ fn main() {
         query_bench(&grid_scene, &grid, workload);
     }
     query_bench(&overlap_scene, &overlap, Workload::Overlap);
+    refit_bench(&mesh, false);
+    refit_bench(&mesh, true);
 }
 
 #[cfg(test)]
@@ -228,5 +292,19 @@ mod tests {
         let scene = PickScene3d::new(overlap.iter().cloned());
         let workload = Workload::Overlap;
         verify(&scene, &overlap, workload, &workload.rays());
+    }
+
+    #[test]
+    fn refit_matches_scan_after_disruptive_motion() {
+        let mut draws = instances(&shared_quad(), false);
+        let mut scene = PickScene3d::new(draws.iter().cloned());
+        for frame in [0, 7, 18] {
+            move_grid(&mut draws, frame, true);
+            let models: Vec<_> = draws.iter().map(|draw| draw.model).collect();
+            assert!(scene.refit_transforms(&models));
+            for ray in Workload::GridHits.rays() {
+                assert_eq!(scene.intersect(ray), scan(&draws, ray));
+            }
+        }
     }
 }
