@@ -22,6 +22,7 @@ pub enum ReplayError {
     UnsupportedVersion(u16),
     InvalidInput,
     TooManyTicks,
+    TickOverflow,
     TrailingBytes,
     InvalidSnapshot(StateDecodeError),
     Diverged {
@@ -41,6 +42,7 @@ impl fmt::Display for ReplayError {
             }
             Self::InvalidInput => formatter.write_str("invalid input in replay data"),
             Self::TooManyTicks => formatter.write_str("replay exceeds the tick limit"),
+            Self::TickOverflow => formatter.write_str("replay tick range overflows"),
             Self::TrailingBytes => formatter.write_str("unexpected trailing bytes in replay"),
             Self::InvalidSnapshot(error) => write!(formatter, "invalid initial state: {error}"),
             Self::Diverged {
@@ -60,6 +62,7 @@ impl std::error::Error for ReplayError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReplayTape {
     initial_state: Vec<u8>,
+    start_tick: u64,
     frames: Vec<ReplayFrame>,
 }
 
@@ -68,6 +71,8 @@ impl ReplayTape {
         if inputs.len() > MAX_REPLAY_TICKS {
             return Err(ReplayError::TooManyTicks);
         }
+        let start_tick = initial.tick();
+        checked_end_tick(start_tick, inputs.len())?;
 
         let initial_state = initial.state_bytes();
         let mut core =
@@ -84,12 +89,18 @@ impl ReplayTape {
 
         Ok(Self {
             initial_state,
+            start_tick,
             frames,
         })
     }
 
     pub fn tick_count(&self) -> usize {
         self.frames.len()
+    }
+
+    /// Initial snapshot tick and final tick after playing every frame.
+    pub fn tick_range(&self) -> (u64, u64) {
+        (self.start_tick, self.start_tick + self.frames.len() as u64)
     }
 
     pub fn playback(&self) -> Result<EngineCore, ReplayError> {
@@ -153,13 +164,16 @@ impl ReplayTape {
             .get(offset..state_end)
             .ok_or(ReplayError::Truncated)?
             .to_vec();
-        EngineCore::from_state_bytes(&initial_state).map_err(ReplayError::InvalidSnapshot)?;
+        let start_tick = EngineCore::from_state_bytes(&initial_state)
+            .map_err(ReplayError::InvalidSnapshot)?
+            .tick();
         offset = state_end;
 
         let frame_count = read_u32(bytes, &mut offset)? as usize;
         if frame_count > MAX_REPLAY_TICKS {
             return Err(ReplayError::TooManyTicks);
         }
+        checked_end_tick(start_tick, frame_count)?;
         if offset > bytes.len() || bytes.len() - offset != frame_count.saturating_mul(FRAME_BYTES) {
             return Err(
                 if offset > bytes.len()
@@ -199,9 +213,17 @@ impl ReplayTape {
         }
         Ok(Self {
             initial_state,
+            start_tick,
             frames,
         })
     }
+}
+
+fn checked_end_tick(start: u64, frame_count: usize) -> Result<(), ReplayError> {
+    start
+        .checked_add(frame_count as u64)
+        .map(|_| ())
+        .ok_or(ReplayError::TickOverflow)
 }
 
 fn validate_input(input: SimulationInput) -> Result<(), ReplayError> {
@@ -459,14 +481,40 @@ mod tests {
 
     #[test]
     fn serialized_replay_round_trips_and_replays_to_the_expected_state() {
-        let initial = EngineCore::new();
+        let mut initial = EngineCore::new();
+        initial.fixed_update(SimulationInput::default());
         let tape = ReplayTape::record(&initial, &sample_inputs(240)).unwrap();
         let restored_tape = ReplayTape::from_bytes(&tape.to_bytes().unwrap()).unwrap();
 
         assert_eq!(restored_tape.tick_count(), 240);
+        assert_eq!(restored_tape.tick_range(), (1, 241));
         assert_eq!(restored_tape, tape);
         let replayed = restored_tape.playback().unwrap();
-        assert_eq!(replayed.tick(), 240);
+        assert_eq!(replayed.tick(), 241);
+    }
+
+    #[test]
+    fn replay_rejects_tick_range_overflow() {
+        let inputs = sample_inputs(1);
+        let mut snapshot = EngineCore::new().state_bytes();
+        snapshot[6..14].copy_from_slice(&u64::MAX.to_le_bytes());
+        let exhausted = EngineCore::from_state_bytes(&snapshot).unwrap();
+        assert_eq!(
+            ReplayTape::record(&exhausted, &inputs),
+            Err(ReplayError::TickOverflow)
+        );
+        let empty = ReplayTape::record(&exhausted, &[]).unwrap();
+        assert_eq!(empty.tick_range(), (u64::MAX, u64::MAX));
+
+        let mut bytes = ReplayTape::record(&EngineCore::new(), &inputs)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        bytes[10..10 + snapshot.len()].copy_from_slice(&snapshot);
+        assert_eq!(
+            ReplayTape::from_bytes(&bytes),
+            Err(ReplayError::TickOverflow)
+        );
     }
 
     #[test]

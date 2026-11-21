@@ -11,7 +11,7 @@ use fate_engine::renderer::{
 use crate::bench_io::{Percentiles, open_csv};
 use crate::bench_schema::Kind;
 use crate::cli::{Case, GpuBench};
-use crate::scene::{append_stress_grid, deck_geometry, grid_light, set_grid_camera};
+use crate::scene::{StressGrid, deck_geometry, grid_light, set_grid_camera};
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -74,6 +74,10 @@ pub fn run(bench: GpuBench) -> Result<(), Box<dyn Error>> {
         let mesh = renderer.create_mesh_with_uvs("polygon load tile", &vertices, &indices)?;
         // Resource creation is outside the per-frame samples.
         renderer.wait_idle(WAIT_TIMEOUT)?;
+        let mut grid = StressGrid::default();
+        if s.cull {
+            grid.prepare(s.candidates);
+        }
         let mut draws = Vec::with_capacity(s.candidates as usize);
         let mut prep_times = Vec::with_capacity(bench.frames);
         let mut submit_times = Vec::with_capacity(bench.frames);
@@ -88,7 +92,7 @@ pub fn run(bench: GpuBench) -> Result<(), Box<dyn Error>> {
                 .cull
                 .then(|| renderer.camera_3d.frustum(renderer.aspect()));
             draws.clear();
-            append_stress_grid(s, frustum, &mesh, &white, &mut draws);
+            grid.append(s, frustum, &mesh, &white, &mut draws);
             let prepared = prepare.elapsed();
             let submit = Instant::now();
             let submitted = renderer.render(OffscreenScene::Meshes(&draws), &Overlay::default());

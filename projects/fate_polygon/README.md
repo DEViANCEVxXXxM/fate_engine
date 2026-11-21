@@ -3,6 +3,15 @@
 A native interactive stress lab for Fate. Rendering, ECS, and snapshots use
 engine APIs. Physics and AI are **lab-owned workloads**, not general engine modules.
 
+| Mode | What it measures | Runtime requirements |
+|---|---|---|
+| Live | Workload counters and frame timings as you change settings | Desktop and GPU adapter |
+| `--headless` | Seeded CPU simulation, work counts, and final state checksums | No window, GPU adapter, or audio device |
+| `--offscreen` | CPU preparation and submission plus GPU pass timings where supported | GPU adapter; no window, presentation, or pixel readback |
+| `--compare` | Changes in work counts, checksums where available, and timings between CSV reports | No window, GPU adapter, or audio device |
+
+Run from the repository root:
+
 ```powershell
 cargo run --release --locked -p fate_polygon
 cargo run --release --locked -p fate_polygon -- --dbg
@@ -23,12 +32,14 @@ without it.
 
 Presets restore their settings and restart the simulation. Changing the seed
 restarts it as well. Workload toggles are independent. Turn **Simulation
-preview** off to measure Physics or AI without drawing their markers. The
+preview** off to measure simulation without drawing workload markers. The
 preview shows up to 40 objects per enabled workload; it does not limit how many
 are simulated. Preview draws share the engine's instance budget with the grid.
 Use the Renderer page's candidate, culling and submission counters to see where
 that budget clips work. Increasing tessellation or decreasing the material-run
 size increases actual GPU or draw-call work without relying on over-cap inputs.
+When culling is enabled, the stress grid reuses its grouped bounds until the
+candidate count changes. Visible meshes keep their original draw order.
 
 Physics performs bounded disk contact and wall reflection. The AI preset samples
 neighbors and steers toward a periodically changing target with separation.
@@ -151,8 +162,8 @@ runs. Use current Polygon exports on the same machine under comparable
 conditions. An offscreen comparison requires complete GPU samples in both
 runs, or no GPU samples in either run for a CPU-only comparison.
 
-Each p50/p95 increase fails only if it exceeds both `--max-regression-pct` (default
-**10%**) and `--noise-floor-ms` (default **0.005 ms**). A changed state checksum
+An increase in p50 or p95 fails only if it exceeds both `--max-regression-pct`
+(default **10%**) and `--noise-floor-ms` (default **0.005 ms**). A changed state checksum
 or work count fails separately, and timings for that case are not compared.
 Exit codes are **0** for pass, **1** for changed work or a timing regression,
 and **2** for invalid or incomparable inputs. The comparison itself is CPU-only,
@@ -167,4 +178,5 @@ cargo run --release --locked -p fate_polygon -- --dbg --smoke
 
 Unit tests need no window, GPU adapter or audio device. `--smoke` is a live
 window test that cycles through all six presets and exits after checking
-that the expected work and submissions occurred.
+that the expected work and submissions occurred, including grid rendering
+with and without culling.

@@ -76,11 +76,11 @@ fn run_live(settings: Settings, timing: bool, smoke: bool) {
         .expect("run Polygon");
     if smoke {
         assert_eq!(
-            app.smoke_seen, 0b11_1111,
+            app.smoke_seen, 0b111_1111,
             "not all Polygon presets submitted and did work"
         );
         println!(
-            "fate_polygon smoke: {} frames; mixed, render, grid physics, steering, navigation, and ECS verified",
+            "fate_polygon smoke: {} frames; mixed, render (with and without culling), grid physics, steering, navigation, and ECS verified",
             app.frames
         );
     }
@@ -414,6 +414,10 @@ impl App {
         if self.smoke {
             match self.frames {
                 20 => self.preset(Preset::Render),
+                30 => {
+                    self.settings.cull = true;
+                    self.settings.candidates = 4096;
+                }
                 40 => {
                     self.preset(Preset::Physics);
                     self.settings.broad_phase = 1;
@@ -469,13 +473,20 @@ impl App {
                     {
                         self.smoke_seen |= 1
                     }
-                    21..=40
+                    21..=30
                         if self.work.pairs == 0
                             && self.work.decisions == 0
                             && f.submitted_instances == Renderer::max_instance_budget()
                             && f.draw_calls > 1 =>
                     {
                         self.smoke_seen |= 2
+                    }
+                    31..=40
+                        if f.requested_instances < rendered.candidates
+                            && f.submitted_instances > 0
+                            && f.draw_calls > 1 =>
+                    {
+                        self.smoke_seen |= 64
                     }
                     41..=60
                         if self.work.pairs > 0

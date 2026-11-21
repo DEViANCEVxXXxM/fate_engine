@@ -1,16 +1,17 @@
 # Documentation
 
-This directory contains the public documentation for the project.
+Start with the [README](../README.md) for a quick run. Use this index if you
+know what you want to do.
 
-| Document | Purpose | Status |
-|---|---|---|
-| [engine-guide.md](engine-guide.md) | How to build, consume, and use the current engine APIs | Describes implemented behavior |
-| [roadmap.md](roadmap.md) | Current capabilities, known gaps, and prioritized backlog | Updated working document |
-| [archive/](archive/) | Superseded engine notes kept for history | Not authoritative |
+| I want to… | Start here |
+|---|---|
+| Build from source and use the APIs | [Engine guide](engine-guide.md) |
+| Add Fate to a separate Cargo project | [Path dependencies](engine-guide.md#project-outside-this-repository) and the [standalone smoke recipe](../projects/consumer_smoke/#verify-outside-the-workspace) |
+| Run the showcase or inspect a replay | [Showcase guide](../projects/demo/) |
+| Run repeatable CPU or GPU benchmarks | [Polygon guide](../projects/fate_polygon/) |
+| Add diagnostics to an application | [Diagnostics toolkit](../crates/fate_debug/) |
+| Exercise window and renderer behavior | [Window smoke guide](../projects/window_smoke/) |
+| See what has been verified and what’s next | [Roadmap](roadmap.md) |
 
-When documents disagree, the order of authority is:
-
-1. The code and its tests.
-2. [engine-guide.md](engine-guide.md) and [roadmap.md](roadmap.md).
-
-Design notes are maintained privately and are not part of this repository.
+The code and tests are authoritative. The [archive](archive/) contains
+superseded notes, not current instructions.

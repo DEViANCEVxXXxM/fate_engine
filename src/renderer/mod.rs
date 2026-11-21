@@ -49,7 +49,9 @@ pub use texture::{
 pub use tilemap::{MAX_DRAWN_TILES, MAX_TILE_LAYERS, TileLayer2d, TileMap2d, TileMapError};
 pub use timing::{GpuFrameKind, GpuFrameTiming};
 pub use ui::{MAX_UI_IMAGES, MAX_UI_RECTS, Overlay, UiClip, UiImage, UiRect};
-pub use visibility::{Bounds2d, Bounds3d, Frustum3d, OrientedBounds2d};
+pub use visibility::{
+    Bounds2d, Bounds3d, Frustum3d, OrientedBounds2d, VisibilitySet3d, VisibilityStats3d,
+};
 
 use crate::math::{Mat4, Vec2};
 use frame::{FrameTarget, RecordedFrame, Scene2d, ScenePipelines, depth_target};

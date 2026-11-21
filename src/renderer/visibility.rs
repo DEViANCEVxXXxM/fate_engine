@@ -2,6 +2,9 @@
 
 use crate::math::{Mat4, Vec2, Vec3};
 
+mod set;
+pub use set::{VisibilitySet3d, VisibilityStats3d};
+
 /// Axis-aligned world-space bounds used for render visibility checks.
 ///
 /// Construction sanitizes degenerate input: non-finite components become zero

@@ -3,18 +3,34 @@
 > **Status:** Working plan, reviewed 2026-11-21. This is not a release schedule
 > or a stable API promise.
 
-## Progress review and priorities
+## At a glance
 
-The foundational work through Step 26 is in place. The next milestone is to
-make the current engine easy to validate on both development platforms, then
-use that baseline to choose the next engine change.
+The foundational work through Step 26, snapshot profiling in Step 28, and
+grouped visibility in Step 29 are in place. Step 27 still needs native Linux
+evidence. In parallel, we are checking integration outside the workspace and
+making recorded runs easier to inspect.
 
 | Area | What is established | What remains open |
 |---|---|---|
 | Rendering | Windowed and offscreen 2D/3D, ordered instanced quads, and CPU picking for moving scenes. The tile and picking benchmarks compare concrete workloads. | Native Linux graphics and window lifecycle; GPU timings are machine-specific. |
-| Deterministic simulation | `fate_sim` provides fixed-point state, generational entities, and canonical snapshots. Polygon exercises ECS churn and checks that snapshot cadence does not change final state. | Identify whether update, encode, decode, or verification dominates at the upper ECS workload. |
+| Deterministic simulation | `fate_sim` provides fixed-point state, generational entities, and canonical snapshots. Polygon verifies that restore cadence does not change final state and measures each snapshot phase. | Confirm the deterministic CPU baseline on native Linux. |
 | Stress and diagnostics | Polygon has live, headless, and offscreen modes and CSV comparison. The native companion and windowed smoke paths have been exercised on Windows. | Repeatable cross-platform evidence for headless work counts and the separate diagnostics window. |
-| Scope | The demo is a showcase. Polygon owns workload policy, including its physics and AI; the engine owns reusable primitives. | No evidence yet for promoting lab-specific rules into the engine or resuming the paused gameplay consumers. |
+| Integration | One headless consumer builds and runs as a separate Cargo project on Windows. | A second standalone consumer and a documented packaged-release path are not yet verified. |
+
+### Near-term priorities
+
+1. Complete the native Linux checks in Step 27. Record a result for each
+   tested display backend rather than treating cross-compilation as desktop
+   validation.
+2. Verify a second standalone consumer on a different engine API path.
+   Capture the manifest, setup, and smoke command without relying on engine
+   workspace membership.
+3. Use a consumer workload to justify the next engine change. For performance
+   changes, record a before/after run with the same work counts and, where
+   applicable, the same state checksum.
+
+The demo remains a showcase. Polygon’s simulation workloads and the
+showcase’s replay policy stay in their respective applications.
 
 ### Step 27 — Establish a cross-platform validation baseline
 
@@ -54,10 +70,14 @@ component payload bounds once per entity and appends decoded components in
 slot order without first initializing occupied slots as empty. The wire
 format and validation rules are unchanged.
 
-Reproduce the workload with `fate_polygon --headless --preset ecs --set
-entities=8192 --sweep snapshot_every=0,4 --warmup 120 --ticks 600` in a release
-build; repeat at `entities=2048`. Across seven alternating before/after runs
-on the same Windows host, the medians of the reported run statistics were:
+Reproduce the workload from the repository root:
+
+```sh
+cargo run --release --locked -p fate_polygon -- --headless --preset ecs --set entities=8192 --sweep snapshot_every=0,4 --warmup 120 --ticks 600
+```
+
+Repeat at `entities=2048`. Across seven alternating before/after runs on the
+same Windows host, the medians of the reported run statistics were:
 
 | Entities | Decode p50 (ms/snapshot) | Tick p95, snapshot every 4 ticks (ms/tick) |
 |---|---|---|
@@ -68,6 +88,31 @@ The runs matched work counts and final checksums, including with snapshots
 off. The lab checked canonical snapshot bytes on every restore. Regression
 tests cover all component masks and reject every truncated prefix of a
 sparse snapshot. Step 27 still needs native Linux validation.
+
+### Step 29 — Reuse visibility bounds across frames
+
+**Status: done.** `VisibilitySet3d` groups adjacent world-space bounds so a
+frustum query can accept or reject a group without testing every candidate.
+It preserves input order and falls back to the individual test at group
+boundaries. Polygon caches the bounds of its live and offscreen stress grid
+when culling is enabled.
+
+The CPU-only `visibility_bench` checks exact result order against a direct
+scan. With 4,096 retained bounds, the moving Polygon-like view had a median
+query time of 23 µs versus 44 µs for the scan on the Windows reference host.
+An offscreen Polygon comparison preserved visible and submitted counts,
+draw calls, and triangle counts. Keep a direct scan for small or frequently
+changing sets unless measurement shows a benefit.
+
+### Standalone consumer and replay checkpoints
+
+- The [headless smoke consumer](../projects/consumer_smoke/) compiled and ran
+  on Windows from a separate Cargo project with only path dependencies.
+  This verifies one out-of-workspace build, not a packaged release.
+- The [showcase](../projects/demo/) can record a sample and inspect the same
+  replay format headlessly. The inspector reports the tick range, verifies
+  each checksum, and stops at the first divergence. Replay policy and format
+  remain consumer-owned.
 
 ## Current baseline
 

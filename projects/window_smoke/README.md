@@ -17,14 +17,14 @@ deliberately independent from `fate_demo`:
   with `wrap_text`; `render_scene` submits the meshes and HUD together;
 - it exits after a fixed number of redraws, so it can run unattended.
 
-Its manifest depends on `fate_engine`, `pollster`, and `winit` only. There is no
-direct `wgpu` dependency: the renderer's public API is sufficient for window
-creation, surface ownership, GPU resource creation, and render submission.
+The app creates its window using `winit`. It has no direct `wgpu` dependency:
+the engine owns the surface and GPU resources and provides the submission API.
+The `--dbg` option uses the separate `fate_debug` crate.
 
 Run from the repository root:
 
 ```powershell
-cargo run -p fate_window_smoke
+cargo run --locked -p fate_window_smoke
 ```
 
 The process prints the number of submitted and skipped frames when it exits.
@@ -73,11 +73,12 @@ counts; `--dbg` verifies all four instances still draw in one indexed call.
 cargo run --release --locked -p fate_window_smoke -- --dense-picking --gpu-timing --dbg
 ```
 
-Use `--scene-picking` to probe two overlapping grids of 182 total pyramids.
+Use `--scene-picking` to probe two animated grids with 182 pyramids in total.
 The HUD shows the nearest instance and triangle, then lists CPU scene bounds
 and instance counts separately from CPU mesh bounds and triangle counts. These
-are work counts, not GPU timings. The center probe checks that the front grid
-wins; `--dbg` verifies that rendering still uses one indexed draw.
+are work counts, not GPU timings. The startup probe checks that the front
+instance wins, then moves it behind the rear grid and verifies that a refit
+changes the hit. Both rendering and picking use the same animated transforms.
 
 ```powershell
 cargo run --release --locked -p fate_window_smoke -- --scene-picking --gpu-timing --dbg

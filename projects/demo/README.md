@@ -1,26 +1,19 @@
 # fate_demo
 
-`fate_demo` is the standalone runnable example project. It consumes the engine
-from the repository root plus the reusable `fate_sim` crate, and shows how a
-consumer can combine fixed-step simulation, 3D rendering, culling, diagnostics,
-and replay/rollback verification in one window.
+`fate_demo` is the engine showcase: an animated 3D cube grid driven by
+scripted input at 120 Hz. The camera is for inspection and does not affect
+the simulation. There are no gameplay objectives, scoring, or networking.
 
 Run from the repository root:
 
-```powershell
-cargo run -p fate_demo
-cargo run --release -p fate_demo -- --dbg
+```sh
+cargo run --locked -p fate_demo
+cargo run --release --locked -p fate_demo -- --dbg
 ```
 
 Or run `cargo run` from this directory.
 
-Frame timings are only representative in an optimized build; use
-`cargo run --release -p fate_demo` when evaluating the reported timings.
-
-The app renders an arena containing an animated cube grid. The grid follows a
-scripted deterministic input pattern at 120 Hz; the camera is for inspection
-only and does not affect simulation state. There is no gameplay loop: no
-objectives, scoring, or win/lose rules.
+Run an optimized build (`--release`) when evaluating timings.
 
 ## What it demonstrates
 
@@ -33,7 +26,23 @@ objectives, scoring, or win/lose rules.
   values through `log` and the window title.
 - State hashing and periodic snapshot round-trip checks.
 - Replay recording and playback verification.
-- Rollback reconciliation against authoritative snapshots.
+- Local rollback reconciliation against snapshots.
+
+## Headless replay inspection
+
+Record a 240-tick sample of the showcase's normal input script, then verify it:
+
+```sh
+cargo run --locked -p fate_demo -- --record-replay showcase.frep
+cargo run --locked -p fate_demo -- --inspect-replay showcase.frep
+```
+
+Recording will not overwrite an existing file. The inspector accepts showcase
+replay files (not standalone snapshots or other apps' recordings), up to
+128 MiB. It prints the initial and final ticks, checks every recorded tick in
+order, and reports the first checksum mismatch. Exit codes: `0` on success,
+`1` on divergence, `2` on invalid arguments, unreadable files, or invalid
+data. Neither command initializes a window, GPU, or audio device.
 
 ## Controls
 
@@ -95,7 +104,7 @@ affect scene frame cadence. Compare optimized runs with and without `--dbg`.
 Run the optional window/GPU regression:
 
 ```powershell
-cargo run --release -p fate_demo -- --dbg-smoke
+cargo run --release --locked -p fate_demo -- --dbg-smoke
 ```
 
 The reusable integration API is documented in

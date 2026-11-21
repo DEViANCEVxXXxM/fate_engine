@@ -4,7 +4,7 @@ use fate_engine::math::{Mat4, Vec2, Vec3};
 use fate_engine::renderer::{
     Bounds3d, Camera3d, Draw3d, FlatLight3d, Frustum3d, GpuFrameTiming, Mesh3d, MeshCreateError,
     Overlay, RenderDiagnosticEvent, RenderDiagnosticReceiver, Renderer, SceneDraw3d, TextDraw,
-    Texture2d, UiRect, UvMeshVertex,
+    Texture2d, UiRect, UvMeshVertex, VisibilitySet3d,
 };
 
 use crate::{lab::Lab, navigation, settings::Settings};
@@ -19,6 +19,7 @@ pub struct Viewport {
     white: Texture2d,
     detail: u32,
     orbit: f32,
+    grid: StressGrid,
 }
 
 pub struct RenderWork {
@@ -45,6 +46,7 @@ impl Viewport {
             white,
             detail,
             orbit: 0.0,
+            grid: StressGrid::default(),
         }
     }
 
@@ -142,7 +144,8 @@ impl Viewport {
         }
         if s.render {
             candidates += s.candidates as usize;
-            append_stress_grid(s, frustum, &self.mesh, &self.white, &mut draws);
+            self.grid
+                .append(s, frustum, &self.mesh, &self.white, &mut draws);
         }
         let prepare_ms = prepare.elapsed().as_secs_f32() * 1e3;
         let status = format!(
@@ -210,37 +213,67 @@ pub fn set_grid_camera(camera: &mut Camera3d, orbit: f32) {
     camera.yaw = -orbit;
 }
 
-pub fn append_stress_grid<'a>(
-    s: Settings,
-    frustum: Option<Frustum3d>,
-    mesh: &'a Mesh3d,
-    white: &'a Texture2d,
-    draws: &mut Vec<SceneDraw3d<'a>>,
-) {
-    let side = (s.candidates as f32).sqrt().ceil() as u32;
-    for i in 0..s.candidates {
-        let x = (i % side) as f32 - (side - 1) as f32 * 0.5;
-        let y = (i / side) as f32 - (side - 1) as f32 * 0.5;
-        let center = Vec3::new(x * 1.26, y * 1.26, -3.0);
-        if frustum
-            .is_some_and(|frustum| !frustum.intersects_bounds(Bounds3d::new(center, Vec3::ONE)))
-        {
-            continue;
+#[derive(Default)]
+pub struct StressGrid {
+    indexed_candidates: Option<u32>,
+    visibility: VisibilitySet3d,
+    visible: Vec<usize>,
+}
+
+impl StressGrid {
+    pub fn prepare(&mut self, count: u32) {
+        if self.indexed_candidates != Some(count) {
+            let side = grid_side(count);
+            self.visibility = VisibilitySet3d::new(
+                (0..count).map(|i| Bounds3d::new(grid_center(i, side), Vec3::ONE)),
+            );
+            self.indexed_candidates = Some(count);
         }
-        let textured = !(i / s.batch).is_multiple_of(2);
-        draws.push(SceneDraw3d {
-            draw: Draw3d {
-                mesh,
-                model: Mat4::translation(center),
-                tint: if textured {
-                    [0.49, 0.76, 0.69]
-                } else {
-                    [0.27, 0.56, 0.62]
-                },
-            },
-            texture: textured.then_some(white),
-        });
     }
+
+    pub fn append<'a>(
+        &mut self,
+        s: Settings,
+        frustum: Option<Frustum3d>,
+        mesh: &'a Mesh3d,
+        white: &'a Texture2d,
+        draws: &mut Vec<SceneDraw3d<'a>>,
+    ) {
+        let side = grid_side(s.candidates);
+        let mut push = |i: u32| {
+            let textured = !(i / s.batch).is_multiple_of(2);
+            draws.push(SceneDraw3d {
+                draw: Draw3d {
+                    mesh,
+                    model: Mat4::translation(grid_center(i, side)),
+                    tint: if textured {
+                        [0.49, 0.76, 0.69]
+                    } else {
+                        [0.27, 0.56, 0.62]
+                    },
+                },
+                texture: textured.then_some(white),
+            });
+        };
+        if let Some(frustum) = frustum {
+            self.prepare(s.candidates);
+            self.visibility.query(frustum, &mut self.visible);
+            self.visible.iter().for_each(|&i| push(i as u32));
+        } else {
+            (0..s.candidates).for_each(push);
+        }
+    }
+}
+
+fn grid_side(count: u32) -> u32 {
+    (count as f32).sqrt().ceil() as u32
+}
+
+fn grid_center(i: u32, side: u32) -> Vec3 {
+    let half = (side - 1) as f32 * 0.5;
+    let x = (i % side) as f32 - half;
+    let y = (i / side) as f32 - half;
+    Vec3::new(x * 1.26, y * 1.26, -3.0)
 }
 
 pub fn deck_geometry(detail: u32) -> (Vec<UvMeshVertex>, Vec<u32>) {

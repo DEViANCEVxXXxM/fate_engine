@@ -11,7 +11,7 @@ use fate_engine::math::Vec3;
 use fate_sim::ecs::{Entity, Position, Rotation, Spin, Velocity, WorldDiagnostics};
 use fate_sim::math::{Fixed, FixedVec2};
 
-use crate::demo_replay::{ReplayTape, RollbackSession};
+use crate::demo_replay::{ReplayError, ReplayTape, RollbackSession};
 use crate::prototype_simulation::{EngineCore, SimulationInput};
 use crate::scene::CubeInstance;
 
@@ -132,6 +132,14 @@ impl ShowcaseSim {
             previous_positions: positions.clone(),
             current_positions: positions,
         }
+    }
+
+    /// Record the next verification window using the showcase's usual script.
+    pub fn scripted_replay(&self) -> Result<ReplayTape, ReplayError> {
+        let inputs = std::array::from_fn::<_, REPLAY_WINDOW, _>(|i| {
+            scripted_input(self.core.tick().saturating_add(i as u64))
+        });
+        ReplayTape::record(&self.core, &inputs)
     }
 
     /// Advance one fixed step and keep the previous positions for interpolation.

@@ -7,8 +7,8 @@ statistics and export tests do not initialize a window or GPU.
 ## Run
 
 ```powershell
-cargo run --release -p fate_demo -- --dbg
-cargo run --release -p fate_window_smoke -- --mesh-load --dbg
+cargo run --release --locked -p fate_demo -- --dbg
+cargo run --release --locked -p fate_window_smoke -- --mesh-load --dbg
 ```
 
 The demo adds simulation/camera/entity tools. The smoke consumer uses the generic
@@ -68,7 +68,8 @@ cursor, or overrides application pause policy. A minimized companion skips
 drawing but `update()` still collects telemetry. `open()` reopens a closed
 companion without recreating the scene renderer.
 
-`projects/window_smoke/src/main.rs` is a complete minimal integration.
+The [window smoke consumer](../../projects/window_smoke/) shows a complete
+integration without application-specific diagnostics tools.
 
 ## Optional project tools
 

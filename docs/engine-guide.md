@@ -5,12 +5,15 @@
 > dependency boundaries, and behavior may change while the engine is being
 > developed.
 
-This is the practical guide for someone building a project on the current
-engine. It aims to be complete about what is available and what remains a
-prototype. It should be read alongside the engineering constraints in
-[`ENGINE_RULES.md`](../ENGINE_RULES.md).
-For current gaps and prioritized future work, see the
-[engine roadmap](roadmap.md).
+Use this guide to build the workspace, integrate the libraries, and verify an
+application. For project status, see the [roadmap](roadmap.md).
+
+- **Get started:** [Prerequisites and first run](#3-requirements-and-first-run) ·
+  [Integrate a project](#4-use-the-engine-from-a-project)
+- **Build:** [Input](#6-input) · [Fixed-step simulation](#7-time-and-deterministic-simulation) ·
+  [Rendering](#8-rendering) · [Audio](#9-audio)
+- **Inspect:** [Diagnostics](#10-errors-diagnostics-and-operational-notes) ·
+  [Verification](#11-verification-and-examples) · [Benchmarks](#performance-measurement)
 
 ## 1. What the engine currently is
 
@@ -24,7 +27,7 @@ specific application's rules.
 | Workspace/library | Root package `fate_engine` is a library | Experimental APIs; no published versioned integration contract |
 | Simulation | `fate_sim` supplies fixed-point math, ECS, deterministic RNG, and a rule-neutral state/snapshot container | The consuming project owns tick policy, commands, systems, replay, and rollback |
 | Input | Generic button/action state with press/release edges and analog axes (per-frame accumulated deltas) | Projects must translate their platform events and define their own actions, axes, and mappings |
-| Rendering | `wgpu` renderer with a built-in 2D triangle path, opaque textured and untextured indexed 3D meshes, screen-space UI rectangles and textured images with atlas regions, sampling options, clipping, and rotation, and a bitmap-font text overlay with width-aware wrapping | Windowing and GPU types are exposed; renderer is not backend-independent, and there is no general scene/material/asset system |
+| Rendering | Windowed and offscreen `wgpu` rendering: instanced 2D quads, tile layers, opaque 3D meshes, HUD overlays, and CPU picking | No interchangeable renderer backend or general scene, material, or asset system |
 | Audio | Bounded procedural one-shot tones through the platform output device | Optional device; no assets, spatialization, looping, or mixer buses |
 | Demo | Standalone app under `projects/demo` | Validation harness only; its scenes and controls are not engine guarantees |
 | Networking | `fate_net` provides a versioned local protocol prototype with bounded payloads, ordered inputs, acknowledgement history, and snapshot validation | No transport, authentication, encryption, clock synchronization, or production server policy |
@@ -42,10 +45,13 @@ fate_engine/
     fate_net/                # versioned local protocol prototype
     fate_sim/                # headless deterministic simulation crate
     fate_sim_bench/          # CPU-only simulation benchmark
+    fate_debug/              # opt-in native diagnostics
   projects/
     combat_slice/            # small playable first-person consumer
     consumer_smoke/          # headless example consumer
     demo/                    # separate runnable consumer application
+    fate_polygon/            # live, headless, and offscreen stress workloads
+    window_smoke/            # window and renderer integration checks
   docs/
     engine-guide.md          # this guide
 ```
@@ -67,6 +73,10 @@ Responsibilities are intentionally split:
   the engine only through public APIs.
 - **`fate_sim_bench`** — headless simulation measurements. Its timings do not
   measure rendering, GPU work, or full-frame performance.
+- **[`fate_polygon`](../projects/fate_polygon/)** — repeatable render and
+  simulation workloads. Physics and AI policy stay in the lab.
+- **[`fate_debug`](../crates/fate_debug/)** — optional native companion for
+  live frame data, inspection, and trace export.
 
 Keep game-specific rules, content, action names, and scene setup in a project.
 Keep reusable mechanisms in the engine crates only when they have a clear
@@ -74,38 +84,34 @@ consumer beyond the demo or form a general capability.
 
 ## 3. Requirements and first run
 
-Use a Rust toolchain that supports the workspace's Rust 2024 edition. Running
-the windowed demo also requires a working window-system backend and a GPU
-adapter supported by `wgpu`.
+Use current stable Rust. The workspace uses Rust 2024; edition support alone
+does not guarantee that an older toolchain can build the dependencies.
+Windowed runs need a desktop session and a `wgpu`-compatible adapter.
+
+On Debian or Ubuntu, install the development libraries needed for workspace
+audio and controller support, then override the checkout's Windows-specific
+build output path:
+
+```sh
+sudo apt-get install -y libudev-dev libasound2-dev
+export CARGO_TARGET_DIR="$PWD/target"
+```
+
+These build dependencies do not require a connected audio or controller
+device. Linux cross-compilation does not establish native desktop support;
+see the [roadmap](roadmap.md#step-27--establish-a-cross-platform-validation-baseline).
 
 From the repository root:
 
-```powershell
-cargo run -p fate_demo
-cargo run -p fate_combat_slice
-cargo test --workspace
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+```sh
+cargo run --release --locked -p fate_demo -- --dbg
+cargo run --locked -p fate_consumer_smoke
+cargo test --locked -p fate_sim
 ```
 
-The demo's key bindings, modes, and known scene limitations are in
-[`projects/demo/README.md`](../projects/demo/README.md). The playable slice's
-controls, rules, and limitations are in
-[`projects/combat_slice/README.md`](../projects/combat_slice/README.md). To run
-only the dependency-free simulation tests:
-
-```powershell
-cargo test -p fate_sim
-```
-
-Run the standalone CPU-only benchmark separately:
-
-```powershell
-cargo run -p fate_sim_bench -- --ticks 10000
-```
-
-The benchmark warms up and measures selected simulation workloads. It is not
-a promise of target frame rate on a particular device.
+The [showcase guide](../projects/demo/) covers controls and the diagnostics
+companion. The consumer smoke and `fate_sim` tests are headless. For full
+workspace checks or CPU-only measurement, see [verification](#11-verification-and-examples).
 
 ## 4. Use the engine from a project
 
@@ -125,6 +131,11 @@ consumer does not need `fate_sim`; a simulation-only tool does not need
 `fate_engine`. Because this is a local path integration, consumers must have
 the engine source available at that path. There is no published crate release
 or semver compatibility guarantee yet.
+
+To verify this integration from a scratch project, follow the
+[standalone consumer recipe](../projects/consumer_smoke/#verify-outside-the-workspace).
+It builds with its own manifest and lockfile; it does not depend on workspace
+membership.
 
 ### Project inside this workspace
 
@@ -451,6 +462,10 @@ the demo command schema and bounded input history. Its replay serialization is
 versioned but has no authentication or encryption; treat replay files as
 untrusted input.
 
+The showcase's [headless replay commands](../projects/demo/#headless-replay-inspection)
+record a scripted sample and verify every tick in an existing showcase replay.
+They do not initialize graphics or audio and do not open sockets.
+
 The playable slice keeps its own in-memory replay window in
 [`projects/combat_slice/src/replay.rs`](../projects/combat_slice/src/replay.rs).
 It records one input per fixed tick, replays the window from a snapshot, and
@@ -608,6 +623,19 @@ only adjacent compatible quads merge, so transparent draw order is unchanged.
 - `render_scene(&[SceneDraw3d], &Overlay)` draws a mixed list of opaque textured
   and untextured meshes with the same depth buffer and draw budget, then draws
   the overlay in the same submission.
+
+For a stable 3D candidate list, build `VisibilitySet3d::new(bounds)` from
+world-space `Bounds3d` records in draw order. Call
+`visibility.query(camera.frustum(aspect), &mut visible)` to replace a reusable
+`Vec<usize>` with the visible input indices in that same order. Query stats
+separate group checks from individual bounds tests. Grouping works best when
+nearby objects are adjacent in the input; rebuild when bounds or order change.
+The renderer leaves these choices to the consumer. To compare with a direct
+scan without opening a window or GPU:
+
+```sh
+cargo run --release --locked -p fate_engine --example visibility_bench
+```
 
 Set `renderer.mesh_light` on either `Renderer` or `OffscreenRenderer` to
 opt into flat 3D lighting. `FlatLight3d::new(direction, ambient)` takes a
@@ -997,20 +1025,18 @@ log, or export them, and tooling must not become a dependency of the engine.
 
 Run the workspace quality gate after changing engine-facing behavior:
 
-```powershell
-cargo test --workspace
+```sh
+cargo test --workspace --locked
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 ### Automated quality gate
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs the same
 CPU-only checks on pull requests, branch pushes, and manual dispatches. CI
-uses the current stable Rust toolchain with `rustfmt` and `clippy` on
-`ubuntu-latest`. The local development baseline is Rust 1.99.1 on Windows
-(`x86_64-pc-windows-gnu`); edition 2024 requires Rust 1.85 or newer. CI installs
-the latest stable release, so a newer toolchain may report additional lints.
+uses current stable Rust. The Windows reference measurements in the roadmap
+used Rust 1.99.1 (`x86_64-pc-windows-gnu`).
 
 The Ubuntu job runs, in order:
 
@@ -1041,9 +1067,6 @@ To run just that baseline locally:
 cargo test -p fate_polygon --locked headless::tests::portable_cpu_baseline -- --exact
 ```
 
-On Linux, set `CARGO_TARGET_DIR="$PWD/target"` and export it before running
-Cargo to override the checkout's Windows-specific build output path.
-
 Renderer tests request a test adapter when one is available and skip the GPU
 cases when none exists, so the headless test job still passes on machines
 without graphics hardware. A skipped renderer test is not evidence that
@@ -1072,6 +1095,9 @@ and checks that passed, failed, or were not exercised.
 Keep these measurements distinct; they answer different questions:
 
 - `fate_sim_bench` measures fixed-step simulation work only.
+- [Polygon](../projects/fate_polygon/) measures fixed CPU workloads with
+  `--headless` and GPU-backed render workloads without presentation or readback
+  with `--offscreen`. Use `--compare` for same-machine CSV baseline checks.
 - `draw_list_bench` measures CPU frustum culling and draw-list assembly only.
   It does not initialize a GPU, so render submission and GPU execution are
   excluded.
@@ -1087,9 +1113,9 @@ Keep these measurements distinct; they answer different questions:
 Run performance commands in release mode against a fixed workload:
 
 ```powershell
-cargo run --release -p fate_sim_bench -- --ticks 10000
-cargo run --release -p fate_engine --example draw_list_bench
-cargo run --release -p fate_window_smoke -- --mesh-load --gpu-timing
+cargo run --release --locked -p fate_sim_bench -- --ticks 10000
+cargo run --release --locked -p fate_engine --example draw_list_bench
+cargo run --release --locked -p fate_window_smoke -- --mesh-load --gpu-timing
 ```
 
 Record the toolchain, platform, workload, and build profile with any result.
