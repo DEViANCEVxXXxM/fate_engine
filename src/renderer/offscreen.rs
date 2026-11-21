@@ -824,7 +824,8 @@ mod tests {
         assert_eq!((frame.instances, frame.draw_calls), (MAX_TILE_LAYERS, 1));
         assert_eq!(pixel(&frame, 48, 16), [255, 0, 0, 255]);
 
-        // Each layer gets its own visible-tile budget.
+        // Fill the entire batch, then verify that a second draw starts at
+        // the last layer's nonzero instance offset.
         let dense = TileMap2d::new(
             (65, 65),
             Vec2::new(-9.0, 9.0),
@@ -832,15 +833,14 @@ mod tests {
             vec![Some(0); 65 * 65],
         )
         .unwrap();
-        let dense_layers = [
-            TileLayer2d::new(&dense, &red, &red_regions),
-            TileLayer2d::new(&dense, &red, &red_regions),
-        ];
+        let mut dense_layers = [TileLayer2d::new(&dense, &red, &red_regions); MAX_TILE_LAYERS];
+        dense_layers[MAX_TILE_LAYERS - 1] = TileLayer2d::new(&dense, &blue, &blue_regions);
         let frame = capture(&mut renderer, &dense_layers, Vec2::ZERO);
         assert_eq!(
             (frame.instances, frame.draw_calls),
-            (MAX_DRAWN_TILES * 2, 1)
+            (MAX_DRAWN_TILES * MAX_TILE_LAYERS, 2)
         );
+        assert_eq!(pixel(&frame, 32, 32), [0, 0, 255, 255]);
     }
 
     #[test]

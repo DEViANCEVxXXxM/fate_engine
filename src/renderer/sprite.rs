@@ -1,4 +1,4 @@
-use super::image_batch::{ImageBatch, Quad, textured_vertices};
+use super::image_batch::{ImageBatch, ImageInstance, Quad};
 use super::ui::Scissor;
 use super::{OrientedBounds2d, Texture2d, TextureRegion};
 use crate::math::{Mat4, Vec2};
@@ -97,7 +97,7 @@ pub(super) fn write_sprites(
                 source,
                 texture: sprite.texture,
                 scissor,
-                vertices: textured_vertices(corners, sprite.region, sprite.tint),
+                instance: ImageInstance::new(corners, sprite.region, sprite.tint),
             })
         }),
     )

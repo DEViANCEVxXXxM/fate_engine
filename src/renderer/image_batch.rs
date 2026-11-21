@@ -1,7 +1,7 @@
 //! Shared GPU batch for textured quads.
 //!
 //! Overlay images, world-space sprites, and tile layers all draw as
-//! alpha-blended textured quads. This module owns the vertex buffer, pipeline,
+//! alpha-blended textured quads. This module owns the instance buffer, pipeline,
 //! and run merging; callers build quads from their own geometry. Adjacent
 //! quads that share a texture and scissor merge into one draw, and runs keep
 //! submission order so translucent quads composite correctly.
@@ -13,30 +13,40 @@ use super::{Texture2d, TextureRegion};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub(crate) struct ImageVertex {
-    position: [f32; 2],
-    uv: [f32; 2],
+pub(crate) struct ImageInstance {
+    // Store exact projected corners: reconstructing the fourth by addition
+    // could round shared tile edges differently.
+    corners: [[f32; 2]; 4],
+    uv_bounds: [f32; 4],
     color: [f32; 4],
 }
 
-impl ImageVertex {
-    const ATTRIBS: [wgpu::VertexAttribute; 3] =
-        wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4];
+impl ImageInstance {
+    const ATTRIBS: [wgpu::VertexAttribute; 4] =
+        wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4, 3 => Float32x4];
+
+    pub(crate) fn new(corners: [[f32; 2]; 4], region: TextureRegion, color: [f32; 4]) -> Self {
+        Self {
+            corners,
+            uv_bounds: [region.min.x, region.min.y, region.max.x, region.max.y],
+            color,
+        }
+    }
 
     const fn layout() -> wgpu::VertexBufferLayout<'static> {
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Self>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &Self::ATTRIBS,
         }
     }
 }
 
-/// A contiguous vertex range that shares one texture and scissor.
+/// A contiguous instance range that shares one texture and scissor.
 struct ImageRun {
     texture_source: usize,
     scissor: Scissor,
-    vertices: std::ops::Range<u32>,
+    instances: std::ops::Range<u32>,
 }
 
 /// One textured quad ready to append to an [`ImageBatch`].
@@ -45,38 +55,14 @@ pub(crate) struct Quad<'a> {
     pub(crate) source: usize,
     pub(crate) texture: &'a Texture2d,
     pub(crate) scissor: Scissor,
-    pub(crate) vertices: [ImageVertex; 6],
-}
-
-/// Build two triangles from clip-space corners, sampling `region`.
-pub(crate) fn textured_vertices(
-    [top_left, top_right, bottom_right, bottom_left]: [[f32; 2]; 4],
-    region: TextureRegion,
-    color: [f32; 4],
-) -> [ImageVertex; 6] {
-    let [u0, v0] = [region.min.x, region.min.y];
-    let [u1, v1] = [region.max.x, region.max.y];
-    let vertex = |position, uv| ImageVertex {
-        position,
-        uv,
-        color,
-    };
-
-    [
-        vertex(top_left, [u0, v0]),
-        vertex(bottom_left, [u0, v1]),
-        vertex(bottom_right, [u1, v1]),
-        vertex(top_left, [u0, v0]),
-        vertex(bottom_right, [u1, v1]),
-        vertex(top_right, [u1, v0]),
-    ]
+    pub(crate) instance: ImageInstance,
 }
 
 /// Upload accepted quads and record adjacent quads with compatible GPU state.
 pub(crate) struct ImageBatch {
     pipeline: wgpu::RenderPipeline,
-    vertices: wgpu::Buffer,
-    scratch: Vec<ImageVertex>,
+    instances: wgpu::Buffer,
+    scratch: Vec<ImageInstance>,
     runs: Vec<ImageRun>,
     limit: usize,
     label: &'static str,
@@ -103,10 +89,10 @@ impl ImageBatch {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[Some(ImageVertex::layout())],
+                buffers: &[Some(ImageInstance::layout())],
             },
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
@@ -139,17 +125,17 @@ impl ImageBatch {
         limit: usize,
         label: &'static str,
     ) -> Self {
-        let vertices = device.create_buffer(&wgpu::BufferDescriptor {
+        let instances = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
-            size: (limit * 6 * std::mem::size_of::<ImageVertex>()) as u64,
+            size: (limit * std::mem::size_of::<ImageInstance>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         Self {
             pipeline,
-            vertices,
-            scratch: Vec::with_capacity(limit * 6),
+            instances,
+            scratch: Vec::with_capacity(limit),
             runs: Vec::with_capacity(limit),
             limit,
             label,
@@ -220,8 +206,8 @@ impl ImageBatch {
                 return (count, true);
             }
             let start = self.scratch.len() as u32;
-            self.scratch.extend_from_slice(&quad.vertices);
-            let end = self.scratch.len() as u32;
+            self.scratch.push(quad.instance);
+            let end = start + 1;
             // Only merge with the last accepted run: regrouping translucent
             // quads across intervening draws would change compositing order.
             let texture = quad.texture as *const Texture2d as usize;
@@ -229,12 +215,12 @@ impl ImageBatch {
                 && run.scissor == quad.scissor
                 && *previous_texture == Some(texture)
             {
-                run.vertices.end = end;
+                run.instances.end = end;
             } else {
                 self.runs.push(ImageRun {
                     texture_source: quad.source,
                     scissor: quad.scissor,
-                    vertices: start..end,
+                    instances: start..end,
                 });
             }
             *previous_texture = Some(texture);
@@ -254,7 +240,7 @@ impl ImageBatch {
         self.last_clipped = dropped;
 
         if !self.scratch.is_empty() {
-            queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&self.scratch));
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&self.scratch));
         }
     }
 
@@ -269,7 +255,7 @@ impl ImageBatch {
             return 0;
         }
         pass.set_pipeline(&self.pipeline);
-        pass.set_vertex_buffer(0, self.vertices.slice(..));
+        pass.set_vertex_buffer(0, self.instances.slice(..));
         for run in &self.runs {
             let texture = texture_at(run.texture_source);
             let Scissor {
@@ -280,7 +266,7 @@ impl ImageBatch {
             } = run.scissor;
             pass.set_bind_group(0, &texture.bind_group, &[]);
             pass.set_scissor_rect(x, y, width, height);
-            pass.draw(run.vertices.clone(), 0..1);
+            pass.draw(0..4, run.instances.clone());
         }
         self.runs.len()
     }
@@ -291,9 +277,28 @@ impl ImageBatch {
         self.runs.len()
     }
 
-    /// Vertex range of one recorded run. Only used by tests.
+    /// Instance range of one recorded run. Only used by tests.
     #[cfg(test)]
-    pub(super) fn run_vertices(&self, index: usize) -> Option<std::ops::Range<u32>> {
-        self.runs.get(index).map(|run| run.vertices.clone())
+    pub(super) fn run_instances(&self, index: usize) -> Option<std::ops::Range<u32>> {
+        self.runs.get(index).map(|run| run.instances.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instance_layout_matches_shader_and_upload_budget() {
+        let layout = ImageInstance::layout();
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
+        assert_eq!(layout.array_stride, 64);
+        assert!(
+            layout
+                .attributes
+                .iter()
+                .map(|attr| attr.offset)
+                .eq([0, 16, 32, 48])
+        );
     }
 }

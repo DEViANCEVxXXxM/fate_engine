@@ -1,4 +1,4 @@
-use super::image_batch::{ImageBatch, Quad, textured_vertices};
+use super::image_batch::{ImageBatch, ImageInstance, Quad};
 use super::ui::Scissor;
 use super::{Bounds2d, Texture2d, TextureRegion};
 use crate::math::{Mat4, Vec2};
@@ -321,7 +321,7 @@ pub(super) fn write_tile_layers(
                     source,
                     texture: layer.texture,
                     scissor,
-                    vertices: textured_vertices(
+                    instance: ImageInstance::new(
                         [[left, top], [right, top], [right, bottom], [left, bottom]],
                         region,
                         [1.0; 4],

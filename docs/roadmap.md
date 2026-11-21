@@ -355,6 +355,15 @@ a capture buffer. Optional timestamps report GPU pass durations.
 batching and reports CPU preparation, CPU submission, and GPU scene timings
 separately.
 
+## Step 25 — Instance textured 2D quads
+
+**Status: done.** Tile layers, sprites, and HUD images share a single
+instanced-quad pipeline. A quad uploads 64 bytes instead of 192, without
+changing draw order, adjacent texture/scissor merging, or public budgets.
+The windowless `tile_batch_bench` exercises up to 32,768 visible tiles
+without readback. Pixel tests cover atlas sampling, blend order, clipping,
+and drawing a separate atlas at the end of a full tile batch.
+
 ## Deferred until a consumer needs them
 
 - Arbitrary ECS components, composed queries, and parallel scheduling.

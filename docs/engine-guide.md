@@ -541,6 +541,17 @@ Native tools can call `wait_idle(timeout)` outside their CPU submission
 measurement. See [Polygon's render benchmark](../projects/fate_polygon/)
 for a windowless consumer.
 
+For a dense 2D workload, run the tile batch benchmark on a GPU-equipped host:
+
+```powershell
+cargo run --release --locked -p fate_engine --example tile_batch_bench
+```
+
+It submits one and eight full tile layers and reports CPU render/submit and
+GPU scene p50/p95 separately, without a window, presentation, or pixel readback.
+Sprites, tile layers, and HUD images use one 64-byte instance per quad;
+only adjacent compatible quads merge, so transparent draw order is unchanged.
+
 ### Available windowed paths
 
 `fate_engine::renderer::Renderer` provides these draw entry points:

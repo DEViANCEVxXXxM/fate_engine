@@ -11,7 +11,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-use super::image_batch::{ImageBatch, ImageVertex, Quad, textured_vertices};
+use super::image_batch::{ImageBatch, ImageInstance, Quad};
 use super::{Texture2d, TextureRegion};
 use crate::math::Vec2;
 
@@ -399,7 +399,7 @@ pub(crate) fn write_images(
                 source,
                 texture: image.texture,
                 scissor,
-                vertices: image_vertices(image, width as f32, height as f32)?,
+                instance: image_instance(image, width as f32, height as f32)?,
             })
         }),
     )
@@ -481,23 +481,17 @@ fn rotated_corners(position: Vec2, size: Vec2, rotation: f32) -> Option<[[f32; 2
         .then_some(corners)
 }
 
-/// Build two triangles covering `image`, in normalized device coordinates.
-fn image_vertices(image: &UiImage<'_>, width: f32, height: f32) -> Option<[ImageVertex; 6]> {
+/// Build one quad covering `image`, in normalized device coordinates.
+fn image_instance(image: &UiImage<'_>, width: f32, height: f32) -> Option<ImageInstance> {
     if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
         return None;
     }
     if !image.is_drawable() || !rect_fits_surface(image.position, image.size) {
         return None;
     }
-    let [top_left, top_right, bottom_right, bottom_left] =
-        rotated_corners(image.position, image.size, image.rotation)?;
-
-    let corners = image_corners_to_ndc(
-        [top_left, top_right, bottom_right, bottom_left],
-        width,
-        height,
-    )?;
-    Some(textured_vertices(corners, image.region, image.color))
+    let corners = rotated_corners(image.position, image.size, image.rotation)?;
+    let corners = image_corners_to_ndc(corners, width, height)?;
+    Some(ImageInstance::new(corners, image.region, image.color))
 }
 
 fn image_corners_to_ndc(corners: [[f32; 2]; 4], width: f32, height: f32) -> Option<[[f32; 2]; 4]> {
@@ -861,7 +855,7 @@ mod tests {
         ];
         let (pixels, queued, draws) = render_image_batch(&device, &queue, &mut renderer, &images);
         assert_eq!((queued, draws), (5, 4));
-        assert_eq!(renderer.run_vertices(0), Some(0..12));
+        assert_eq!(renderer.run_instances(0), Some(0..2));
         let at = |x| pixels[(IMAGE_TEST_SIZE * (IMAGE_TEST_SIZE / 2) + x) as usize];
         let linear = |value: u8| ((f32::from(value) / 255.0 + 0.055) / 1.055).powf(2.4);
         for (pixel, expected) in [
