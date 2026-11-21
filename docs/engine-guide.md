@@ -432,6 +432,20 @@ does not preserve deterministic precision. The engine's renderer-facing
 its orthonormal basis (`forward()`, `right()`, `up()`, `basis()`) and separate
 `view_matrix()` and `projection_matrix()` helpers.
 
+### Fixed-point contact queries
+
+`fate_sim::math::segment_aabb_contact(start, end, min, max)` tests a closed
+segment against an axis-aligned box. It returns a Q32.32 fraction in `0..=1`
+rounded down; hit or miss is decided before rounding. Touching counts,
+and starting on or inside the box returns zero. Reversed bounds return
+`None`.
+
+This query detects crossings between ticks but does not move objects,
+resolve overlaps, or slide along surfaces. Choose a response in the
+consumer. The [3D contact smoke](../projects/consumer_smoke/#fixed-point-3d-contact-smoke)
+rejects a whole movement command on contact and verifies replay and restore
+without initializing a window, GPU, or audio device.
+
 ### Deterministic randomness
 
 Use `SimulationState`'s seeded RNG methods or
@@ -1075,7 +1089,8 @@ The consumer smoke run is a headless integration check: it exercises input,
 simulation, movement, snapshots, and restoration through the public APIs. It
 does not initialize a window or GPU.
 
-The Windows job runs the Polygon tests and the headless consumer smoke.
+The Windows job runs the Polygon tests, the 3D contact example test, and the
+headless consumer smoke.
 The `portable_cpu_baseline` test runs on both platforms and checks fixed work
 counts and final state checksums for physics, navigation, and ECS. It does not
 assert timings or initialize a window, GPU adapter, or audio device.

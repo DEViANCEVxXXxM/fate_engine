@@ -13,7 +13,7 @@ changes and benchmarks; completing a step does not establish release readiness.
 |---|---|---|
 | Integration | The CPU smoke and offscreen capture example both ran as separate Cargo projects on Windows. | These are first-party path-dependency checks, not a packaged release or independent adoption. |
 | Runtime | Windows renderer and diagnostics smokes passed. The workspace cross-compiles for Linux. | Native Linux runtime results are still open. |
-| Determinism | Polygon checks fixed work counts and final state for physics, navigation, and ECS. The showcase can verify a recorded replay headlessly. | No timing threshold is part of the CPU gate. Replay policy and lab workloads stay consumer-owned. |
+| Determinism | Polygon checks fixed work counts and final state for physics, navigation, and ECS. The headless 3D contact smoke verifies scripted motion after restore. The showcase verifies recorded replays. | No timing threshold is part of the CPU gate. Replay, contact response, and lab policy stay consumer-owned. |
 | Rendering | Windowed and offscreen rendering, resizable capture, grouped visibility, and full and sparse picking updates are exercised by consumers. | Windowed and offscreen paths use the same `wgpu` backend. |
 
 ## Active validation
@@ -50,22 +50,14 @@ surface lifecycle smoke, and Polygon’s 120-frame live smoke also passed.
 
 ## Next engine milestone
 
-**Candidate: a 3D contact smoke.** Start with one fixed-step actor moving
-against static bounds in a small consumer fixture. Keep motion policy in
-the consumer and use a scripted input trace to reproduce contacts and final
-state without graphics. Use that fixture to identify the smallest reusable
-query or math primitive worth adding; don’t start with a general physics
-module or controller API.
+The [3D contact milestone](implementation-history.md#step-32--verify-deterministic-3d-contact)
+is complete. It established a fixed-point segment-versus-box query, not a
+physics module or controller API.
 
-**Entry:** Agree on the consumer and one interaction it needs that existing
-APIs do not cover. The paused gameplay projects stay out of scope.
-
-**Exit:** The fixture produces the same outcome on repeat runs and after
-restoring mid-run. Any engine API added has a concrete use in the fixture and
-a focused test for its boundary cases.
-
-This can proceed while a Linux desktop is unavailable; it doesn’t close
-Step 27. The showcase remains a showcase.
+Choose the next interaction in a consumer before adding another engine
+primitive. A new spatial query should have a concrete use, a headless
+boundary-case test, and a reproducible trace where state changes. The paused
+gameplay projects stay out of scope, and the showcase remains a showcase.
 
 ## Later, when justified
 

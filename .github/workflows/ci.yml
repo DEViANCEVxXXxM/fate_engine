@@ -62,5 +62,8 @@ jobs:
       - name: Check portable Polygon CPU results
         run: cargo test -p fate_polygon --locked
 
+      - name: Check fixed-point 3D contacts
+        run: cargo test -p fate_consumer_smoke --example contact_3d --locked
+
       - name: Run headless consumer smoke test
         run: cargo run -p fate_consumer_smoke --locked

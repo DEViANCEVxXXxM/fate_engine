@@ -81,6 +81,19 @@ took 2.5 µs median with sparse refits versus 46 µs for a full refit. Updating
 all 1,024 individually took 69 µs versus 46 µs for a full refit. The two
 paths returned identical hits and query work counts in this workload.
 
+### Step 32 — Verify deterministic 3D contact
+
+**Status: done.** `fate_sim::math::segment_aabb_contact` detects crossings
+between tick endpoints against an axis-aligned box. It compares exact
+intervals before rounding the contact fraction to fixed point. Unit tests
+cover boundary contacts, stationary segments, invalid bounds, and extreme
+endpoint values.
+
+The [headless contact smoke](../projects/consumer_smoke/#fixed-point-3d-contact-smoke)
+replays nine ticks with four contacts and final checksum `012dff0f522a9e58`,
+including after restoring every intermediate state. The consumer owns its
+stop policy and checkpoint format.
+
 ## Earlier work
 
 ### Step 1 — Harden ECS lifecycle and snapshot restoration

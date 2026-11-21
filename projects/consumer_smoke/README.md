@@ -15,6 +15,18 @@ Its dependencies are local path dependencies declared in this project's
 `Cargo.toml`, just as an in-repository application project would use them. For an
 external project, adjust those paths relative to its own manifest.
 
+## Fixed-point 3D contact smoke
+
+```sh
+cargo run --release --locked -p fate_consumer_smoke --example contact_3d
+```
+
+A scripted point actor takes nine fixed ticks around two static boxes.
+It rejects blocked movement commands, including ones whose endpoints are
+both outside a box. The fixture checks four contacts, a fixed final checksum,
+and identical results after restoring from every intermediate checkpoint.
+It is headless, and its response policy is not part of `fate_sim`.
+
 ## Verify outside the workspace
 
 From the engine checkout, run this PowerShell recipe to build a smoke

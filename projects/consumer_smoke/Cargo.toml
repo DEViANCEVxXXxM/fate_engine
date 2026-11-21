@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 fate_engine = { path = "../.." }
 fate_sim = { path = "../../crates/fate_sim" }
+
+[[example]]
+name = "contact_3d"
+test = true
