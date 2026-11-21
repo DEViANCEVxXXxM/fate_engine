@@ -7,6 +7,8 @@ pub enum Preset {
     Render,
     Physics,
     Agents,
+    Navigation,
+    Ecs,
 }
 
 impl Preset {
@@ -16,6 +18,8 @@ impl Preset {
             "render" => Some(Self::Render),
             "physics" => Some(Self::Physics),
             "ai" => Some(Self::Agents),
+            "navigation" => Some(Self::Navigation),
+            "ecs" => Some(Self::Ecs),
             _ => None,
         }
     }
@@ -26,6 +30,8 @@ impl Preset {
             Self::Render => "render",
             Self::Physics => "physics",
             Self::Agents => "ai",
+            Self::Navigation => "navigation",
+            Self::Ecs => "ecs",
         }
     }
 }
@@ -44,6 +50,7 @@ macro_rules! knobs {
             pub render: bool,
             pub physics: bool,
             pub ai: bool,
+            pub ecs: bool,
             pub preview: bool,
             pub cull: bool,
             pub orbit: bool,
@@ -53,7 +60,7 @@ macro_rules! knobs {
         impl Default for Settings {
             fn default() -> Self {
                 Self {
-                    render: true, physics: true, ai: true, preview: true, cull: false, orbit: false,
+                    render: true, physics: true, ai: true, ecs: false, preview: true, cull: false, orbit: false,
                     $($field: $default,)*
                 }
             }
@@ -118,17 +125,24 @@ knobs! {
     samples: "AI / neighbors sampled", Simulation, 0..=96 = 12;
     think_every: "AI / ticks between decisions", Simulation, 1..=32 = 4;
     agent_speed: "AI / speed", Simulation, 0..=24 = 6;
+    nav_mode: "AI / navigation (0 steering, 1 per-agent, 2 shared)", Simulation, 0..=2 = 0;
+    nav_goal_ticks: "AI / ticks between navigation goals", Simulation, 16..=2048 = 240;
+    entities: "ECS / live entities", Simulation, 0..=8192 = 2048;
+    churn: "ECS / replacements per tick", Simulation, 0..=1024 = 128;
+    snapshot_every: "ECS / snapshot cadence (0 off)", Simulation, 0..=1024 = 60;
 }
 
 impl Settings {
     pub const TOGGLES: &'static [&'static str] =
-        &["render", "physics", "ai", "preview", "cull", "orbit"];
+        &["render", "physics", "ai", "ecs", "preview", "cull", "orbit"];
+    pub const ECS_NUMBERS: &'static [&'static str] = &["entities", "churn", "snapshot_every"];
 
     pub fn apply_toggle(&mut self, id: &str, value: bool) {
         match id {
             "render" => self.render = value,
             "physics" => self.physics = value,
             "ai" => self.ai = value,
+            "ecs" => self.ecs = value,
             "preview" => self.preview = value,
             "cull" => self.cull = value,
             "orbit" => self.orbit = value,
@@ -163,6 +177,21 @@ impl Settings {
                 think_every: 2,
                 ..base
             },
+            Preset::Navigation => Self {
+                render: false,
+                physics: false,
+                agents: 256,
+                think_every: 12,
+                nav_mode: 2,
+                ..base
+            },
+            Preset::Ecs => Self {
+                render: false,
+                physics: false,
+                ai: false,
+                ecs: true,
+                ..base
+            },
         }
     }
 }
@@ -186,6 +215,7 @@ mod tests {
             (Preset::Render, (true, false, false)),
             (Preset::Physics, (false, true, false)),
             (Preset::Agents, (false, false, true)),
+            (Preset::Navigation, (false, false, true)),
         ] {
             let s = Settings::preset(preset);
             assert_eq!((s.render, s.physics, s.ai), expected);

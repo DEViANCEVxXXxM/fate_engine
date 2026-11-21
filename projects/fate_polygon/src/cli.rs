@@ -1,5 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
+use crate::bench_compare;
 use crate::settings::{Preset, Settings};
 
 pub enum Launch {
@@ -11,6 +12,7 @@ pub enum Launch {
     },
     Headless(Bench),
     Offscreen(GpuBench),
+    Compare(bench_compare::Options),
 }
 
 pub struct GpuBench {
@@ -56,13 +58,14 @@ pub fn help() {
          fate_polygon --headless [--preset NAME] [--set NAME=VALUE]...\n\
          \t[--sweep NAME=VALUE,VALUE,...] [--warmup N] [--ticks N] [--csv PATH]\n\
          fate_polygon --offscreen [--preset NAME] [--size WIDTHxHEIGHT] [--frames N] [--warmup N]\n\
-         \t[--set NAME=VALUE]... [--sweep NAME=VALUE,VALUE,...] [--csv PATH]\n\n\
-         Presets: mixed (default), render, physics, ai. Headless measures CPU lab work only.\n\
+         \t[--set NAME=VALUE]... [--sweep NAME=VALUE,VALUE,...] [--csv PATH]\n\
+         fate_polygon --compare BASELINE.csv CURRENT.csv [--max-regression-pct N] [--noise-floor-ms N]\n\n\
+         Presets: mixed (default), render, physics, ai, navigation, ecs. Headless measures CPU work only.\n\
          Default headless run: 120 warmup and 600 measured ticks. CSV paths must not exist.\n\
          Offscreen defaults: render preset, 960x540, 30 warmup, 120 measured frames.\n\
          Offscreen accepts candidates, detail, batch and cull. It requires a GPU adapter.\n\
          Sweep one numeric setting, at most {MAX_CASES} distinct values.\n\
-         Toggles accept true or false. Only physics and ai apply headlessly:\n\
+         Toggles accept true or false. Only physics, ai and ecs apply headlessly:\n\
          \t{}\n\
          Numeric settings:",
         Settings::TOGGLES.join(", ")
@@ -85,7 +88,11 @@ pub fn help() {
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Launch, String> {
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|arg| arg == "--compare") {
+        args.next();
+        return bench_compare::parse(args).map(Launch::Compare);
+    }
     let mut scope = Scope::Live;
     let mut timing = false;
     let mut smoke = false;
@@ -147,10 +154,11 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Launch, String> {
         Preset::Mixed
     });
     let mut base = Settings::preset(preset);
+    let mut ecs_override = false;
     for item in overrides {
         let (name, value) = assignment(&item)?;
         if Settings::TOGGLES.contains(&name) {
-            if (scope == Scope::Cpu && !matches!(name, "physics" | "ai"))
+            if (scope == Scope::Cpu && !matches!(name, "physics" | "ai" | "ecs"))
                 || (scope == Scope::Offscreen && name != "cull")
             {
                 return Err(format!("'{name}' does not apply to this benchmark"));
@@ -161,6 +169,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Launch, String> {
             base.apply_toggle(name, value);
         } else {
             let (name, value) = setting_value(name, value, scope)?;
+            ecs_override |= Settings::ECS_NUMBERS.contains(&name);
             base.apply_number(name, f64::from(value));
         }
     }
@@ -171,8 +180,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Launch, String> {
             smoke,
         });
     }
-    if scope == Scope::Cpu && !base.physics && !base.ai {
-        return Err("headless mode requires physics or AI; rendering is not measured".to_owned());
+    if scope == Scope::Cpu && !base.physics && !base.ai && !base.ecs {
+        return Err(
+            "headless mode requires physics, AI or ECS; rendering is not measured".to_owned(),
+        );
+    }
+    if scope == Scope::Cpu && !base.ecs && ecs_override {
+        return Err("ECS settings require --preset ecs or --set ecs=true".to_owned());
     }
     if scope == Scope::Offscreen && !base.render {
         return Err("offscreen mode requires a rendering preset".to_owned());
@@ -181,6 +195,9 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Result<Launch, String> {
     let mut cases = Vec::new();
     if let Some(sweep) = sweep {
         let (name, values) = assignment(&sweep)?;
+        if scope == Scope::Cpu && !base.ecs && Settings::ECS_NUMBERS.contains(&name) {
+            return Err("an ECS sweep requires --preset ecs or --set ecs=true".to_owned());
+        }
         let mut seen = BTreeSet::new();
         for value in values.split(',') {
             let (name, value) = setting_value(name, value, scope)?;

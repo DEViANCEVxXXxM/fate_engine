@@ -1,8 +1,12 @@
+mod bench_compare;
 mod bench_io;
+mod bench_schema;
 mod cli;
 mod contact_grid;
+mod ecs_lab;
 mod headless;
 mod lab;
+mod navigation;
 mod render_bench;
 mod scene;
 mod settings;
@@ -49,6 +53,14 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        Ok(cli::Launch::Compare(options)) => match bench_compare::run(options) {
+            Ok(true) => {}
+            Ok(false) => std::process::exit(1),
+            Err(error) => {
+                eprintln!("fate_polygon: {error}");
+                std::process::exit(2);
+            }
+        },
         Err(error) => {
             eprintln!("fate_polygon: {error}. Run with --help for usage.");
             std::process::exit(2);
@@ -64,11 +76,11 @@ fn run_live(settings: Settings, timing: bool, smoke: bool) {
         .expect("run Polygon");
     if smoke {
         assert_eq!(
-            app.smoke_seen, 0b1111,
+            app.smoke_seen, 0b11_1111,
             "not all Polygon presets submitted and did work"
         );
         println!(
-            "fate_polygon smoke: {} frames; mixed, render, grid physics, and AI verified",
+            "fate_polygon smoke: {} frames; mixed, render, grid physics, steering, navigation, and ECS verified",
             app.frames
         );
     }
@@ -149,10 +161,17 @@ impl App {
             ("render_preset", ControlValue::Action) => self.preset(Preset::Render),
             ("physics_preset", ControlValue::Action) => self.preset(Preset::Physics),
             ("agents_preset", ControlValue::Action) => self.preset(Preset::Agents),
+            ("navigation_preset", ControlValue::Action) => self.preset(Preset::Navigation),
+            ("ecs_preset", ControlValue::Action) => self.preset(Preset::Ecs),
             ("reset", ControlValue::Action) => self.reset(),
             ("step", ControlValue::Action) if self.paused => self.step_once = true,
             ("paused", ControlValue::Toggle(on)) => self.pause(on),
-            (id, ControlValue::Toggle(on)) => self.settings.apply_toggle(id, on),
+            (id, ControlValue::Toggle(on)) => {
+                self.settings.apply_toggle(id, on);
+                if id == "ecs" {
+                    self.lab.sync_counts(self.settings);
+                }
+            }
             (id, ControlValue::Number { value, .. }) => {
                 let before = self.settings;
                 if !self.settings.apply_number(id, value) {
@@ -179,6 +198,8 @@ impl App {
             Control::action(Page::Simulation, "render_preset", "Render preset"),
             Control::action(Page::Simulation, "physics_preset", "Physics preset"),
             Control::action(Page::Simulation, "agents_preset", "AI preset"),
+            Control::action(Page::Simulation, "navigation_preset", "Navigation preset"),
+            Control::action(Page::Simulation, "ecs_preset", "ECS preset"),
             Control::toggle(Page::Simulation, "paused", "Pause fixed steps", self.paused),
             Control {
                 enabled: self.paused,
@@ -192,6 +213,7 @@ impl App {
                 s.physics,
             ),
             Control::toggle(Page::Simulation, "ai", "AI workload (lab)", s.ai),
+            Control::toggle(Page::Simulation, "ecs", "ECS workload", s.ecs),
             Control::toggle(
                 Page::Renderer,
                 "render",
@@ -216,7 +238,7 @@ impl App {
         i.fact(
             Page::Simulation,
             "Workloads",
-            "Lab-owned fixed-point disks and sampled steering",
+            "Lab-owned physics and AI; engine ECS and snapshots",
         );
         i.fact(Page::Simulation, "Fixed tick", self.lab.tick);
         i.fact(
@@ -241,9 +263,61 @@ impl App {
         );
         i.fact(
             Page::Simulation,
-            "Decisions / neighbor tests",
-            format!("{} / {}", self.work.decisions, self.work.neighbors),
+            "AI mode",
+            match (s.ai, s.nav_mode) {
+                (false, _) => "Off",
+                (true, 0) => "Sampled steering",
+                (true, 1) => "Per-agent grid search",
+                (true, _) => "Shared distance field",
+            },
         );
+        if s.nav_mode == 0 {
+            i.fact(
+                Page::Simulation,
+                "Decisions / neighbor tests",
+                format!("{} / {}", self.work.decisions, self.work.neighbors),
+            );
+        } else {
+            i.fact(
+                Page::Simulation,
+                "Decisions / route moves",
+                format!("{} / {}", self.work.decisions, self.work.route.moves),
+            );
+            i.fact(
+                Page::Simulation,
+                "Searches / cells visited",
+                format!("{} / {}", self.work.route.searches, self.work.route.visits),
+            );
+        }
+        if let Some(ecs) = &self.lab.ecs {
+            let (live, capacity) = ecs.live_and_capacity();
+            let work = &self.work.ecs;
+            i.fact(
+                Page::Simulation,
+                "ECS live / allocated",
+                format!("{live} / {capacity}"),
+            );
+            i.fact(
+                Page::Simulation,
+                "ECS update CPU / frame",
+                format!("{:.3} ms", work.update_time.as_secs_f64() * 1e3),
+            );
+            i.fact(
+                Page::Simulation,
+                "ECS spawns / despawns",
+                format!("{} / {}", work.spawned, work.despawned),
+            );
+            i.fact(
+                Page::Simulation,
+                "Snapshots / encoded bytes",
+                format!("{} / {}", work.snapshots, work.bytes),
+            );
+            i.fact(
+                Page::Simulation,
+                "Snapshot CPU / frame",
+                format!("{:.3} ms", work.snapshot_time.as_secs_f64() * 1e3),
+            );
+        }
         i.fact(
             Page::Renderer,
             "Triangles per stress mesh",
@@ -345,6 +419,11 @@ impl App {
                     self.settings.broad_phase = 1;
                 }
                 60 => self.preset(Preset::Agents),
+                80 => self.preset(Preset::Navigation),
+                100 => {
+                    self.preset(Preset::Ecs);
+                    self.settings.snapshot_every = 4;
+                }
                 _ => {}
             }
         }
@@ -412,6 +491,12 @@ impl App {
                     61..=80 if self.work.pairs == 0 && self.work.neighbors > 0 => {
                         self.smoke_seen |= 8
                     }
+                    81..=100 if self.work.route.moves > 0 && self.work.neighbors == 0 => {
+                        self.smoke_seen |= 16
+                    }
+                    101..=120 if self.work.ecs.spawned > 0 && self.work.ecs.snapshots > 0 => {
+                        self.smoke_seen |= 32
+                    }
                     _ => {}
                 }
             }
@@ -423,7 +508,7 @@ impl App {
                 overlay_ms: g.overlay.map(|t| t.as_secs_f32() * 1e3),
             });
         }
-        if self.smoke && self.frames >= 80 {
+        if self.smoke && self.frames >= 120 {
             loop_.exit();
         }
     }

@@ -4,8 +4,10 @@ use std::io::{self, Write};
 use std::time::Instant;
 
 use crate::bench_io::{Percentiles, open_csv};
+use crate::bench_schema::Kind;
 use crate::cli::{Bench, Case};
 use crate::lab::{Lab, Work};
+use crate::navigation::RouteWork;
 use crate::settings::Settings;
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -14,12 +16,25 @@ struct Totals {
     contacts: u64,
     decisions: u64,
     neighbors: u64,
+    route: RouteWork,
+    ecs: EcsTotals,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EcsTotals {
+    spawned: u64,
+    despawned: u64,
+    updates: u64,
+    snapshots: u64,
+    bytes: u64,
 }
 
 struct ResultRow {
     tick: Percentiles,
     physics: Option<Percentiles>,
     ai: Option<Percentiles>,
+    ecs: Option<Percentiles>,
+    snapshot: Option<Percentiles>,
     work: Totals,
     digest: u64,
 }
@@ -33,6 +48,8 @@ fn measure(s: Settings, warmup: usize, ticks: usize) -> ResultRow {
     let mut all = Vec::with_capacity(ticks);
     let mut physics = Vec::with_capacity(if s.physics { ticks } else { 0 });
     let mut ai = Vec::with_capacity(if s.ai { ticks } else { 0 });
+    let mut ecs = Vec::with_capacity(if s.ecs { ticks } else { 0 });
+    let mut snapshots = Vec::new();
     let mut totals = Totals::default();
     for _ in 0..ticks {
         let mut work = Work::default();
@@ -45,15 +62,31 @@ fn measure(s: Settings, warmup: usize, ticks: usize) -> ResultRow {
         if s.ai {
             ai.push(work.ai);
         }
+        if s.ecs {
+            ecs.push(work.ecs.update_time);
+            if work.ecs.snapshots != 0 {
+                snapshots.push(work.ecs.snapshot_time);
+            }
+        }
         totals.pairs += work.pairs;
         totals.contacts += work.contacts;
         totals.decisions += work.decisions;
         totals.neighbors += work.neighbors;
+        totals.route.searches += work.route.searches;
+        totals.route.visits += work.route.visits;
+        totals.route.moves += work.route.moves;
+        totals.ecs.spawned += work.ecs.spawned;
+        totals.ecs.despawned += work.ecs.despawned;
+        totals.ecs.updates += work.ecs.updates;
+        totals.ecs.snapshots += work.ecs.snapshots;
+        totals.ecs.bytes += work.ecs.bytes;
     }
     ResultRow {
         tick: Percentiles::from_samples(all).expect("nonempty measurement"),
         physics: Percentiles::from_samples(physics),
         ai: Percentiles::from_samples(ai),
+        ecs: Percentiles::from_samples(ecs),
+        snapshot: Percentiles::from_samples(snapshots),
         work: totals,
         digest: lab.state_hash(),
     }
@@ -63,7 +96,7 @@ pub fn run(bench: Bench) -> io::Result<()> {
     let mut csv = open_csv(bench.csv.as_deref())?;
     let mut output = io::stdout().lock();
     if let Some(csv) = &mut csv {
-        csv_header(csv)?;
+        csv_header(csv, cpu_kind(bench.cases[0].settings))?;
     }
     writeln!(
         output,
@@ -131,27 +164,56 @@ fn print_row(out: &mut impl Write, index: usize, case: &Case, row: &ResultRow) -
         )?;
     }
     if let Some(p) = row.ai {
+        if s.nav_mode == 0 {
+            writeln!(
+                out,
+                "  AI      {:>9.4} / {:<9.4}   {} agents, {} decisions, {} neighbor tests",
+                p.p50, p.p95, s.agents, row.work.decisions, row.work.neighbors
+            )?;
+        } else {
+            writeln!(
+                out,
+                "  AI      {:>9.4} / {:<9.4}   {} agents, {} navigation, {} searches, {} cell visits, {} moves",
+                p.p50,
+                p.p95,
+                s.agents,
+                if s.nav_mode == 1 {
+                    "per-agent"
+                } else {
+                    "shared"
+                },
+                row.work.route.searches,
+                row.work.route.visits,
+                row.work.route.moves
+            )?;
+        }
+    }
+    if let Some(p) = row.ecs {
+        let work = &row.work.ecs;
         writeln!(
             out,
-            "  AI      {:>9.4} / {:<9.4}   {} agents, {} decisions, {} neighbor tests",
-            p.p50, p.p95, s.agents, row.work.decisions, row.work.neighbors
+            "  ECS     {:>9.4} / {:<9.4}   {} updates, {} spawns, {} despawns",
+            p.p50, p.p95, work.updates, work.spawned, work.despawned
         )?;
+        if let Some(p) = row.snapshot {
+            writeln!(
+                out,
+                "  restore {:>9.4} / {:<9.4}   {} snapshots, {} encoded bytes (ms per snapshot)",
+                p.p50, p.p95, work.snapshots, work.bytes
+            )?;
+        } else {
+            writeln!(out, "  restore no snapshots in the measured interval")?;
+        }
     }
     writeln!(out, "  final state {:016x}", row.digest)
 }
 
-fn csv_header(out: &mut impl Write) -> io::Result<()> {
-    write!(
-        out,
-        "case,preset,sweep_setting,sweep_value,warmup_ticks,measured_ticks,physics,ai"
-    )?;
-    for spec in Settings::NUMBERS.iter().filter(|spec| spec.cpu) {
-        write!(out, ",{}", spec.name)?;
-    }
-    writeln!(
-        out,
-        ",tick_p50_ms,tick_p95_ms,physics_p50_ms,physics_p95_ms,ai_p50_ms,ai_p95_ms,pair_tests,contacts,decisions,neighbor_tests,state_hash"
-    )
+fn cpu_kind(settings: Settings) -> Kind {
+    if settings.ecs { Kind::Ecs } else { Kind::Cpu }
+}
+
+fn csv_header(out: &mut impl Write, kind: Kind) -> io::Result<()> {
+    writeln!(out, "{}", kind.columns().join(","))
 }
 
 fn csv_row(
@@ -174,25 +236,41 @@ fn csv_row(
         s.physics,
         s.ai
     )?;
-    for spec in Settings::NUMBERS.iter().filter(|spec| spec.cpu) {
-        write!(
-            out,
-            ",{}",
-            s.number_value(spec.name).expect("known setting")
-        )?;
+    for name in cpu_kind(s).cpu_numbers() {
+        write!(out, ",{}", s.number_value(name).expect("known setting"))?;
     }
-    for phase in [Some(row.tick), row.physics, row.ai] {
+    if s.ecs {
+        write!(out, ",true")?;
+    }
+    let timings = [Some(row.tick), row.physics, row.ai, row.ecs, row.snapshot];
+    for phase in &timings[..if s.ecs { 5 } else { 3 }] {
         if let Some(p) = phase {
             write!(out, ",{:.6},{:.6}", p.p50, p.p95)?;
         } else {
             write!(out, ",,")?;
         }
     }
-    writeln!(
+    write!(
         out,
-        ",{},{},{},{},{:016x}",
-        row.work.pairs, row.work.contacts, row.work.decisions, row.work.neighbors, row.digest
-    )
+        ",{},{},{},{},{},{},{},{:016x}",
+        row.work.pairs,
+        row.work.contacts,
+        row.work.decisions,
+        row.work.neighbors,
+        row.work.route.searches,
+        row.work.route.visits,
+        row.work.route.moves,
+        row.digest
+    )?;
+    if s.ecs {
+        let work = &row.work.ecs;
+        write!(
+            out,
+            ",{},{},{},{},{}",
+            work.spawned, work.despawned, work.updates, work.snapshots, work.bytes
+        )?;
+    }
+    writeln!(out)
 }
 
 #[cfg(test)]
@@ -232,6 +310,35 @@ mod tests {
     }
 
     #[test]
+    fn ecs_counts_and_snapshot_samples_exclude_warmup() {
+        let s = Settings {
+            entities: 32,
+            churn: 4,
+            snapshot_every: 4,
+            ..Settings::preset(Preset::Ecs)
+        };
+        let row = measure(s, 4, 9);
+        let ecs = &row.work.ecs;
+        assert_eq!(
+            (ecs.spawned, ecs.despawned, ecs.updates, ecs.snapshots),
+            (36, 36, 288, 2)
+        );
+        assert!(row.ecs.is_some() && row.snapshot.is_some());
+        let no_restore = measure(
+            Settings {
+                snapshot_every: 0,
+                ..s
+            },
+            4,
+            9,
+        );
+        assert!(no_restore.snapshot.is_none());
+        assert_eq!(no_restore.digest, row.digest);
+        assert!(!Kind::Cpu.columns().contains(&"entities"));
+        assert!(Kind::Ecs.columns().contains(&"snapshot_bytes"));
+    }
+
+    #[test]
     fn csv_is_rectangular_and_disabled_phases_are_blank() {
         let mut data = Vec::new();
         let bench = Bench {
@@ -249,7 +356,7 @@ mod tests {
         };
         let case = &bench.cases[0];
         let result = measure(case.settings, bench.warmup, bench.ticks);
-        csv_header(&mut data).unwrap();
+        csv_header(&mut data, Kind::Cpu).unwrap();
         csv_row(&mut data, &bench, 1, case, &result).unwrap();
         let data = String::from_utf8(data).unwrap();
         let mut lines = data.lines().map(|line| line.split(',').collect::<Vec<_>>());

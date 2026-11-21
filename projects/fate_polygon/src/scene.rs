@@ -7,7 +7,7 @@ use fate_engine::renderer::{
     Texture2d, UiRect, UvMeshVertex,
 };
 
-use crate::{lab::Lab, settings::Settings};
+use crate::{lab::Lab, navigation, settings::Settings};
 
 const PREVIEW_PER_WORKLOAD: usize = 40;
 
@@ -67,17 +67,16 @@ impl Viewport {
                 .frustum(width as f32 / height.max(1) as f32)
         });
         let mut candidates = 0;
-        let mut draws = Vec::with_capacity(s.candidates as usize + PREVIEW_PER_WORKLOAD * 2);
-        let mut add = |mesh, texture, center, scale: f32, tint| {
+        let mut draws = Vec::with_capacity(s.candidates as usize + PREVIEW_PER_WORKLOAD * 3);
+        let mut add = |mesh, texture, center, scale: Vec3, tint| {
             candidates += 1;
-            if frustum.is_none_or(|frustum| {
-                frustum.intersects_bounds(Bounds3d::new(center, Vec3::ONE * scale))
-            }) {
+            if frustum.is_none_or(|frustum| frustum.intersects_bounds(Bounds3d::new(center, scale)))
+            {
                 draws.push(SceneDraw3d {
                     draw: Draw3d {
                         mesh,
                         tint,
-                        model: Mat4::translation(center).mul(Mat4::scale(Vec3::ONE * scale)),
+                        model: Mat4::translation(center).mul(Mat4::scale(scale)),
                     },
                     texture,
                 });
@@ -89,19 +88,55 @@ impl Viewport {
                     &self.marker,
                     None,
                     Vec3::new(body.p.x.to_f32(), body.p.y.to_f32(), 1.0),
-                    s.radius as f32 * 0.013,
+                    Vec3::ONE * (s.radius as f32 * 0.013),
                     [1.0, 0.56, 0.27],
                 );
             }
         }
         if s.preview && s.ai {
+            if s.nav_mode != 0 {
+                for wall in navigation::WALLS {
+                    let center = wall.center();
+                    add(
+                        &self.marker,
+                        None,
+                        Vec3::new(center.x.to_f32(), center.y.to_f32(), 0.25),
+                        Vec3::new(wall.width as f32 * 0.74, wall.height as f32, 0.34),
+                        [0.32, 0.44, 0.47],
+                    );
+                }
+                let goal = navigation::position(navigation::target(
+                    lab.tick.saturating_sub(1),
+                    s.nav_goal_ticks,
+                ));
+                add(
+                    &self.marker,
+                    None,
+                    Vec3::new(goal.x.to_f32(), goal.y.to_f32(), 1.4),
+                    Vec3::ONE * 0.86,
+                    [0.88, 1.0, 0.34],
+                );
+            }
             for agent in lab.agents.iter().take(PREVIEW_PER_WORKLOAD) {
                 add(
                     &self.marker,
                     None,
                     Vec3::new(agent.p.x.to_f32(), agent.p.y.to_f32(), 1.0),
-                    0.29,
+                    Vec3::ONE * 0.29,
                     [0.30, 0.91, 0.75],
+                );
+            }
+        }
+        if s.preview
+            && let Some(ecs) = &lab.ecs
+        {
+            for position in ecs.positions().take(PREVIEW_PER_WORKLOAD) {
+                add(
+                    &self.marker,
+                    None,
+                    Vec3::new(position.x.to_f32(), position.y.to_f32(), 1.0),
+                    Vec3::ONE * 0.34,
+                    [0.64, 0.55, 0.97],
                 );
             }
         }
@@ -111,11 +146,12 @@ impl Viewport {
         }
         let prepare_ms = prepare.elapsed().as_secs_f32() * 1e3;
         let status = format!(
-            "{}  /  RENDER {}  PHYSICS {}  AI {}",
+            "{}  /  RENDER {}  PHYSICS {}  AI {}  ECS {}",
             if paused { "PAUSED" } else { "RUNNING" },
             on(s.render),
             on(s.physics),
-            on(s.ai)
+            on(s.ai),
+            on(s.ecs)
         );
         let top = UiRect::new(
             Vec2::ZERO,

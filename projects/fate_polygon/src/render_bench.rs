@@ -9,6 +9,7 @@ use fate_engine::renderer::{
 };
 
 use crate::bench_io::{Percentiles, open_csv};
+use crate::bench_schema::Kind;
 use crate::cli::{Case, GpuBench};
 use crate::scene::{append_stress_grid, deck_geometry, grid_light, set_grid_camera};
 
@@ -43,10 +44,7 @@ pub fn run(bench: GpuBench) -> Result<(), Box<dyn Error>> {
     let white = renderer.create_texture("polygon white albedo", 1, 1, &[255; 4])?;
     let mut csv = open_csv(bench.csv.as_deref())?;
     if let Some(csv) = &mut csv {
-        writeln!(
-            csv,
-            "case,preset,sweep_setting,sweep_value,width,height,adapter,backend,driver,warmup_frames,measured_frames,candidates,detail,batch,cull,after_cull,instances,draw_calls,submitted_triangles,cpu_prepare_p50_ms,cpu_prepare_p95_ms,cpu_submit_p50_ms,cpu_submit_p95_ms,gpu_scene_p50_ms,gpu_scene_p95_ms,gpu_samples"
-        )?;
+        writeln!(csv, "{}", Kind::Offscreen.columns().join(","))?;
     }
 
     let mut out = io::stdout().lock();

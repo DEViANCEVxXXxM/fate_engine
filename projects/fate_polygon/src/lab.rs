@@ -6,7 +6,12 @@ use fate_sim::math::{Fixed as F, FixedVec2 as V};
 use fate_sim::rng::DeterministicRng;
 use fate_sim::{StateHasher, StateWriter};
 
-use crate::{contact_grid::ContactGrid, settings::Settings};
+use crate::{
+    contact_grid::ContactGrid,
+    ecs_lab::{EcsLab, EcsWork},
+    navigation::{self, Navigation, RouteWork},
+    settings::Settings,
+};
 
 const WALL_X: F = F::from_int(19);
 const WALL_Y: F = F::from_int(11);
@@ -23,8 +28,10 @@ pub struct Work {
     pub contacts: u64,
     pub decisions: u64,
     pub neighbors: u64,
+    pub route: RouteWork,
     pub physics: Duration,
     pub ai: Duration,
+    pub ecs: EcsWork,
 }
 
 #[derive(Default)]
@@ -34,6 +41,8 @@ pub struct Lab {
     pub agents: Vec<Particle>,
     desired: Vec<V>,
     contact_grid: ContactGrid,
+    navigation: Navigation,
+    pub ecs: Option<EcsLab>,
 }
 
 fn spawn(seed: u32, index: usize, domain: u64) -> Particle {
@@ -71,6 +80,9 @@ impl Lab {
         for &desired in &self.desired {
             vector(&mut hash, desired);
         }
+        if let Some(ecs) = &self.ecs {
+            hash.write_u64(ecs.state_hash());
+        }
         hash.finish()
     }
 
@@ -78,6 +90,13 @@ impl Lab {
         resize(&mut self.bodies, s.bodies as usize, s.seed, 0x7a77);
         resize(&mut self.agents, s.agents as usize, s.seed, 0xa6e7);
         self.desired.resize(self.agents.len(), V::ZERO);
+        if s.ecs {
+            self.ecs
+                .get_or_insert_with(|| EcsLab::new(s.seed))
+                .resize(s.entities as usize);
+        } else {
+            self.ecs = None;
+        }
     }
 
     pub fn step(&mut self, s: Settings, work: &mut Work) {
@@ -89,8 +108,18 @@ impl Lab {
         }
         if s.ai {
             let start = Instant::now();
-            self.steering(s, dt, work);
+            if s.nav_mode == 0 {
+                self.steering(s, dt, work);
+            } else {
+                self.navigate(s, work);
+            }
             work.ai += start.elapsed();
+        }
+        if s.ecs {
+            self.ecs
+                .as_mut()
+                .expect("configured ECS workload")
+                .step(s, dt, &mut work.ecs);
         }
         self.tick = self.tick.wrapping_add(1);
     }
@@ -194,6 +223,23 @@ impl Lab {
             walls(agent, F::ZERO, F::ONE);
         }
     }
+
+    fn navigate(&mut self, s: Settings, work: &mut Work) {
+        let target = navigation::target(self.tick, s.nav_goal_ticks);
+        let every = u64::from(s.think_every);
+        for (i, (agent, desired)) in self.agents.iter_mut().zip(&mut self.desired).enumerate() {
+            let mut cell = self.navigation.start_cell(agent.p);
+            if (self.tick % every + i as u64 % every).is_multiple_of(every) {
+                work.decisions += 1;
+                cell = self
+                    .navigation
+                    .route(cell, target, s.nav_mode == 2, &mut work.route);
+            }
+            agent.p = navigation::position(cell);
+            agent.v = V::ZERO;
+            *desired = V::ZERO;
+        }
+    }
 }
 
 struct DiskContact {
@@ -254,6 +300,33 @@ fn walls(body: &mut Particle, radius: F, bounce: F) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_navigation_preserves_agent_state_across_goal_changes() {
+        let s = Settings {
+            agents: 80,
+            nav_goal_ticks: 16,
+            think_every: 3,
+            physics: false,
+            ..Settings::preset(crate::settings::Preset::Navigation)
+        };
+        let mut individual = Lab::default();
+        let mut shared = Lab::default();
+        individual.sync_counts(s);
+        shared.sync_counts(s);
+        let mut a = Work::default();
+        let mut b = Work::default();
+        for _ in 0..100 {
+            individual.step(Settings { nav_mode: 1, ..s }, &mut a);
+            shared.step(Settings { nav_mode: 2, ..s }, &mut b);
+            assert_eq!(individual.agents, shared.agents);
+        }
+        assert_eq!(individual.state_hash(), shared.state_hash());
+        assert_eq!((a.decisions, a.route.moves), (b.decisions, b.route.moves));
+        assert!(a.route.moves > 0);
+        assert_eq!(b.route.searches, 7);
+        assert!(b.route.visits < a.route.visits / 10);
+    }
 
     #[test]
     fn grid_requeries_after_contact_pushes_a_body_into_a_new_neighborhood() {
