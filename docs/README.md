@@ -11,7 +11,8 @@ know what you want to do.
 | Run repeatable CPU or GPU benchmarks | [Polygon guide](../projects/fate_polygon/) |
 | Add diagnostics to an application | [Diagnostics toolkit](../crates/fate_debug/) |
 | Exercise window and renderer behavior | [Window smoke guide](../projects/window_smoke/) |
-| See what has been verified and what’s next | [Roadmap](roadmap.md) |
+| See what’s next | [Roadmap](roadmap.md) |
+| Find a completed step or benchmark result | [Implementation history](implementation-history.md) |
 
 The code and tests are authoritative. The [archive](archive/) contains
 superseded notes, not current instructions.

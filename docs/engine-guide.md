@@ -547,6 +547,21 @@ To try an export without a window:
 cargo run --release --locked -p fate_engine --example offscreen_capture -- capture.ppm
 ```
 
+Pass two output paths to capture both landscape and portrait using one
+renderer and the same uploaded meshes. `OffscreenRenderer::resize` changes
+subsequent frames without changing the current device, cameras, or settings.
+A pending capture retains its original size and pixels; retrieve it before
+requesting another capture. Resizing does not allocate a readback buffer.
+On capture, an existing buffer is reused when large enough, and only the
+current image range is mapped.
+
+```sh
+cargo run --release --locked -p fate_engine --example offscreen_capture -- wide.ppm tall.ppm
+```
+
+See the [standalone consumer recipe](../projects/consumer_smoke/#verify-outside-the-workspace)
+to run this renderer example with its own Cargo manifest.
+
 Use `OffscreenRenderer::render` to submit without pixel readback. It returns
 scene instance and draw counts immediately and does not allocate the capture
 buffer until a capture is requested. An already queued capture retains its
@@ -693,11 +708,13 @@ consumer draw order. Each record pairs an `Arc<PickMesh3d>` with a model
 matrix, so instances can share mesh geometry and its triangle tree. The
 scene index skips groups of instances before querying their meshes. The
 nearest hit reports the original input index and a `MeshHit3d`; exact
-distance ties favor the earlier input. For moving instances, call
-`scene.refit_transforms(&models)` with one matrix per original input, in the
-same order as the draw list. This updates bounds in place without allocating.
-A length mismatch returns `false` and leaves the scene unchanged. Invalid
-transforms make their slots unpickable until a valid transform is supplied.
+distance ties favor the earlier input. When a few instances move, call
+`scene.refit_transform(index, model)` for each changed input index. This updates
+only that instance's leaf and ancestors. For widespread motion, call
+`scene.refit_transforms(&models)` with one matrix per original input in draw
+order. Neither path allocates. An invalid index or slice length returns `false`
+without changing the scene. Invalid transforms make their slots unpickable
+until a valid transform is supplied.
 
 Rebuild the index if instance order, membership, or mesh references change,
 or if large movements make the existing tree less selective. The renderer
@@ -711,9 +728,10 @@ cargo run --release --locked -p fate_engine --example picking_bench
 ```
 
 It reports scene build and per-ray p50/p95 for grid hits, misses, edge
-grazes, and heavily overlapping instances. It also compares refit and rebuild
-times and bounds-test counts for both coherent motion and shuffled positions,
-checking that both return identical hits.
+grazes, and heavily overlapping instances. It compares full refit and rebuild
+for coherent and shuffled motion, then measures sparse versus full refits at
+several update densities. The sparse threshold depends on the scene and motion;
+start with sparse refits for a few changes and measure before choosing a cutoff.
 
 Adjacent overlay images using the same `Texture2d` and effective scissor
 share a draw, even when their atlas regions, transforms, or tints differ.

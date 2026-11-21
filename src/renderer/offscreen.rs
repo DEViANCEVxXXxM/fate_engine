@@ -86,6 +86,7 @@ pub struct OffscreenSubmission {
     pub draw_calls: usize,
 }
 
+#[derive(Clone, Copy)]
 struct ReadbackLayout {
     row: u32,
     padded_row: u32,
@@ -131,11 +132,13 @@ impl ReadbackLayout {
 struct PendingCapture {
     submission: wgpu::SubmissionIndex,
     state: Receiver<Result<(), wgpu::BufferAsyncError>>,
+    size: (u32, u32),
+    layout: ReadbackLayout,
     instances: usize,
     draw_calls: usize,
 }
 
-/// A fixed-size offscreen target with one reusable async readback buffer.
+/// A resizable offscreen target with one reusable async readback buffer.
 ///
 /// Requires a `wgpu` adapter, but not a window, surface, event loop or display
 /// connection. Upload draw resources through this renderer, not a windowed
@@ -206,17 +209,7 @@ impl OffscreenRenderer {
         size: (u32, u32),
     ) -> Result<Self, OffscreenError> {
         let layout = ReadbackLayout::new(size, &device.limits())?;
-        let color = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen scene color"),
-            size: extent(size),
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = color.create_view(&Default::default());
+        let (color, view) = color_target(&device, size);
         let depth = depth_target(&device, size);
         let pipelines = ScenePipelines::new(&device, &queue, FORMAT);
         Ok(Self {
@@ -245,6 +238,27 @@ impl OffscreenRenderer {
 
     pub fn aspect(&self) -> f32 {
         self.size.0 as f32 / self.size.1 as f32
+    }
+
+    /// Change the size used by subsequent submissions. The device, uploaded
+    /// resources, cameras, and scene settings are preserved. A pending
+    /// capture still returns the original dimensions and pixels.
+    ///
+    /// The same size is a no-op. An invalid size returns
+    /// [`OffscreenError::InvalidSize`] without changing the renderer.
+    /// Resizing does not wait on the GPU or allocate a readback buffer.
+    pub fn resize(&mut self, size: (u32, u32)) -> Result<(), OffscreenError> {
+        if size == self.size {
+            return Ok(());
+        }
+        let layout = ReadbackLayout::new(size, &self.device.limits())?;
+        let (color, view) = color_target(&self.device, size);
+        self.depth = depth_target(&self.device, size);
+        self.color = color;
+        self.view = view;
+        self.layout = layout;
+        self.size = size;
+        Ok(())
     }
 
     /// The adapter selected for this target.
@@ -449,14 +463,19 @@ impl OffscreenRenderer {
             return Err(OffscreenError::Busy);
         }
         let (mut frame, timing) = self.record(scene, overlay);
-        let buffer = self.buffer.get_or_insert_with(|| {
-            self.device.create_buffer(&wgpu::BufferDescriptor {
+        if self
+            .buffer
+            .as_ref()
+            .is_none_or(|buf| buf.size() < self.layout.len)
+        {
+            self.buffer = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("offscreen scene readback"),
                 size: self.layout.len,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
-            })
-        });
+            }));
+        }
+        let buffer = self.buffer.as_ref().expect("capture buffer allocated");
         frame.encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.color,
@@ -480,13 +499,15 @@ impl OffscreenRenderer {
         self.buffer
             .as_ref()
             .expect("capture buffer allocated")
-            .slice(..)
+            .slice(..self.layout.len)
             .map_async(wgpu::MapMode::Read, move |result| {
                 let _ = sender.try_send(result);
             });
         self.pending = Some(PendingCapture {
             submission,
             state,
+            size: self.size,
+            layout: self.layout,
             instances,
             draw_calls,
         });
@@ -530,18 +551,33 @@ impl OffscreenRenderer {
         let pending = self.pending.take().expect("finished capture");
         let buffer = self.buffer.as_ref().expect("pending capture buffer");
         let rgba8 = buffer
-            .slice(..)
+            .slice(..pending.layout.len)
             .get_mapped_range()
-            .map(|bytes| self.layout.unpack(bytes.as_ref()));
+            .map(|bytes| pending.layout.unpack(bytes.as_ref()));
         buffer.unmap();
         Ok(Some(CapturedFrame {
-            width: self.size.0,
-            height: self.size.1,
+            width: pending.size.0,
+            height: pending.size.1,
             rgba8: rgba8.map_err(|_| OffscreenError::Readback)?,
             instances: pending.instances,
             draw_calls: pending.draw_calls,
         }))
     }
+}
+
+fn color_target(device: &wgpu::Device, size: (u32, u32)) -> (wgpu::Texture, wgpu::TextureView) {
+    let color = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen scene color"),
+        size: extent(size),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = color.create_view(&Default::default());
+    (color, view)
 }
 
 fn extent((width, height): (u32, u32)) -> wgpu::Extent3d {
@@ -596,6 +632,99 @@ mod tests {
         let captured = renderer.wait_capture(timeout).unwrap().unwrap();
         assert_eq!(&captured.rgba8[..4], &[255, 0, 0, 255]);
         assert!(renderer.poll_capture().unwrap().is_none());
+    }
+
+    #[test]
+    fn resize_preserves_pending_capture_and_reuses_resources() {
+        let Some((device, queue)) = test_device() else {
+            skip_without_adapter();
+            return;
+        };
+        let mut renderer = OffscreenRenderer::with_device(device, queue, (16, 4)).unwrap();
+        renderer.camera_3d.position = Vec3::new(0.0, 0.0, 4.5);
+        let cube = renderer.cube_mesh().unwrap();
+        let draws = [Draw3d {
+            mesh: &cube,
+            model: Mat4::IDENTITY,
+            tint: [1.0; 3],
+        }
+        .into()];
+        let old_size = (65, 7);
+        let new_size = (127, 13);
+        let timeout = Duration::from_secs(5);
+        let overlay = Overlay {
+            rects: &[UiRect::new(
+                Vec2::ZERO,
+                Vec2::new(65.0, 7.0),
+                [1.0, 0.0, 0.0, 1.0],
+            )],
+            ..Overlay::default()
+        };
+        let empty = Overlay::default();
+
+        renderer.resize(old_size).unwrap();
+        assert!(renderer.buffer.is_none());
+        renderer
+            .capture(OffscreenScene::Meshes(&draws), &overlay)
+            .unwrap();
+        let old_buffer_size = renderer.buffer.as_ref().unwrap().size();
+        assert!(matches!(
+            renderer.resize((0, 7)),
+            Err(OffscreenError::InvalidSize { .. })
+        ));
+        assert_eq!(renderer.size(), old_size);
+        renderer.resize(old_size).unwrap(); // Same-size no-op while a capture is pending.
+        renderer.resize(new_size).unwrap();
+        assert_eq!(renderer.size(), new_size);
+        assert_eq!(renderer.aspect(), 127.0 / 13.0);
+        assert_eq!(renderer.camera_3d.position, Vec3::new(0.0, 0.0, 4.5));
+        assert_eq!(renderer.buffer.as_ref().unwrap().size(), old_buffer_size);
+        assert!(matches!(
+            renderer.capture(OffscreenScene::Meshes(&draws), &empty),
+            Err(OffscreenError::Busy)
+        ));
+        assert_eq!(
+            renderer.render(OffscreenScene::Meshes(&draws), &empty),
+            OffscreenSubmission {
+                instances: 1,
+                draw_calls: 1
+            }
+        );
+        let first = renderer.wait_capture(timeout).unwrap().unwrap();
+        assert_eq!((first.width, first.height), old_size);
+        assert_eq!((first.instances, first.draw_calls), (1, 1));
+        assert_eq!(first.rgba8.len(), 65 * 7 * 4);
+        assert!(
+            first
+                .rgba8
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|p| *p == [255, 0, 0, 255])
+        );
+
+        renderer
+            .capture(OffscreenScene::Meshes(&draws), &empty)
+            .unwrap();
+        let grown_size = renderer.buffer.as_ref().unwrap().size();
+        assert!(grown_size > old_buffer_size);
+        let second = renderer.wait_capture(timeout).unwrap().unwrap();
+        assert_eq!(
+            (second.width, second.height, second.instances),
+            (127, 13, 1)
+        );
+        assert_eq!(second.rgba8.len(), 127 * 13 * 4);
+
+        renderer.resize((9, 3)).unwrap();
+        renderer
+            .capture(OffscreenScene::Triangles(&[]), &empty)
+            .unwrap();
+        assert_eq!(renderer.buffer.as_ref().unwrap().size(), grown_size);
+        let small = renderer.wait_capture(timeout).unwrap().unwrap();
+        assert_eq!(
+            (small.width, small.height, small.rgba8.len()),
+            (9, 3, 9 * 3 * 4)
+        );
     }
 
     #[test]

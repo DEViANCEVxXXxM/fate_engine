@@ -3,16 +3,21 @@
 use std::error::Error;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use fate_engine::math::{Mat4, Vec2, Vec3};
-use fate_engine::renderer::{Draw3d, OffscreenRenderer, OffscreenScene, Overlay, TextDraw, UiRect};
+use fate_engine::renderer::{
+    CapturedFrame, Draw3d, OffscreenRenderer, OffscreenScene, Overlay, TextDraw, UiRect,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
+    const USAGE: &str = "usage: offscreen_capture <landscape.ppm> [<portrait.ppm>]";
     let mut args = std::env::args_os().skip(1);
-    let output = args.next().ok_or("usage: offscreen_capture <output.ppm>")?;
+    let landscape = args.next().ok_or(USAGE)?;
+    let portrait = args.next();
     if args.next().is_some() {
-        return Err("usage: offscreen_capture <output.ppm>".into());
+        return Err(USAGE.into());
     }
     let mut renderer = pollster::block_on(OffscreenRenderer::new((641, 360)))?;
     renderer.camera_3d.position = Vec3::new(0.0, 0.0, 4.5);
@@ -41,18 +46,32 @@ fn main() -> Result<(), Box<dyn Error>> {
         [0.1, 0.16, 0.2, 1.0],
     )];
     let text = [TextDraw::new(Vec2::new(24.0, 22.0), "FATE OFFSCREEN CAPTURE").with_scale(2.0)];
-    renderer.capture(
-        OffscreenScene::Meshes(&draws),
-        &Overlay {
-            rects: &rects,
-            text: &text,
-            ..Default::default()
-        },
-    )?;
+    let overlay = Overlay {
+        rects: &rects,
+        text: &text,
+        ..Default::default()
+    };
+    renderer.capture(OffscreenScene::Meshes(&draws), &overlay)?;
+    if portrait.is_some() {
+        // Changing the target does not change the frame already being read back.
+        renderer.resize((360, 641))?;
+    }
+    finish_capture(&mut renderer, Path::new(&landscape))?;
+    if let Some(portrait) = portrait {
+        renderer.capture(OffscreenScene::Meshes(&draws), &overlay)?;
+        finish_capture(&mut renderer, Path::new(&portrait))?;
+    }
+    Ok(())
+}
+
+fn finish_capture(renderer: &mut OffscreenRenderer, output: &Path) -> Result<(), Box<dyn Error>> {
     let frame = renderer
         .wait_capture(Duration::from_secs(10))?
         .ok_or("no completed capture")?;
-    let output = std::path::Path::new(&output);
+    write_ppm(output, &frame)
+}
+
+fn write_ppm(output: &Path, frame: &CapturedFrame) -> Result<(), Box<dyn Error>> {
     let mut writer = BufWriter::new(
         OpenOptions::new()
             .create_new(true)

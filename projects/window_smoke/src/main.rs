@@ -203,13 +203,13 @@ impl PickGrid {
 
     fn animate(&mut self, frame: u32) {
         let phase = (frame % 360) as f32 * (std::f32::consts::TAU / 360.0);
-        for (i, (model, &rest)) in self.models.iter_mut().zip(&self.rest).enumerate() {
-            let row = (i % PICK_GRID_LAYER) / PICK_GRID_COLS;
-            let amplitude = if i < PICK_GRID_LAYER { -0.17 } else { 0.37 };
-            *model = rest;
-            model.m[12] += amplitude * (phase + row as f32 * 0.5).sin();
+        let start = PICK_GRID_LAYER + (PICK_GRID_ROWS / 2) * PICK_GRID_COLS;
+        for i in start..start + PICK_GRID_COLS {
+            let mut model = self.rest[i];
+            model.m[12] += 0.37 * (phase + (i - start) as f32 * 0.5).sin();
+            self.models[i] = model;
+            assert!(self.scene.refit_transform(i, model));
         }
-        assert!(self.scene.refit_transforms(&self.models));
     }
 }
 
@@ -1263,7 +1263,10 @@ impl ApplicationHandler for SmokeApp {
             assert!((1..=2).contains(&stats.instances_tested), "{stats:?}");
             let front_center = PICK_GRID_LAYER + PICK_GRID_LAYER / 2;
             grid.models[front_center].m[14] -= 20.0;
-            assert!(grid.scene.refit_transforms(&grid.models));
+            assert!(
+                grid.scene
+                    .refit_transform(front_center, grid.models[front_center])
+            );
             assert_eq!(
                 grid.scene
                     .intersect(center)
@@ -1271,8 +1274,11 @@ impl ApplicationHandler for SmokeApp {
                     .instance,
                 PICK_GRID_LAYER / 2
             );
-            grid.models = grid.rest;
-            assert!(grid.scene.refit_transforms(&grid.models));
+            grid.models[front_center] = grid.rest[front_center];
+            assert!(
+                grid.scene
+                    .refit_transform(front_center, grid.models[front_center])
+            );
             println!(
                 "scene picking and refit verified: queried {} of {PICK_GRID_DRAWS} instances ({} scene bounds tests)",
                 stats.instances_tested, stats.bounds_tests

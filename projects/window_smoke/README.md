@@ -73,7 +73,8 @@ counts; `--dbg` verifies all four instances still draw in one indexed call.
 cargo run --release --locked -p fate_window_smoke -- --dense-picking --gpu-timing --dbg
 ```
 
-Use `--scene-picking` to probe two animated grids with 182 pyramids in total.
+Use `--scene-picking` to probe two grids with 182 pyramids in total. Only the
+center row of the front grid moves, using sparse picking updates.
 The HUD shows the nearest instance and triangle, then lists CPU scene bounds
 and instance counts separately from CPU mesh bounds and triangle counts. These
 are work counts, not GPU timings. The startup probe checks that the front

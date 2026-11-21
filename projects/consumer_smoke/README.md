@@ -17,14 +17,24 @@ external project, adjust those paths relative to its own manifest.
 
 ## Verify outside the workspace
 
-From the engine checkout, run this PowerShell example to build and run the
-same smoke code as its own Cargo project:
+From the engine checkout, run this PowerShell recipe to build a smoke
+consumer with its own manifest and lockfile. Set `$render = $true` for the
+offscreen renderer example instead of the CPU-only input and simulation test.
+Use a new scratch directory for each run.
 
 ```powershell
+$render = $false
 $engine = (Get-Location).Path.Replace('\', '/')
 $consumer = Join-Path ([IO.Path]::GetTempPath()) "fate-external-smoke-$([guid]::NewGuid())"
 New-Item -ItemType Directory (Join-Path $consumer 'src') | Out-Null
-Copy-Item projects/consumer_smoke/src/main.rs (Join-Path $consumer 'src/main.rs')
+if ($render) {
+    $main = 'examples/offscreen_capture.rs'
+    $dependency = 'pollster = "1.0.1"'
+} else {
+    $main = 'projects/consumer_smoke/src/main.rs'
+    $dependency = "fate_sim = { path = `"$engine/crates/fate_sim`" }"
+}
+Copy-Item $main (Join-Path $consumer 'src/main.rs')
 Copy-Item Cargo.lock (Join-Path $consumer 'Cargo.lock')
 @"
 [package]
@@ -34,20 +44,28 @@ edition = "2024"
 
 [dependencies]
 fate_engine = { path = "$engine" }
-fate_sim = { path = "$engine/crates/fate_sim" }
+$dependency
 "@ | Set-Content (Join-Path $consumer 'Cargo.toml')
 Push-Location $consumer
 try {
     cargo locate-project --workspace
     cargo check
     if ($LASTEXITCODE -ne 0) { throw 'Standalone build failed' }
-    cargo run --locked
+    if ($render) { cargo run --locked -- wide.ppm tall.ppm }
+    else { cargo run --locked }
+    if ($LASTEXITCODE -ne 0) { throw 'Standalone smoke failed' }
 } finally {
     Pop-Location
 }
 ```
 
-The located manifest should be the scratch project's own `Cargo.toml`, and
-the program should report a pass at simulation tick 2. The first check adapts
-the copied lockfile to the new project. This verifies path dependencies without
-relying on engine workspace membership; it does not test a packaged release.
+The located manifest should be the scratch project's own `Cargo.toml`. The
+first check adapts the copied lockfile to the new project.
+
+- **Simulation:** expect a pass at tick 2, without a window, GPU, or audio.
+- **Rendering:** needs a GPU adapter but no window or display connection.
+  Expect `wide.ppm` (641×360) and `tall.ppm` (360×641), each reporting two
+  instances in one draw. Existing files are not overwritten.
+
+These runs verify path dependencies outside the workspace, not a packaged
+release or a second renderer backend.

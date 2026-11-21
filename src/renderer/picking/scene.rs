@@ -5,8 +5,8 @@ use std::sync::Arc;
 use crate::math::Mat4;
 
 use super::{
-    Bounds, BuildItem, Hierarchy, LocalTransform, MeshHit3d, PickMesh3d, PickQueryStats, PickRay3d,
-    Point, Traversal, affine_parts, bounds_entry,
+    Bounds, BuildItem, Hierarchy, LocalTransform, MeshHit3d, NodeKind, PickMesh3d, PickQueryStats,
+    PickRay3d, Point, Traversal, affine_parts, bounds_entry,
 };
 
 /// One mesh and model transform to index for CPU picking.
@@ -37,17 +37,20 @@ pub struct PickSceneStats {
 
 /// A CPU-only snapshot of pickable instances, with a world-space bounds tree.
 ///
-/// Update transforms with [`Self::refit_transforms`]. Build a new index if
+/// Update a few instances with [`Self::refit_transform`] or all instances
+/// with [`Self::refit_transforms`]. Build a new index if
 /// instance ordering, membership, or meshes change. Mesh trees are shared
 /// and are not rebuilt or copied. Queries do not allocate.
 pub struct PickScene3d {
     instances: Box<[IndexedInstance]>,
     hierarchy: Hierarchy,
+    parents: Box<[usize]>,
 }
 
 struct IndexedInstance {
     mesh: Arc<PickMesh3d>,
     transform: Option<LocalTransform>,
+    leaf: usize,
 }
 
 impl PickScene3d {
@@ -68,12 +71,62 @@ impl PickScene3d {
                     [0.0; 3]
                 },
             });
-            indexed.push(IndexedInstance { mesh, transform });
+            indexed.push(IndexedInstance {
+                mesh,
+                transform,
+                leaf: 0,
+            });
+        }
+        let hierarchy = Hierarchy::build(items, 1);
+        let mut parents = vec![0; hierarchy.nodes.len()].into_boxed_slice();
+        for (i, node) in hierarchy.nodes.iter().enumerate() {
+            match node.kind {
+                NodeKind::Leaf { start, len } => {
+                    debug_assert_eq!(len, 1);
+                    indexed[hierarchy.order[start]].leaf = i;
+                }
+                NodeKind::Branch { left, right } => {
+                    parents[left] = i;
+                    parents[right] = i;
+                }
+            }
         }
         Self {
             instances: indexed.into_boxed_slice(),
-            hierarchy: Hierarchy::build(items, 1),
+            hierarchy,
+            parents,
         }
+    }
+
+    /// Replace one transform by its original input index, touching only its
+    /// leaf and ancestors. No allocation or tree rebuild occurs.
+    ///
+    /// Returns `false` without changing the scene for an out-of-range index.
+    /// Invalid models deactivate their slot, as with [`Self::refit_transforms`].
+    /// For many simultaneous changes, a full refit can be faster.
+    pub fn refit_transform(&mut self, index: usize, model: Mat4) -> bool {
+        let Some(instance) = self.instances.get_mut(index) else {
+            return false;
+        };
+        let (transform, bounds) = place(&instance.mesh, model);
+        instance.transform = transform;
+        let nodes = &mut self.hierarchy.nodes;
+        let mut node = instance.leaf;
+        nodes[node].bounds = bounds;
+        while node != 0 {
+            node = self.parents[node];
+            let NodeKind::Branch { left, right } = nodes[node].kind else {
+                unreachable!("parent of an indexed node is a branch")
+            };
+            let mut bounds = nodes[left].bounds;
+            bounds.include(nodes[right].bounds);
+            let previous = nodes[node].bounds;
+            if bounds.min == previous.min && bounds.max == previous.max {
+                break;
+            }
+            nodes[node].bounds = bounds;
+        }
+        true
     }
 
     /// Replace every model matrix in original input order, without allocating
@@ -337,5 +390,63 @@ mod tests {
         assert!(scene.refit_transforms(&initial));
         assert_eq!(scene.intersect(ray(0.0)).unwrap().instance, 1);
         assert!(PickScene3d::new([]).refit_transforms(&[]));
+    }
+
+    #[test]
+    fn sparse_refit_matches_full_refit_after_moves_and_activation_changes() {
+        let mesh = triangle();
+        let at = |x, z| Mat4::translation(Vec3::new(x, 0.0, z));
+        let singular = Mat4::scale(Vec3::new(1.0, 1.0, 0.0));
+        let mut models = [
+            at(0.0, -4.0),
+            singular,
+            at(8.0, -4.0),
+            at(2.0, -6.0),
+            at(0.0, -8.0),
+        ];
+        let make = || {
+            PickScene3d::new(models.iter().map(|&model| PickInstance3d {
+                mesh: mesh.clone(),
+                model,
+            }))
+        };
+        let (mut sparse, mut full) = (make(), make());
+        let ray = |x| PickRay3d::new(Vec3::new(x, 0.0, 0.0), -Vec3::Z, 0.0..=30.0).unwrap();
+        assert!(!sparse.refit_transform(models.len(), singular));
+        assert_eq!(sparse.intersect(ray(0.0)).unwrap().instance, 0);
+
+        for (i, model, expected_center) in [
+            (1, at(0.0, -4.0), 0), // Exact tie preserves source order.
+            (0, at(12.0, -3.0), 1),
+            (1, singular, 4),
+            (2, at(0.0, -1.0), 2),
+        ] {
+            models[i] = model;
+            assert!(sparse.refit_transform(i, model));
+            assert!(full.refit_transforms(&models));
+            assert_eq!(
+                sparse.intersect(ray(0.0)).unwrap().instance,
+                expected_center
+            );
+            for x in [0.0, 2.0, 8.0, 12.0, -10.0] {
+                assert_eq!(
+                    sparse.intersect_with_stats(ray(x)),
+                    full.intersect_with_stats(ray(x))
+                );
+            }
+        }
+
+        // Both update paths can be mixed, and a one-leaf tree has no parents.
+        let mut single = PickScene3d::new([PickInstance3d {
+            mesh,
+            model: singular,
+        }]);
+        assert!(single.refit_transform(0, at(0.0, -4.0)));
+        assert_eq!(single.intersect(ray(0.0)).unwrap().instance, 0);
+        assert!(single.refit_transforms(&[singular]));
+        assert!(single.refit_transform(0, at(8.0, -4.0)));
+        assert!(single.intersect(ray(0.0)).is_none());
+        assert_eq!(single.intersect(ray(8.0)).unwrap().instance, 0);
+        assert!(!PickScene3d::new([]).refit_transform(0, singular));
     }
 }

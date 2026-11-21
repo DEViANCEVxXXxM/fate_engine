@@ -255,6 +255,58 @@ fn refit_bench(mesh: &Arc<PickMesh3d>, shuffle: bool) {
     );
 }
 
+fn sparse_refit_bench(mesh: &Arc<PickMesh3d>, moving: usize) {
+    let draws = instances(mesh, false);
+    let rest: Vec<_> = draws.iter().map(|draw| draw.model).collect();
+    let mut models = rest.clone();
+    let mut sparse = PickScene3d::new(draws.iter().cloned());
+    let mut full = PickScene3d::new(draws.iter().cloned());
+    let rays = Workload::GridHits.rays();
+    let mut patch = Vec::with_capacity(moving);
+    let mut sparse_times = [Duration::ZERO; BUILD_SAMPLES];
+    let mut full_times = [Duration::ZERO; BUILD_SAMPLES];
+    for frame in 0..WARMUP + BUILD_SAMPLES {
+        patch.clear();
+        for j in 0..moving {
+            let i = (j * INSTANCES / moving + SIDE / 2) % INSTANCES;
+            let mut model = rest[i];
+            model.m[12] += (frame as f32 * 0.27 + i as f32).sin() * 0.35;
+            model.m[14] += (frame as f32 * 0.31).sin() * 0.25;
+            models[i] = model;
+            patch.push((i, model));
+        }
+        let mut run_sparse = || {
+            sample(|| {
+                for &(i, model) in black_box(&patch) {
+                    assert!(sparse.refit_transform(i, model));
+                }
+            })
+        };
+        let mut run_full = || sample(|| assert!(full.refit_transforms(black_box(&models))));
+        let (sparse_time, full_time) = if frame.is_multiple_of(2) {
+            (run_sparse(), run_full())
+        } else {
+            let full_time = run_full();
+            (run_sparse(), full_time)
+        };
+        if frame >= WARMUP {
+            sparse_times[frame - WARMUP] = sparse_time;
+            full_times[frame - WARMUP] = full_time;
+            for ray in rays {
+                assert_eq!(
+                    sparse.intersect_with_stats(ray),
+                    full.intersect_with_stats(ray)
+                );
+            }
+        }
+    }
+    println!(
+        "\n{moving}/{INSTANCES} instances moving ({BUILD_SAMPLES} updates, matching hits and work):"
+    );
+    print_percentiles("sparse refit", &mut sparse_times, 1e6, "us/update");
+    print_percentiles("full refit", &mut full_times, 1e6, "us/update");
+}
+
 fn main() {
     println!("CPU picking only: no window or GPU, {INSTANCES} instances per scene");
     println!(
@@ -274,6 +326,9 @@ fn main() {
     query_bench(&overlap_scene, &overlap, Workload::Overlap);
     refit_bench(&mesh, false);
     refit_bench(&mesh, true);
+    for moving in [1, 32, 256, INSTANCES] {
+        sparse_refit_bench(&mesh, moving);
+    }
 }
 
 #[cfg(test)]
