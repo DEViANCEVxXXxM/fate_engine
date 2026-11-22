@@ -94,6 +94,20 @@ replays nine ticks with four contacts and final checksum `012dff0f522a9e58`,
 including after restoring every intermediate state. The consumer owns its
 stop policy and checkpoint format.
 
+### Step 33 — Report the contacted face and slide along it
+
+**Status: done.** `fate_sim::math::segment_aabb_hit` returns an `AabbContact`
+with the contact fraction and the outward unit normal of the first crossed
+face. The normal is zero when the segment starts on or inside the box, and
+corner ties choose the first axis in `x`, `y`, `z` order. `segment_aabb_contact`
+remains the fraction-only wrapper.
+
+The contact smoke's second trace uses the normal to stop just outside a face
+and project the rest of the tick onto the tangent plane. Nine ticks produce
+three face contacts and final checksum `e996c878c537580c`, without ending
+inside either box and with identical results after restoring every
+intermediate checkpoint. Stop and slide policy remains consumer-owned.
+
 ## Earlier work
 
 ### Step 1 — Harden ECS lifecycle and snapshot restoration

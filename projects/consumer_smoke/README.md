@@ -21,11 +21,14 @@ external project, adjust those paths relative to its own manifest.
 cargo run --release --locked -p fate_consumer_smoke --example contact_3d
 ```
 
-A scripted point actor takes nine fixed ticks around two static boxes.
-It rejects blocked movement commands, including ones whose endpoints are
-both outside a box. The fixture checks four contacts, a fixed final checksum,
-and identical results after restoring from every intermediate checkpoint.
-It is headless, and its response policy is not part of `fate_sim`.
+A scripted point actor takes nine fixed ticks around two static boxes in two
+traces. One rejects blocked movement commands, including ones whose endpoints
+are both outside a box. The other uses the `segment_aabb_hit` face normal to
+stop just outside a surface and spend the rest of the tick on its tangent
+plane. The fixture checks each trace's contact count and final checksum, that
+no intermediate position is inside a box, and identical results after
+restoring from every checkpoint. It is headless, and its response policy is
+not part of `fate_sim`.
 
 ## Verify outside the workspace
 

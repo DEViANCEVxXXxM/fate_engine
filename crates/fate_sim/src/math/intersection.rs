@@ -67,33 +67,79 @@ pub fn segment_sphere_contact(
     entry.or_else(|| ((center - end).length_squared() <= radius_squared).then_some(Fixed::ONE))
 }
 
+/// First contact of a closed segment with an axis-aligned box, with the face
+/// normal of the first crossing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AabbContact {
+    /// Fraction along the segment (`0..=1`), rounded down to Q32.32.
+    pub fraction: Fixed,
+    /// Outward unit normal of the crossed face, as an axis vector. It is zero
+    /// when the segment starts on or inside the box. Corner and edge ties
+    /// choose the first axis in `x`, `y`, `z` order.
+    pub normal: FixedVec3,
+}
+
 /// First contact of a closed segment with an axis-aligned box.
 ///
-/// Pass the box's minimum and maximum corners in world space. Reversed
-/// bounds on any axis return `None`. Touching a face, edge, or corner counts;
-/// a start on or inside the box returns zero, even for a stationary segment.
-///
-/// The result is the fraction along the segment (`0..=1`), rounded down to
-/// Q32.32. Hit/miss is decided before rounding, over the full endpoint range
-/// of `Fixed`. The result is a geometric query, not a collision response.
+/// This is the fraction-only form of [`segment_aabb_hit`]; use that function
+/// when a consumer needs the face direction.
 pub fn segment_aabb_contact(
     start: FixedVec3,
     end: FixedVec3,
     min: FixedVec3,
     max: FixedVec3,
 ) -> Option<Fixed> {
-    let mut entry = (0, 1);
-    let mut exit = (1, 1);
-    for (start, end, min, max) in [
-        (start.x, end.x, min.x, max.x),
-        (start.y, end.y, min.y, max.y),
-        (start.z, end.z, min.z, max.z),
-    ] {
+    segment_aabb_hit(start, end, min, max).map(|hit| hit.fraction)
+}
+
+/// First contact of a closed segment with an axis-aligned box, including the
+/// crossed face normal.
+///
+/// Pass the box's minimum and maximum corners in world space. Reversed
+/// bounds on any axis return `None`. Touching a face, edge, or corner counts;
+/// a start on or inside the box returns fraction zero with a zero normal,
+/// even for a stationary segment.
+///
+/// The fraction is rounded down to Q32.32. Hit/miss is decided before
+/// rounding, over the full endpoint range of `Fixed`. The result is a
+/// geometric query, not a collision response.
+pub fn segment_aabb_hit(
+    start: FixedVec3,
+    end: FixedVec3,
+    min: FixedVec3,
+    max: FixedVec3,
+) -> Option<AabbContact> {
+    for (min, max) in [(min.x, max.x), (min.y, max.y), (min.z, max.z)] {
         if min > max {
             return None;
         }
+    }
+    // Starting on or inside the box has no first-crossing face to report.
+    let inside = |value: Fixed, min: Fixed, max: Fixed| min <= value && value <= max;
+    if inside(start.x, min.x, max.x)
+        && inside(start.y, min.y, max.y)
+        && inside(start.z, min.z, max.z)
+    {
+        return Some(AabbContact {
+            fraction: Fixed::ZERO,
+            normal: FixedVec3::ZERO,
+        });
+    }
+
+    let mut entry = (0, 1);
+    let mut exit = (1, 1);
+    let mut face = (0, false);
+    for (axis, (start, end, min, max)) in [
+        (start.x, end.x, min.x, max.x),
+        (start.y, end.y, min.y, max.y),
+        (start.z, end.z, min.z, max.z),
+    ]
+    .into_iter()
+    .enumerate()
+    {
         let raw = |value: Fixed| i128::from(value.raw());
-        let (start, end, min, max) = if start > end {
+        let flipped = start > end;
+        let (start, end, min, max) = if flipped {
             (-raw(start), -raw(end), -raw(max), -raw(min))
         } else {
             (raw(start), raw(end), raw(min), raw(max))
@@ -111,6 +157,9 @@ pub fn segment_aabb_contact(
         let axis_exit = ((max.min(end) - start) as u64, length);
         if fraction_lt(entry, axis_entry) {
             entry = axis_entry;
+            // Entering through the minimum face is a negative normal; a
+            // flipped axis enters through the original maximum face.
+            face = (axis, flipped);
         }
         if fraction_lt(axis_exit, exit) {
             exit = axis_exit;
@@ -121,7 +170,17 @@ pub fn segment_aabb_contact(
     }
     let (num, den) = entry;
     let raw = u128::from(num) * Fixed::ONE.raw() as u128 / u128::from(den);
-    Some(Fixed::from_raw(raw as i64))
+    let sign = if face.1 { Fixed::ONE } else { -Fixed::ONE };
+    let mut normal = FixedVec3::ZERO;
+    match face.0 {
+        0 => normal.x = sign,
+        1 => normal.y = sign,
+        _ => normal.z = sign,
+    }
+    Some(AabbContact {
+        fraction: Fixed::from_raw(raw as i64),
+        normal,
+    })
 }
 
 fn fraction_lt((a, b): (u64, u64), (c, d): (u64, u64)) -> bool {
@@ -172,6 +231,76 @@ mod tests {
         assert_eq!(
             segment_aabb_contact(v(0, 0, 0), v(4, 2, 2), v(2, 1, 1), v(2, 1, 1)),
             Some(Fixed::from_ratio(1, 2))
+        );
+    }
+
+    #[test]
+    fn box_hit_reports_the_face_normal_of_the_first_crossing() {
+        let min = v(2, -1, -1);
+        let max = v(3, 1, 1);
+        let hit = |start, end| segment_aabb_hit(start, end, min, max).unwrap();
+        assert_eq!(
+            hit(v(0, 0, 0), v(4, 0, 0)),
+            AabbContact {
+                fraction: Fixed::from_ratio(1, 2),
+                normal: v(-1, 0, 0)
+            }
+        );
+        assert_eq!(
+            hit(v(5, 0, 0), v(1, 0, 0)),
+            AabbContact {
+                fraction: Fixed::from_ratio(1, 2),
+                normal: v(1, 0, 0)
+            }
+        );
+        assert_eq!(
+            hit(v(2, -3, 0), v(2, 3, 0)),
+            AabbContact {
+                fraction: Fixed::from_ratio(1, 3),
+                normal: v(0, -1, 0)
+            }
+        );
+        assert_eq!(
+            hit(v(2, 3, 0), v(2, -3, 0)),
+            AabbContact {
+                fraction: Fixed::from_ratio(1, 3),
+                normal: v(0, 1, 0)
+            }
+        );
+        assert_eq!(
+            hit(v(2, 0, -3), v(2, 0, 3)),
+            AabbContact {
+                fraction: Fixed::from_ratio(1, 3),
+                normal: v(0, 0, -1)
+            }
+        );
+        // A corner tie resolves to the first axis.
+        assert_eq!(
+            segment_aabb_hit(v(0, 0, 0), v(4, 4, 0), v(2, 2, 0), v(3, 3, 1)),
+            Some(AabbContact {
+                fraction: Fixed::from_ratio(1, 2),
+                normal: v(-1, 0, 0)
+            })
+        );
+        // Starting on or inside the box has no first-crossing face.
+        assert_eq!(
+            hit(v(2, 0, 0), v(4, 0, 0)),
+            AabbContact {
+                fraction: Fixed::ZERO,
+                normal: FixedVec3::ZERO
+            }
+        );
+        assert_eq!(
+            hit(v(2, 1, 1), v(2, 1, 1)),
+            AabbContact {
+                fraction: Fixed::ZERO,
+                normal: FixedVec3::ZERO
+            }
+        );
+        assert_eq!(segment_aabb_hit(v(0, 0, 0), v(4, 0, 0), max, min), None);
+        assert_eq!(
+            segment_aabb_contact(v(0, 0, 0), v(4, 0, 0), min, max),
+            Some(hit(v(0, 0, 0), v(4, 0, 0)).fraction)
         );
     }
 

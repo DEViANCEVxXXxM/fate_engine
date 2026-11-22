@@ -438,13 +438,17 @@ its orthonormal basis (`forward()`, `right()`, `up()`, `basis()`) and separate
 segment against an axis-aligned box. It returns a Q32.32 fraction in `0..=1`
 rounded down; hit or miss is decided before rounding. Touching counts,
 and starting on or inside the box returns zero. Reversed bounds return
-`None`.
+`None`. `segment_aabb_hit` returns the same fraction plus an `AabbContact`;
+its `normal` is the outward unit axis of the crossed face, or zero when the
+segment starts on or inside the box. Corner and edge ties choose the first
+axis in `x`, `y`, `z` order.
 
-This query detects crossings between ticks but does not move objects,
-resolve overlaps, or slide along surfaces. Choose a response in the
-consumer. The [3D contact smoke](../projects/consumer_smoke/#fixed-point-3d-contact-smoke)
-rejects a whole movement command on contact and verifies replay and restore
-without initializing a window, GPU, or audio device.
+These queries detect crossings between ticks but do not move objects,
+resolve overlaps, or choose a slide response. The
+[3D contact smoke](../projects/consumer_smoke/#fixed-point-3d-contact-smoke)
+rejects blocked commands in one trace and uses the face normal to stop at
+the contact and slide along the tangent plane in another. Both verify replay
+and restore without initializing a window, GPU, or audio device.
 
 ### Deterministic randomness
 
