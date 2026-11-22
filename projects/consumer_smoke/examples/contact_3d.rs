@@ -1,6 +1,8 @@
 //! Scripted fixed-tick point actor against static boxes. No device initialization.
 
-use fate_sim::math::{Fixed as F, FixedVec3 as V, segment_aabb_contact, segment_aabb_hit};
+use fate_sim::math::{
+    Fixed as F, FixedVec3 as V, point_aabb_separation, segment_aabb_contact, segment_aabb_hit,
+};
 use fate_sim::{StateHasher, StateWriter};
 
 const fn v(x: i64, y: i64, z: i64) -> V {
@@ -19,6 +21,8 @@ const COMMANDS: [V; 9] = [
     v(-6, 0, 0),
     v(1, 0, 0),
 ];
+const OVERLAP_START: V = V::new(F::from_ratio(5, 2), F::ZERO, F::ZERO);
+const OVERLAP_COMMANDS: [V; 3] = [v(0, 0, 3), v(-4, 0, 0), v(0, 0, -6)];
 const SLIDE_COMMANDS: [V; 9] = [
     v(4, 0, 2),
     v(0, 0, -2),
@@ -93,6 +97,16 @@ impl Actor {
         }
         self.tick += 1;
         first
+    }
+
+    fn separate(&mut self) -> Option<(V, F)> {
+        let face = BOXES
+            .into_iter()
+            .filter_map(|(min, max)| point_aabb_separation(self.position, min, max))
+            .max_by_key(|face| face.depth)?;
+        // Step one raw unit past the face so the next sweep starts outside.
+        self.position += face.normal * (face.depth + F::from_raw(1));
+        Some((face.normal, face.depth))
     }
 
     fn checkpoint(self) -> [u8; 40] {
@@ -223,9 +237,57 @@ fn verify_slide() -> Actor {
     final_actor
 }
 
+fn run_overlap(mut actor: Actor) -> Vec<(Actor, Option<V>)> {
+    OVERLAP_COMMANDS[actor.tick as usize..]
+        .iter()
+        .map(|&delta| {
+            let normal = actor.step_slide(delta);
+            (actor, normal)
+        })
+        .collect()
+}
+
+fn verify_overlap() -> Actor {
+    let mut actor = Actor {
+        position: OVERLAP_START,
+        ..Actor::default()
+    };
+    assert_eq!(actor.separate(), Some((v(-1, 0, 0), F::from_ratio(1, 2))));
+    let baseline = run_overlap(actor);
+    assert_eq!(baseline, run_overlap(Actor::restore(actor.checkpoint())));
+    for (i, &(state, _)) in baseline.iter().enumerate() {
+        assert_eq!(
+            run_overlap(Actor::restore(state.checkpoint())),
+            baseline[i + 1..]
+        );
+    }
+    for &(state, _) in &baseline {
+        for (min, max) in BOXES {
+            let inside = |value: F, min: F, max: F| min < value && value < max;
+            assert!(
+                !(inside(state.position.x, min.x, max.x)
+                    && inside(state.position.y, min.y, max.y)
+                    && inside(state.position.z, min.z, max.z)),
+                "tick {} ended inside {min:?}..{max:?}",
+                state.tick
+            );
+        }
+    }
+    assert!(baseline.iter().all(|(_, normal)| normal.is_none()));
+    let final_actor = baseline.last().unwrap().0;
+    assert_eq!(final_actor.tick, 3);
+    assert_eq!(final_actor.contacts, 0);
+    assert_eq!(final_actor.position.y, F::ZERO);
+    assert_eq!(final_actor.position.z, F::from_int(-3));
+    assert_eq!(final_actor.position.x, F::from_int(-2) - F::from_raw(1));
+    assert_eq!(final_actor.checksum(), 0xf484_538c_f687_5c3a);
+    final_actor
+}
+
 fn main() {
     let actor = verify();
     let slid = verify_slide();
+    let overlap = verify_overlap();
     println!(
         "3D contact smoke: {} ticks, {} contacts, final checksum {:016x}",
         actor.tick,
@@ -238,10 +300,16 @@ fn main() {
         slid.contacts,
         slid.checksum()
     );
+    println!(
+        "3D overlap smoke: 1 separation, {} ticks, final checksum {:016x}",
+        overlap.tick,
+        overlap.checksum()
+    );
 }
 
 #[test]
 fn scripted_3d_contacts_replay_and_restore() {
     verify();
     verify_slide();
+    verify_overlap();
 }

@@ -443,12 +443,20 @@ its `normal` is the outward unit axis of the crossed face, or zero when the
 segment starts on or inside the box. Corner and edge ties choose the first
 axis in `x`, `y`, `z` order.
 
+`point_aabb_separation(point, min, max)` handles a point that is already on
+or inside a box. It returns the nearest exit face as an outward normal and a
+non-negative depth, or `None` when the point is outside. Ties prefer the
+minimum face, then the first axis in `x`, `y`, `z` order. Use it for
+deterministic spawn correction, not for moving a point that is already
+clear.
+
 These queries detect crossings between ticks but do not move objects,
 resolve overlaps, or choose a slide response. The
 [3D contact smoke](../projects/consumer_smoke/#fixed-point-3d-contact-smoke)
-rejects blocked commands in one trace and uses the face normal to stop at
-the contact and slide along the tangent plane in another. Both verify replay
-and restore without initializing a window, GPU, or audio device.
+rejects blocked commands in one trace, uses the face normal to stop at the
+contact and slide along the tangent plane in another, and resolves a
+spawn-inside-box case in a third. All verify replay and restore without
+initializing a window, GPU, or audio device.
 
 ### Deterministic randomness
 

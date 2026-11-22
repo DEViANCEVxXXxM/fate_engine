@@ -108,6 +108,20 @@ three face contacts and final checksum `e996c878c537580c`, without ending
 inside either box and with identical results after restoring every
 intermediate checkpoint. Stop and slide policy remains consumer-owned.
 
+### Step 34 — Separate a point that starts inside a box
+
+**Status: done.** `fate_sim::math::point_aabb_separation` returns the nearest
+exit face as an outward normal and depth, or `None` when the point is
+outside. It fills the gap left by the sweep query, which reports no face for
+a start on or inside a box. Ties prefer the minimum face, then the first axis
+in `x`, `y`, `z` order; unit tests cover interior, surface, corner, and
+reversed-bound cases.
+
+The contact smoke's third trace starts at `(2.5, 0, 0)` inside a box, resolves
+to the `-x` face with depth `1/2`, then runs three free ticks. Final checksum
+`f484538cf6875c3a` is identical after restoring every checkpoint, and no
+position ends inside a box. The consumer owns the correction policy.
+
 ## Earlier work
 
 ### Step 1 — Harden ECS lifecycle and snapshot restoration

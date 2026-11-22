@@ -79,6 +79,15 @@ pub struct AabbContact {
     pub normal: FixedVec3,
 }
 
+/// Nearest exit face for a point that is on or inside an axis-aligned box.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AabbFace {
+    /// Outward unit normal of the nearest face, as an axis vector.
+    pub normal: FixedVec3,
+    /// Distance from the point to that face. Zero on the surface.
+    pub depth: Fixed,
+}
+
 /// First contact of a closed segment with an axis-aligned box.
 ///
 /// This is the fraction-only form of [`segment_aabb_hit`]; use that function
@@ -181,6 +190,49 @@ pub fn segment_aabb_hit(
         fraction: Fixed::from_raw(raw as i64),
         normal,
     })
+}
+
+/// Nearest face to move a point out of an axis-aligned box.
+///
+/// Returns `None` when the point is outside the box or the bounds are
+/// reversed. A point on the surface returns that face with zero depth.
+/// Ties prefer the minimum face, then the first axis in `x`, `y`, `z` order.
+/// The result is a direction and distance, not a resolved position or a
+/// collision response.
+pub fn point_aabb_separation(point: FixedVec3, min: FixedVec3, max: FixedVec3) -> Option<AabbFace> {
+    for (min, max) in [(min.x, max.x), (min.y, max.y), (min.z, max.z)] {
+        if min > max {
+            return None;
+        }
+    }
+    let axes = [
+        (point.x, min.x, max.x),
+        (point.y, min.y, max.y),
+        (point.z, min.z, max.z),
+    ];
+    if axes
+        .iter()
+        .any(|&(value, min, max)| value < min || value > max)
+    {
+        return None;
+    }
+    let mut best: Option<(Fixed, usize, bool)> = None;
+    for (axis, &(value, min, max)) in axes.iter().enumerate() {
+        for (flipped, depth) in [(false, value - min), (true, max - value)] {
+            if best.is_none_or(|(closest, _, _)| depth < closest) {
+                best = Some((depth, axis, flipped));
+            }
+        }
+    }
+    let (depth, axis, flipped) = best.expect("a point inside an axis-aligned box has a face");
+    let sign = if flipped { Fixed::ONE } else { -Fixed::ONE };
+    let mut normal = FixedVec3::ZERO;
+    match axis {
+        0 => normal.x = sign,
+        1 => normal.y = sign,
+        _ => normal.z = sign,
+    }
+    Some(AabbFace { normal, depth })
 }
 
 fn fraction_lt((a, b): (u64, u64), (c, d): (u64, u64)) -> bool {
@@ -302,6 +354,63 @@ mod tests {
             segment_aabb_contact(v(0, 0, 0), v(4, 0, 0), min, max),
             Some(hit(v(0, 0, 0), v(4, 0, 0)).fraction)
         );
+    }
+
+    #[test]
+    fn separation_chooses_the_nearest_face_deterministically() {
+        let min = v(2, -1, -1);
+        let max = v(3, 1, 1);
+        let face = |point| point_aabb_separation(point, min, max);
+        assert_eq!(face(v(5, 0, 0)), None);
+        assert_eq!(
+            face(FixedVec3::new(
+                Fixed::from_ratio(5, 2),
+                Fixed::ZERO,
+                Fixed::ZERO
+            )),
+            Some(AabbFace {
+                normal: v(-1, 0, 0),
+                depth: Fixed::from_ratio(1, 2)
+            })
+        );
+        assert_eq!(
+            face(v(2, 0, 0)),
+            Some(AabbFace {
+                normal: v(-1, 0, 0),
+                depth: Fixed::ZERO
+            })
+        );
+        assert_eq!(
+            face(FixedVec3::new(
+                Fixed::from_ratio(5, 2),
+                Fixed::ZERO,
+                Fixed::ONE
+            )),
+            Some(AabbFace {
+                normal: v(0, 0, 1),
+                depth: Fixed::ZERO
+            })
+        );
+        assert_eq!(
+            face(FixedVec3::new(
+                Fixed::from_ratio(5, 2),
+                Fixed::from_ratio(3, 4),
+                Fixed::ZERO
+            )),
+            Some(AabbFace {
+                normal: v(0, 1, 0),
+                depth: Fixed::from_ratio(1, 4)
+            })
+        );
+        // A corner tie prefers the minimum face of the first axis.
+        assert_eq!(
+            face(v(2, -1, 0)),
+            Some(AabbFace {
+                normal: v(-1, 0, 0),
+                depth: Fixed::ZERO
+            })
+        );
+        assert_eq!(point_aabb_separation(v(0, 0, 0), max, min), None);
     }
 
     #[test]

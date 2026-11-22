@@ -50,9 +50,10 @@ surface lifecycle smoke, and Polygon’s 120-frame live smoke also passed.
 
 ## Next engine milestone
 
-The [contact milestone](implementation-history.md#step-32--verify-deterministic-3d-contact)
-and its [face-normal follow-up](implementation-history.md#step-33--report-the-contacted-face-and-slide-along-it)
-are complete. They established fixed-point segment-versus-box queries, not a
+The [contact milestone](implementation-history.md#step-32--verify-deterministic-3d-contact),
+its [face-normal follow-up](implementation-history.md#step-33--report-the-contacted-face-and-slide-along-it),
+and [spawn-overlap resolution](implementation-history.md#step-34--separate-a-point-that-starts-inside-a-box)
+are complete. They established fixed-point point-versus-box queries, not a
 physics module or controller API.
 
 Choose the next interaction in a consumer before adding another engine
